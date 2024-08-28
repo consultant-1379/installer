@@ -1,0 +1,131 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2015 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : MovedFailedLoaderFile.bsh
+# Purpose : This script will move the failed files of loader to raw direcotry. 
+# Usage   : bash ./MovedFailedLoaderFile.bsh
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# ********************************************************************
+#
+#   Command Section
+#
+# ********************************************************************
+. /eniq/home/dcuser/.profile
+
+
+if [ -z "${CONF_DIR}" ] ; then
+  echo "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  echo "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 2
+fi
+
+. ${CONF_DIR}/niq.rc
+
+if [ -z "${BIN_DIR}" ] ; then
+  echo "ERROR: BIN_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+TODAY=`${DATE} +'%Y-%m-%d'`
+
+ENIQ_CONF_DIR=/eniq/installation/config
+STORAGE_TYPE=`$CAT ${ENIQ_CONF_DIR}/san_details | $GREP STORAGE_TYPE | $NAWK -F= '{print $2}'`
+
+#--------------------------------------------------------------------------
+# Main program
+#--------------------------------------------------------------------------
+
+#Handling log directory and log file.
+LOG_DIR=/eniq/log/sw_log/engine
+if [ ! -d $LOG_DIR ]; then
+	$ECHO "ERROR - $LOG_DIR not found. Aborting script. " 
+	exit 3
+fi
+LOG_FILE=$LOG_DIR/failed_loader_file`$DATE '+%Y-%m-%d'`.log
+NOW=`$DATE '+%Y-%m-%d_%H.%M.%S'`
+$ECHO "$NOW - FailedLoaderFileHandler started. " >> $LOG_FILE
+
+#Handling temp directory
+TEMP_DIR=/var/tmp/loader_failed_file.$$.$$
+if [ -d $TEMP_DIR ]; then
+	$RM -rf $TEMP_DIR
+fi
+$MKDIR -p $TEMP_DIR
+if [ $? -ne 0 ]; then
+	$ECHO "ERROR : Couldn't create temp directory." >> $LOG_FILE
+	exit 2
+fi
+
+FAILED_DIR_LIST=$TEMP_DIR/dir_list.txt
+FILES=$TEMP_DIR/bulk_cm_mos.txt
+
+if [ $STORAGE_TYPE == 'raw' ]; then
+        ETLDATA=/eniq/data/etldata_/
+elif [ $STORAGE_TYPE == 'fs' ]; then
+        ETLDATA=/eniq/data/etldata/
+else
+        $ECHO "Storage type not found. Exiting... " >> $LOG_FILE
+        exit 1
+fi
+
+$FIND $ETLDATA -type d | $GREP dc_e_ | $GREP failed > $FAILED_DIR_LIST
+for failed_dir in `$CAT $FAILED_DIR_LIST`; do
+   folder_name=`$ECHO $failed_dir | $AWK -F"/failed" '{print $1}' | $AWK -F"/" '{print $(NF)}'`
+	echo  $folder_name
+        for failed_file in `$LS $failed_dir | $GREP $TODAY | $GREP -v .zip`; do
+                base_dir=`$ECHO $failed_dir | $NAWK -F"/failed" '{print $1}'`
+                raw_dir=$base_dir/raw
+				NOW=`$DATE '+%Y-%m-%d_%H.%M.%S'`
+				$ECHO "$NOW - Moving $failed_dir/$failed_file to $raw_dir." >> $LOG_FILE
+				$MV $failed_dir/$failed_file $raw_dir
+				if [ $? -ne 0 ]; then
+						NOW=`$DATE '+%Y-%m-%d_%H.%M.%S'`
+						$ECHO "$NOW - ERROR : Couldn't move $failed_dir/$failed_file to $raw_dir." >> $LOG_FILE
+				else                                   
+                     if [[ $folder_name == *"dc_e_bulk_cm"* ]]; then                                      
+                             echo $folder_name >> $FILES                                                                         
+                        fi			
+				fi
+        done
+done
+
+distinct_value=$($CAT $FILES|sort|uniq)
+
+for i in `echo $distinct_value`;
+ do
+    engine -e startSet DC_E_BULK_CM Loader_$i
+done
+  
+#Clean up
+if [ -d $TEMP_DIR ]; then
+	$RM -rf $TEMP_DIR
+fi
+
+NOW=`$DATE '+%Y-%m-%d_%H.%M.%S'`
+$ECHO "$NOW - FailedLoaderFileHandler Ended. " >> $LOG_FILE
+
+exit 0
+

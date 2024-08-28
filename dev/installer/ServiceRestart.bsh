@@ -1,0 +1,160 @@
+#!/usr/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : ServiceRestart.bsh
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : This Script to Restart Service
+# Usage   : ServiceRestart.bsh
+# ********************************************************************
+. /eniq/home/dcuser/.profile
+
+# Source the common variables for RHEL
+if [ -z "${CONF_DIR}" ] ; then
+  echo "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  echo "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 2
+fi
+
+. ${CONF_DIR}/niq.rc
+
+if [ -z "${BIN_DIR}" ] ; then
+  echo "ERROR: BIN_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+	$ECHO "Could not find /eniq/admin/lib/common_functions.lib"
+	exit 5
+fi
+
+LOGFILE="/eniq/log/sw_log/engine/service`$DATE '+%Y-%m-%d'`.log"
+
+EchoText() {
+   $ECHO $*
+   $ECHO -e `$DATE '+%Y-%m-%d %H:%M:%S': ` $* >> ${LOGFILE}
+}
+
+# Arguments:
+#       $1 - Error message from part of program (Not always used)
+# Return Values:
+#       none
+abort_script()
+{
+if [ "$1" ]; then
+    _err_msg_=$1
+else
+    _err_msg_="ERROR : Script aborted.......\n"    
+fi
+$ECHO "\nERROR : $_err_msg_\n" | $TEE -a ${LOGFILE}
+
+if [ "$2" ]; then
+    ${2}
+else
+   exit 1
+fi
+}
+# Base Directory
+ENIQ_BASE_DIR=/eniq
+
+# Configuration file
+SUNOS_INI=SunOS.ini
+
+# ENIQ Install Config Directory
+ENIQ_CONF_DIR=${ENIQ_BASE_DIR}/installation/config
+
+# Get the System User/Group. All directories are owned by this
+SYSUSER=`$CAT $ENIQ_CONF_DIR/$SUNOS_INI| $GREP  -i  ENIQ_SYSUSER| $NAWK -F'=' '{print $2}'`
+
+if [ ! "${SYSUSER}" ]; then
+    _err_msg_="Could not read param SYSUSER from\n${ENIQ_CONF_DIR}/${SUNOS_INI}"
+    abort_script "$_err_msg_"
+fi
+
+#Check and abort script if more than one instance of script is running
+status=`$PS -aef | $GREP $0 | $GREP -v grep | $WC -l`
+echo $status
+if [ $status -gt 2 ]; then
+    EchoText "ServiceRestart.bsh  : $status processes already running.Exiting..." >> ${LOGFILE}
+    exit 7
+fi
+
+### Function: stop_start_service_sysuser ###
+#
+# Stop/Start the required service as sysuser the required files
+#
+# Arguments:
+#	$1 : Service name
+#	$2 : Service action
+# Return Values:
+#	none
+stop_start_service_sysuser()
+{
+
+ssh ${SYSUSER}@${1}  ". ~/.profile; ${1} ${2}" | $TEE -a ${LOGFILE}
+
+if [  ${PIPESTATUS[0]} -ne 0 ]; then
+    _err_msg_="Could not ${2} ${1} service"
+    abort_script "$_err_msg_"
+fi
+}
+
+# Restart services only if  upgrade stage file does not exists
+
+if [[  -e "/eniq/installation/core_install/etc/current_upgrade_stage" ]] || [[  -e "/eniq/installation/core_install/etc/current_upgrade_platform_only_stage" ]] || [[ -e "/eniq/installation/core_install/etc/current_upgrade_feature_only_stage" ]] ; then
+echo "It is an upgrade. so restart of engine and scheduler does not occur automatically"
+else
+engine_active=`ssh dcuser@engine  ". ~/.profile; engine status" | $GREP -i "engine is running OK"`
+ if [[ "$engine_active" ]] ; then
+	EchoText "Restarting Engine" >> ${LOGFILE}
+	stop_start_service_sysuser engine restart
+	sleep 120
+	scheduler_hold=`ssh dcuser@scheduler  ". ~/.profile; scheduler status" | $GREP -i "hold"`
+   if [[ "$scheduler_hold" ]] ; then
+		EchoText "Since scheduler status is not active, restarting scheduler..."
+		stop_start_service_sysuser scheduler restart
+	else
+		EchoText "Engine restarted."
+	fi
+
+fi
+fi
+#EchoText "Stopping scheduler" >> ${LOGFILE}
+#stop_start_service_sysuser scheduler stop
+#EchoText "Stopping engine" >> ${LOGFILE}
+#stop_start_service_sysuser engine stop
+#stop_start_service_sysuser repdb stop
+#sleep 120
+#stop_start_service_sysuser repdb start
+#EchoText "Starting engine" >> ${LOGFILE}
+#stop_start_service_sysuser engine start
+#EchoText "Starting scheduler" >> ${LOGFILE}
+#sleep 60
+#stop_start_service_sysuser scheduler start
+#fi  																								  
+   

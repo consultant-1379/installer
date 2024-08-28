@@ -1,0 +1,174 @@
+#! /usr/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : extract_report_packages.bsh
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : Ericsson Network IQ report package extractor.
+# Usage   : extract_report_package [srcdir] [dstdir]
+# Author: Carl-Magnus Björkell
+# ********************************************************************
+TEE=/usr/bin/tee
+
+TIMESTAMP=`date +%Y-%m-%d`
+LOGPATH=/eniq/log/sw_log/tp_installer
+LOGFILE=${LOGPATH}/${TIMESTAMP}_ReportExtraction.log
+ENIQ_Version=/eniq/admin/version/eniq_status
+BO_UNIVERSE=/eniq/sw/installer/bouniverses
+VER=`cat $ENIQ_Version | grep -Eo '[0-9]+([.][0-9]+)?' | head -1`
+VER2="19.0"
+
+usage() {
+	echo "usage: $0 [srcdir] [dstdir]"
+	echo " srcdir: The dir that contains the deflated report packages"
+	echo " dstdir: The dir to which the report packages will be extracted"
+}
+echo "---------------------------Report extraction starts at `date '+%y.%m.%d_%H:%M:%S'` --------------------------------------" |$TEE -a ${LOGFILE}
+
+. $HOME/.profile
+# Set the default directories.
+SRC=/eniq/sw/installer/boreports/temp
+DST=/eniq/sw/installer/boreports
+INST_DIR=/eniq/sw/installer/
+
+
+# With the help of the first argument, the source directory can be specified.
+# $2 (if specified) will denote the destination directory. 
+if [ $# -gt 0 ]; then
+	if [ "$1" = "-h" ] || [ "$1" = "-help" ]; then
+		usage
+		exit 0
+	fi
+	SRC=$1
+fi
+
+if [ $# -gt 1 ]; then
+	DST=$2
+fi
+
+# export the variables so that they can be used by ANT.
+export DST
+export SRC
+
+if [ -z "$CONF_DIR" ] ; then
+    echo "Environment variable CONF_DIR is not set or empty. Tech pack installation aborted." | $TEE -a ${LOGFILE}
+    exit 48
+fi
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  echo "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc" | $TEE -a ${LOGFILE}
+  exit 22
+fi
+
+. ${CONF_DIR}/niq.rc
+
+if [ -z "$PLATFORM_DIR" ] ; then
+    echo "Environment variable PLATFORM_DIR is not set or empty. Report pack installation aborted." | $TEE -a ${LOGFILE}
+    exit 23
+fi
+
+if [ ! -d ${DST} ] ; then
+	echo "The destination directory ${DST} does not exist. Extraction aborted." | $TEE -a ${LOGFILE}
+	exit 2
+fi
+
+if [ ! -d ${SRC} ] ; then
+	echo "The source directory ${SRC} does not exist. Extraction aborted." | $TEE -a ${LOGFILE}
+	exit 3
+fi
+
+if [ -z "$INSTALLER_DIR" ] ; then
+    echo "Environment variable INSTALLER_DIR is not set or empty. Report pack installation aborted." | $TEE -a ${LOGFILE}
+    exit 24
+fi
+
+CPATH="${INSTALLER_DIR}/lib/installer.jar"
+INSTALLER_JARPATH="${CPATH}"
+
+if [ ! -r "${CPATH}" ] ; then
+  echo "ERROR: Jar file "installer.jar" is not readable at ${CPATH}" | $TEE -a ${LOGFILE}
+  exit 27
+fi
+
+DIRS=`ls ${PLATFORM_DIR}`
+
+for file in $DIRS
+do
+  if [ -d ${PLATFORM_DIR}/$file/dclib ] ; then
+    JARS=`ls ${PLATFORM_DIR}/$file/dclib/*.jar`
+
+    for jar in $JARS
+    do
+      CPATH="${CPATH}:${jar}"
+    done
+  fi
+done
+cd boreports
+rm -rf 19089-CXC*
+cd ..
+echo "Starting to extract report packages."
+
+if [ ! -x "${RT_DIR}/ant/bin/ant" ] ; then
+	echo "ANT was not found in ${RT_DIR}/ant/bin/ant. Tech pack installation aborted." | $TEE -a ${LOGFILE}
+	exit 34
+	#Remove the locking file
+    rm ${LOCK_FILE}
+fi
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+ANT_OPTS="$ANT_OPTS $PF_ANT_OPTS" 
+export ANT_OPTS 
+
+${RT_DIR}/ant/bin/ant -f ${INST_DIR}/tasks_extract_reportpacks.xml -lib ${CPATH} > /tmp/extractresult 2>&1
+
+cat /tmp/extractresult | $TEE -a ${LOGFILE}
+
+if [ -f /tmp/extractresult ] ; then
+  SUC=`cat /tmp/extractresult | grep "BUILD SUCCESSFUL"`
+  if [ -z "${SUC}" ] ; then
+    cat /tmp/extractresult
+    echo "Error in extract. Extraction failed." | $TEE -a ${LOGFILE}
+    exit 36
+  fi
+fi
+
+if [[ $VER < $VER2 ]]; then
+	echo "This server is 18.2 version." >> ${LOGFILE}
+	for file in "$BO_UNIVERSE"/*;
+	do
+		unv=$file/unv
+		num=`ls -l $unv | egrep -c '^-'`
+		if [ "$num" -eq "2" ]; then
+			rm "$unv/`ls $unv | grep -i '_new'`"
+			fname="`ls $unv`"
+			mv "$unv/$fname" "$unv/`echo $fname | sed 's/_old//'`"
+		fi 
+	done
+else
+    for file in "$BO_UNIVERSE"/*;
+	do
+		unv=$file/unv
+		num=`ls -l $unv | egrep -c '^-'`
+		if [ "$num" -eq "2" ]; then
+			rm "$unv/`ls $unv | grep -iv '_new'`"
+			fname="`ls $unv`"
+			mv "$unv/$fname" "$unv/`echo $fname | sed 's/_new//'`"
+		fi
+	done
+fi
+
+echo "---------------------------Report extraction ends at `date '+%y.%m.%d_%H:%M:%S'` --------------------------------------" |$TEE -a ${LOGFILE}

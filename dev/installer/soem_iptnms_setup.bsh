@@ -1,0 +1,770 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : soem_iptnms_setup.bsh
+# Date    : 17/12/2018
+# Purpose : To make a SSH connection between ENIQ and SO-EM/IPTNMS server
+#           and download the topology files. 
+#
+# Usage   : soem_iptnms_setup.bsh start|stop
+#
+# ********************************************************************
+#
+#       Configuration Section
+#
+# ********************************************************************
+
+SOEM_REF_NAME_FILE=".soem_ref_name_file"
+TOPOLOGY_CONFIG_FILE="soem_iptnms_config.ini"
+DOWNLOAD_SCRIPT="soem_iptnms_import.bsh"
+COMMON_FUN="common_functions.lib"
+COMMON_VARIABLES="common_variables.lib"
+HOST_FILE=/etc/hosts
+USER=`/usr/bin/id -u -n`
+HOMEDIR=`/usr/bin/echo ~`
+
+# ********************************************************************
+#
+#   Functions
+#
+# ********************************************************************
+### Function: abort_script ###
+#
+#   This will is called if the script is aborted thru an error
+#   error signal sent by the kernel such as CTRL-C or if a serious
+#   error is encountered during runtime
+#
+# Arguments:
+#       $1 - Error message from part of program (Not always used)
+# Return Values:
+#       none
+abort_script()
+{
+_err_time_=`$DATE '+%Y-%b-%d_%H.%M.%S'`
+
+if [ "$1" ]; then
+        $ECHO "${_err_time_} - ERROR : $1 Script aborted......." | $TEE -a $LOG_FILE
+        exit 1
+else
+        $ECHO "${_err_time_} - ERROR : Script aborted......." | $TEE -a $LOG_FILE
+        exit 1
+fi
+
+# remove Temp Directory
+$RM -rf ${TEM_DIR} > /dev/null 2>&1
+
+}
+
+
+### Function: usage ###
+#
+# Usage of script
+#
+# Arguments:
+#       none
+# Return Values:
+#       none
+usage(){
+	echo "Usage: $0 <option>"
+	echo "Option : $0 start|stop"
+  	exit 1
+}
+
+### Function: _echo ###
+#
+# Prints logs in LOG_FILE
+#
+# Arguments:
+#       $1 : LOG_FILE content
+# Return Values:
+#       none
+_echo(){
+	$ECHO "$1" | $TEE -a $LOG_FILE	
+}
+
+### Function: establish_connection ###
+#
+# Function to create SSH Connection
+#
+# Arguments:
+#       $1 : Remote Host information like user name and host address.
+# Return Values:
+#       none
+establish_connection(){
+if [ $1 ]; then
+	local _rem_host=$1
+fi
+
+_echo "SSH connection creating... "
+
+if [ "$HOMEDIR" = "/" ]; then
+    HOMEDIR=""
+fi
+
+if [ ! -f $HOMEDIR/.ssh/id_rsa ]; then
+	_echo "Generating RSA key"
+	$MKDIR -p $HOMEDIR/.ssh > /dev/null 2>&1
+	$SSH_KEYGEN -t rsa -P "" -f $HOMEDIR/.ssh/id_rsa > /dev/null 2>&1
+	if [ $? != 0 ]; then
+		_err_msg_="Error while generating RSA Key"
+		abort_script "${_err_msg_}"
+	fi
+	_echo "Successfully RSA Key generated."
+fi
+
+success=0
+scpSuccess=0;
+
+# Already configured?
+$TOUCH ${TEM_DIR}/foo.$$.$USER
+
+$SCP -qB ${TEM_DIR}/foo.$$.$USER ${_rem_host}:/tmp > /dev/null 2>&1
+if [ $? != 0 ]; then
+    scpSuccess=1
+	_echo "Connection to ${_rem_host} not available"
+fi
+
+if [ $scpSuccess = 0 ]; then
+	_echo "No action: connection for ${_rem_host} already setup for local user $USER"
+	$SSH ${_rem_host} "$RM /tmp/foo.$$.$USER" > /dev/null 2>&1
+	$SSH ${_rem_host} "$RM /tmp/foo.$$.$USER" > /dev/null 2>&1
+else
+	_echo "Setting up ${_rem_host}"
+	key=`$CAT $HOMEDIR/.ssh/id_rsa.pub | tr -d '\n'`
+	if [ ${#key} -gt 20 ]; then
+		_echo "Making SSH connection, Please enter password if prompt"
+		$SSH -o 'StrictHostKeyChecking no' -o 'PreferredAuthentications keyboard-interactive' ${_rem_host} "mkdir -p .ssh;cat .ssh/authorized_keys | grep \"$key\" || echo \"$key\" | tee -a .ssh/authorized_keys >/dev/null; chmod 600 .ssh/authorized_keys;" >/dev/null 2>&1
+	else
+		_err_msg_="ERROR:Could not read SSH key from $HOMEDIR/.ssh/id_rsa.pub"
+		abort_script "${_err_msg_}"
+	fi
+
+	scpSuccess=0
+	$SCP -qB ${TEM_DIR}/foo.$$.$USER ${_rem_host}:/tmp >/dev/null 2>&1
+	if [ $? != 0 ]; then
+		scpSuccess=1
+	fi
+	if [ $scpSuccess = 0 ]; then
+		_echo "SSH setup for ${_rem_host} successful for local user $USER"
+		$SSH ${_rem_host} "$RM /tmp/foo.$$.$USER" >/dev/null 2>&1
+		$SSH ${_rem_host} "$RM /tmp/foo.$$.$USER" >/dev/null 2>&1
+	else
+		_err_msg_="SSH setup for ${_rem_host} failed"
+		abort_script "${_err_msg_}"
+	fi
+fi
+
+}
+
+### Function: calculate_cron_timing ###
+#
+# Calculate when to schedule file download based on ROP value
+# TO-DO : Please write some good logic to calculate this.
+#
+# Arguments:
+#       $1 : ROP value
+# Return Values:
+#       _time_stamp_ : crontab timing format
+calculate_cron_timing(){
+
+# Set the local variable for min and hour
+local _in_min_=$1
+local _in_hour_=$2
+_time_stamp_="0"
+
+if [ $_in_hour_ -gt 24 ]; then
+        _time_stamp_="${_in_min_} 0 1 * *"
+elif [ $_in_hour_ -eq 24 ]; then
+        _time_stamp_="${_in_min_} 0 1 * *"
+elif [ $_in_hour_ -le 23 -a $_in_hour_ -ge 13 ]; then
+        _time_stamp_="${_in_min_} $_in_hour_ * * *"
+elif [ $_in_hour_ -eq 12 ]; then
+        _time_stamp_="${_in_min_} 0,12 * * *"
+elif [ $_in_hour_ -le 11 -a $_in_hour_ -ge 9 ]; then
+        _time_stamp_="${_in_min_} $_in_hour_,`expr $_in_hour_ + $_in_hour_` * * *"
+elif [ $_in_hour_ -eq 8 ]; then
+         _time_stamp_="${_in_min_} 0,8,16 * * *"
+elif [ $_in_hour_ -eq 7 ]; then
+        _time_stamp_="${_in_min_} 7,14,21 * * *"
+elif [ $_in_hour_ -eq 6 ]; then
+        _time_stamp_="${_in_min_} 0,6,12,18 * * *"
+elif [ $_in_hour_ -eq 5 ]; then
+        _time_stamp_="${_in_min_} 0,5,10,15,20 * * *"
+elif [ $_in_hour_ -eq 4 ]; then
+        _time_stamp_="${_in_min_} 0,4,8,12,16,20 * * *"
+elif [ $_in_hour_ -eq 3 ]; then
+        _time_stamp_="${_in_min_} 0,3,6,9,12,15,18,21 * * *"
+elif [ $_in_hour_ -eq 2 ]; then
+        _time_stamp_="${_in_min_} 0,2,4,6,8,10,12,14,16,18,20,22 * * *"
+elif [ $_in_hour_ -eq 1 ]; then
+        _time_stamp_="${_in_min_} 1-23 * * *"
+elif [ $_in_hour_ -eq 0 ]; then
+	_time_stamp_="${_in_min_} * * * *"
+fi
+
+}
+	
+### Function: soem_topology ###
+#
+# Adds crontab command line in crontab to download SO-EM topology files
+#
+# Arguments:
+#       none
+# Return Values:
+#       none
+soem_topology(){
+
+# Read how many SOEM are configured?
+$CAT ${CONF_FILE} | $GREP SOEM_ConfigData | $SED -e 's|\[||g' -e 's|\]||g' > ${TEM_DIR}/some_temp.txt
+
+# Iterate each Plugins and get the required values
+while read _each_soem_
+do
+	_configured_=`${INIGET} ${_each_soem_} -f ${CONF_FILE} -v CONFIGURE`
+	if [ ${_configured_} -eq 1 ]; then
+		_echo "SO-EM Topology download for ${_each_soem_}" 
+
+		local _cimname_=`${INIGET} ${_each_soem_} -f ${CONF_FILE} -v cimname`
+		local _snoshostip_=`${INIGET} ${_each_soem_} -f ${CONF_FILE} -v hostip`
+		local _user_=`${INIGET} ${_each_soem_} -f ${CONF_FILE} -v user`
+		local _rop_=`${INIGET} ${_each_soem_} -f ${CONF_FILE} -v ROP`
+		local _filenamepattern_=`${INIGET} ${_each_soem_} -f ${CONF_FILE} -v fileNamePattern`
+		local _remote_directory_=`${INIGET} ${_each_soem_} -f ${CONF_FILE} -v remoteDirectory`
+		local _north_bound_directory_=`${INIGET} ${_each_soem_} -f ${CONF_FILE} -v northBoundDirectory`
+		local _nb_sub_directory_=`${INIGET} ${_each_soem_} -f ${CONF_FILE} -v northBoundSubDirectory`
+		local _target_directory_=${_north_bound_directory_}/${_nb_sub_directory_}
+		local _remote_host_=${_user_}@${_snoshostip_}
+		local _search_pattern_=${_remote_host_}.*${_target_directory_}
+		
+		# Make a tunnel connection
+		establish_connection ${_remote_host_}
+		
+		# Crontab Entry
+		CRONCOMMFILE="${TEM_DIR}/eniq_cronjob_soem.txt"
+		if [ -f $CRONCOMMFILE ]; then
+			$RM -f $CRONCOMMFILE > /dev/null 2>&1
+		fi
+
+		crontab -l | grep -v ${_search_pattern_} > $CRONCOMMFILE
+
+		# Calculate ROP timing to enter in crontab
+		_min_=`expr ${_rop_} % 60`
+		_hour_=`expr ${_rop_} / 60`
+		calculate_cron_timing ${_min_} ${_hour_}
+
+		# Create crontab command line
+		_soem_cron_line_="${_time_stamp_} /bin/bash ${SCRIPT} ${_remote_host_} ${_cimname_} ${_filenamepattern_} ${_remote_directory_} ${_target_directory_} >> ${TOPO_LOG}/soem_cronjob.log  2>&1" 
+		echo "${_soem_cron_line_}" >>  $CRONCOMMFILE
+		crontab <  $CRONCOMMFILE
+		_echo "Crontab entry successfully added for ${_remote_host_}"
+	fi
+done < 	${TEM_DIR}/some_temp.txt
+
+# Cleanup
+$RM -f ${TEM_DIR}/some_temp.txt > /dev/null 2>&1
+$RM -f  $CRONCOMMFILE > /dev/null 2>&1
+
+}
+
+### Function: iptnms_topology ###
+#
+# Adds crontab command line in crontab to download IPTNMS topology files
+#
+# Arguments:
+#       none
+# Return Values:
+#       none
+iptnms_topology(){
+
+
+# Read how many IPTNMS are configured?
+$CAT ${CONF_FILE} | $GREP IPTNMS_Plugin | $SED -e 's|\[||g' -e 's|\]||g' > ${TEM_DIR}/iptnms_temp.txt
+
+# Iterate each Plugins and get the required values
+while read _each_iptnms_
+do
+	_configured_=`${INIGET} ${_each_iptnms_} -f ${CONF_FILE} -v CONFIGURE`
+	
+	if [ ${_configured_} -eq 1 ]; then
+		_echo "IPTNMS Topology download for ${_each_iptnms_}"
+
+		local _cimname_=`${INIGET} ${_each_iptnms_} -f ${CONF_FILE} -v cimname`
+		local _snoshostip_=`${INIGET} ${_each_iptnms_} -f ${CONF_FILE} -v hostip`
+		local _user_=`${INIGET} ${_each_iptnms_} -f ${CONF_FILE} -v user`
+		local _rop_=`${INIGET} ${_each_iptnms_} -f ${CONF_FILE} -v ROP`
+		local _filenamepattern_=`${INIGET} ${_each_iptnms_} -f ${CONF_FILE} -v fileNamePattern`
+		local _cs_remote_directory_=`${INIGET} ${_each_iptnms_} -f ${CONF_FILE} -v cs_remoteDirectory`
+		local _ps_remote_directory_=`${INIGET} ${_each_iptnms_} -f ${CONF_FILE} -v ps_remoteDirectory`
+		local _cs_north_bound_directory_=`${INIGET} ${_each_iptnms_} -f ${CONF_FILE} -v cs_northBoundDirectory`
+		local _cs_nb_sub_directory_=`${INIGET} ${_each_iptnms_} -f ${CONF_FILE} -v cs_northBoundSubDirectory`
+		local _cs_target_directory_=${_cs_north_bound_directory_}/${_cs_nb_sub_directory_}
+		local _ps_north_bound_directory_=`${INIGET} ${_each_iptnms_} -f ${CONF_FILE} -v ps_northBoundDirectory`
+		local _ps_nb_sub_directory_=`${INIGET} ${_each_iptnms_} -f ${CONF_FILE} -v ps_northBoundSubDirectory`
+		local _ps_target_directory_=${_ps_north_bound_directory_}/${_ps_nb_sub_directory_}
+		local _remote_host_=${_user_}@${_snoshostip_}
+		local _cs_search_pattern_=${_remote_host_}.*${_cs_target_directory_}
+		local _ps_search_pattern_=${_remote_host_}.*${_ps_target_directory_}
+		# Make a SSH connection
+		establish_connection ${_remote_host_}
+		local _mv38_dir_=`${SSH} ${_remote_host_} "ls /opt/mv38/ | ${GREP} MV38v"`
+		_cs_remote_directory_="${_cs_remote_directory_/<MV38Version>/$_mv38_dir_}"
+		# Crontab Entry
+		CRONCOMMFILE="${TEM_DIR}/eniq_iptnms_cronjob.txt"
+		if [ -f $CRONCOMMFILE ]; then
+			$RM -f $CRONCOMMFILE > /dev/null 2>&1
+		fi
+			
+		crontab -l | $GREP -v ${_cs_search_pattern_} | $GREP -v ${_ps_search_pattern_} > $CRONCOMMFILE
+
+		# Calculate ROP timing to enter in crontab
+		_min_=`expr ${_rop_} % 60`
+		_hour_=`expr ${_rop_} / 60`
+		calculate_cron_timing ${_min_} ${_hour_}
+		
+		# Create PS and CS Crontab command lines
+		_ps_cron_line_="${_time_stamp_} /bin/bash ${SCRIPT} ${_remote_host_} ${_cimname_} ${_filenamepattern_} ${_ps_remote_directory_} ${_ps_target_directory_} >> ${TOPO_LOG}/iptnms_cronjob.log 2>&1"
+		_cs_cron_line_="${_time_stamp_} /bin/bash ${SCRIPT} ${_remote_host_} ${_cimname_} ${_filenamepattern_} ${_cs_remote_directory_} ${_cs_target_directory_} >> ${TOPO_LOG}/iptnms_cronjob.log 2>&1"	
+
+		# Add crontab commad line to crontab
+		echo "${_ps_cron_line_}" >> $CRONCOMMFILE
+		echo "${_cs_cron_line_}" >> $CRONCOMMFILE
+		crontab < $CRONCOMMFILE
+		_echo "Crontab entry successfully added for ${_remote_host_}"
+	fi
+done < ${TEM_DIR}/iptnms_temp.txt
+
+# Cleanup
+$RM -f ${TEM_DIR}/iptnms_temp.txt > /dev/null 2>&1
+$RM -f $CRONCOMMFILE > /dev/null 2>&1
+
+
+}
+
+### Function: validate_integration ###
+#
+# Validating integration between ENIQ and SOEM/IPTNMS servers.
+#
+# Arguments:
+#   $1 : Topology server type
+# Return Values:
+#   none
+validate_integration(){
+
+local _soem_alias_="eniq_soem_"
+local _iptnms_alias_="eniq_iptnms_"
+local _type_=$1
+_s_no_=1
+
+if [ ${_type_} == SOEM ];then
+	# Get all the alias
+	$CAT ${HOST_FILE} | $GREP ${_soem_alias_} > /tmp/temp_alias.txt
+	if [ $? -ne 0 ]; then
+		_err_msg_="No SOEM server was integrated. Integrate SOEM and start setup again."
+		abort_script "$_err_msg_"
+	fi
+	_header_=SOEM_ConfigData_Plugin
+elif [ ${_type_} == IPTNMS ];then
+	# Get all the alias
+	$CAT ${HOST_FILE} | $GREP ${_iptnms_alias_} > /tmp/temp_alias.txt
+	if [ $? -ne 0 ]; then
+		_err_msg_="No IPTNMS server was integrated. Integrate IPTNMS and start setup again."
+		abort_script "$_err_msg_"
+	fi
+	_header_=IPTNMS_Plugin
+fi
+
+clear
+_echo "IPADDRESS\t\tHOSTNAME\tALIAS"
+while read _alias_
+do
+	_echo " [ ${_s_no_} ] ${_alias_}"
+	_s_no_=`expr ${_s_no_} + 1`
+done < /tmp/temp_alias.txt
+_echo "\nSelect the server to download topology file"
+read _selected_alias_
+
+_ip_address_=`cat /tmp/temp_alias.txt | head -${_selected_alias_} | tail -1 | $NAWK -F" " '{print $1}'`
+_server_alias_=`cat /tmp/temp_alias.txt | head -${_selected_alias_} | tail -1 | $NAWK -F" " '{print $3}'`
+_cim_name_=`echo ${_server_alias_} | $NAWK -F"_" '{print $3}'`
+$CAT ${CONF_FILE} | $GREP ${_header_} | $SED -e 's|\[||g' -e 's|\]||g' > /tmp/header.txt
+while read _head_
+do
+	_is_conf_=`iniget ${_head_} -f ${CONF_FILE} -v CONFIGURE`
+	if [ ${_is_conf_} -eq 0 ]; then
+		_config_header_=${_head_}
+		break
+	fi
+done < /tmp/header.txt
+
+if [ -z ${_config_header_} ]; then
+	_err_msg_="All Plugins are configured. Please check under ${CONF_FILE} file."
+	 abort_script "$_err_msg_"
+fi
+_rop_=`${INIGET} ${_config_header_} -f ${CONF_FILE} -v ROP`
+_filenamepattern_=`${INIGET} ${_config_header_} -f ${CONF_FILE} -v fileNamePattern`
+
+rm -f /tmp/temp_config.txt
+$TOUCH /tmp/temp_config.txt
+
+echo ";-----------------------------------------------------" > /tmp/temp_config.txt
+echo ";		${_config_header_}" >> /tmp/temp_config.txt
+echo ";-----------------------------------------------------" >> /tmp/temp_config.txt
+echo "CIMNAME			: ${_cim_name_}" >> /tmp/temp_config.txt
+echo "IP ADDRESS		: ${_ip_address_}" >> /tmp/temp_config.txt
+echo "ROP			: ${_rop_}" >> /tmp/temp_config.txt
+echo "File Name Pattern	: ${_filenamepattern_}" >> /tmp/temp_config.txt
+
+if [ ${_type_} == IPTNMS ];then
+	clear
+	_echo "\nEnter username for ${_server_alias_}"
+	read _user_name_
+	if [ -z ${_user_name_} ]; then
+		_err_msg_="UserName Entered."
+		abort_script "$_err_msg_"
+	else
+		_user_=${_user_name_}
+	fi
+	_cs_remote_directory_=`${INIGET} ${_config_header_} -f ${CONF_FILE} -v cs_remoteDirectory`
+	_ps_remote_directory_=`${INIGET} ${_config_header_} -f ${CONF_FILE} -v ps_remoteDirectory`
+	_cs_north_bound_directory_=`${INIGET} ${_config_header_} -f ${CONF_FILE} -v cs_northBoundDirectory`
+	_ps_north_bound_directory_=`${INIGET} ${_config_header_} -f ${CONF_FILE} -v ps_northBoundDirectory`
+	_cs_sub_directory_=`${INIGET} ${_config_header_} -f ${CONF_FILE} -v cs_northBoundSubDirectory`
+	_ps_sub_directory_=`${INIGET} ${_config_header_} -f ${CONF_FILE} -v ps_northBoundSubDirectory`
+	
+	echo "USER			: ${_user_}" >> /tmp/temp_config.txt
+	echo "CS Remote Dir		: ${_cs_remote_directory_}" >> /tmp/temp_config.txt
+	echo "CS Target Dir		: ${_cs_north_bound_directory_}/${_server_alias_}/${_cs_sub_directory_}" >> /tmp/temp_config.txt
+	echo "PS Remote Dir		: ${_ps_remote_directory_}" >> /tmp/temp_config.txt
+	echo "PS Target Dir		: ${_ps_north_bound_directory_}/${_server_alias_}/${_ps_sub_directory_}" >> /tmp/temp_config.txt
+elif [ ${_type_} == SOEM ];then
+	_user_=`${INIGET} ${_config_header_} -f ${CONF_FILE} -v user`
+	clear
+	_echo "Enter username for ${_server_alias_}"
+	_echo "[Hit Enter for '${_user_}' ]"
+	read _user_name_
+	if [ ! -z ${_user_name_} ]; then
+		_user_=${_user_name_}
+	fi
+	_soem_remote_directory_=`${INIGET} ${_config_header_} -f ${CONF_FILE} -v remoteDirectory`
+	_soem_nb_dir_=`${INIGET} ${_config_header_} -f ${CONF_FILE} -v northBoundDirectory`
+	_soem_nb_sub_dir_=`${INIGET} ${_config_header_} -f ${CONF_FILE} -v northBoundSubDirectory`
+	
+	echo "USER			: ${_user_}" >> /tmp/temp_config.txt
+	echo "SOEM Remote Dir		: ${_soem_remote_directory_}" >> /tmp/temp_config.txt
+	echo "SOEM Target Dir		: ${_soem_nb_dir_}/${_server_alias_}/${_soem_nb_sub_dir_}" >> /tmp/temp_config.txt
+else
+	_echo "Nor IPTNMS or SOEM. Exit"
+	exit 1
+fi
+
+clear 
+if [ -f /tmp/temp_config.txt ]; then
+	cat /tmp/temp_config.txt
+else
+	_err_msg_="User Input File is missed."
+	 abort_script "$_err_msg_"
+fi
+
+_echo "\nAre above informations correct?"
+_echo "[ 1 ] YES"
+_echo "[ 2 ] NO"
+_echo "Select [ 1 ] for YES or [ 2 ] for NO"
+read _user_confirm_
+
+if [ ${_user_confirm_} == 1 ]; then
+	iniset ${_config_header_} -f ${CONF_FILE} CONFIGURE=1
+	iniset ${_config_header_} -f ${CONF_FILE} cimname=${_cim_name_}
+	iniset ${_config_header_} -f ${CONF_FILE} hostip=${_ip_address_}
+	iniset ${_config_header_} -f ${CONF_FILE} user=${_user_}
+	if [ ${_type_} == SOEM ];then
+		iniset ${_config_header_} -f ${CONF_FILE} northBoundDirectory=${_soem_nb_dir_}/${_server_alias_}
+	elif [ ${_type_} == IPTNMS ];then
+		iniset ${_config_header_} -f ${CONF_FILE} cs_northBoundDirectory=${_cs_north_bound_directory_}/${_server_alias_}
+		iniset ${_config_header_} -f ${CONF_FILE} ps_northBoundDirectory=${_ps_north_bound_directory_}/${_server_alias_}
+	fi
+	_echo "Validation completed."
+elif [ ${_user_confirm_} == 2 ]; then
+	clear
+	_echo "\nPlease configure the required information under ${CONF_FILE} file."
+	_echo "After successful configuration, re-run the topology setup."
+	_err_msg_="User has not confirmed for default values."
+	 abort_script "$_err_msg_"
+fi	 
+
+}
+
+### Function: start_topology ###
+#
+# Validate integration and Starts downloading topology file based on topology type configured.
+#
+# Arguments:
+#   $1 : Topology server type
+# Return Values:
+#   none
+start_topology(){
+
+$CLEAR
+_echo "\nSelect the feature to download topology file"
+_echo "[1] SOEM"
+_echo "[2] IPTNMS"
+read _select_feature_
+
+[ "${_select_feature_}" -gt 2 -o "${_select_feature_}" -eq 0 ] && start_topology
+if [ "${_select_feature_}" -eq 1 ]; then
+	_select_feature_=SOEM
+elif [ "${_select_feature_}" -eq 2 ]; then
+	_select_feature_=IPTNMS
+fi
+
+# Check for license
+check_license ${_select_feature_}
+
+# Valildate integration
+validate_integration ${ffetch}
+
+if [ ${ffetch} == SOEM ];then
+        # Download topology files from SO-EM server
+        soem_topology
+elif [ ${ffetch} == IPTNMS ];then
+        # Download topology files from IPTNMS server
+        iptnms_topology
+else
+        #Nor IPTNMS or SOEM Found
+        _err_msg_="Nor IPTNMS or SOEM Found."
+        abort_script "$_err_msg_"
+fi
+
+}
+
+### Function: stop_topology ###
+#
+# Stops downloading topology file.
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+stop_topology(){
+	_echo "Stopping Topology file fetching..."
+	crontab -l | $GREP -v ${SCRIPT} > /tmp/stop_cron
+	crontab < /tmp/stop_cron
+	if [ $? != 0 ]; then
+		_err_msg_="oops... some problem while removing cronjobs..."
+		abort_script "${_err_msg_}"
+	fi
+	$RM -f /tmp/stop_cron > /dev/null 2>&1
+	_echo "CronJobs has been successfully removed. Topology file will not fetch."
+	exit 0	
+
+}
+
+### Function: usage_msg ###
+#
+#   Check what license is installed on server
+#
+# Arguments:
+#   none
+# Return Values:
+#   ${ffetch} : Decides from which server topology needs to be fetched.
+check_license(){
+ffetch="NULL"
+_is_installed_="NULL"
+_selected_lic_=$1
+
+ _echo "${_selected_lic_} is selected, License check will be done."
+if [ "${_selected_lic_}" == SOEM ]; then
+	licmgr -getlicinfo | $GREP "CXC4011417" > /dev/null 2>&1
+	if [ $? -eq 0 ]; then
+		ffetch="SOEM"
+		_echo "\nSOEM license found."
+	else
+		_err_msg_="\nLicense for ${_selected_lic_} not found."
+		abort_script "$_err_msg_"	
+	fi
+elif [ "${_selected_lic_}" == IPTNMS ]; then
+	_soem_lic_=`licmgr -getlicinfo | $GREP CXC4011416`
+	_iptnms_lic_=`licmgr -getlicinfo | $GREP CXC4011417`
+	if [ "${_soem_lic_}" -a "${_iptnms_lic_}" ]; then
+		ffetch="IPTNMS"
+		_echo "\nSOEM and IPTNMS license found."
+	elif [ ! "${_iptnms_lic_}" ]; then
+		 _echo "\nIPTNMS license not found."
+	elif [ ! "${_soem_lic_}" ]; then
+		_echo "\nSOEM license not found."
+	elif [ ! "${_soem_lic_}" -a ! "${_iptnms_lic_}" ]; then
+		_echo "\nSOEM and IPTNMS license not found."
+	fi
+fi
+
+}
+
+### Function: create_log_file ###
+#
+# Creates a common Log file 
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+create_log_file()
+{
+if [ ! -d ${TOPO_LOG} ]; then
+	$MKDIR -p ${TOPO_LOG}
+fi
+
+LOG_FILE=${TOPO_LOG}/topology_files_setup_`$DATE '+%Y_%m_%d'`.log
+$TOUCH $LOG_FILE
+}
+
+
+### Function: check_required_files ###
+#
+# Check for required files/scripts 
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+check_required_files()
+{
+
+if [ ! -f ${CLI_CONF_DIR}/${SOEM_REF_NAME_FILE} ]; then
+		_err_msg_="${CLI_CONF_DIR}/${SOEM_REF_NAME_FILE} file not found"
+		abort_script "$_err_msg_"
+fi
+	
+if [ ! -f ${CLI_CONF_DIR}/${TOPOLOGY_CONFIG_FILE} ]; then
+		_err_msg_="${CLI_CONF_DIR}/${TOPOLOGY_CONFIG_FILE} file not found"
+		abort_script "$_err_msg_"
+fi
+
+if [ ! -f ${ENIQ_BIN_DIR}/${DOWNLOAD_SCRIPT} ]; then
+		_err_msg_="${ENIQ_BIN_DIR}/${DOWNLOAD_SCRIPT} file not found"
+		abort_script "$_err_msg_"
+fi
+
+if [ ! -f ${INIGET} ]; then
+		_err_msg_="${INIGET} file not found"
+		abort_script "$_err_msg_"
+fi
+
+}
+
+### Function: setup_env ###
+#
+# Setup up path environment etc
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+setup_env()
+{
+
+if [ ! "${ENIQ_BASE_DIR}" ]; then
+    ENIQ_BASE_DIR=/eniq
+fi
+
+# ENIQ Log Directory
+ENIQ_LOG_DIR=${ENIQ_BASE_DIR}/log
+
+# ENIQ Admin Directory
+ENIQ_ADMIN_DIR=${ENIQ_BASE_DIR}/admin
+
+# ENIQ connectd Directory
+ENIQ_CONNECTD_DIR=${ENIQ_BASE_DIR}/connectd
+
+# ENIQ SW conf
+CLI_CONF_DIR=${ENIQ_BASE_DIR}/sw/conf
+
+# ENIQ BIN Directory
+ENIQ_BIN_DIR=${ENIQ_BASE_DIR}/sw/bin
+
+# ENIQ LIB Directory
+ENIQ_LIB_DIR=${ENIQ_ADMIN_DIR}/lib
+
+# Topology configuration file
+CONF_FILE=${CLI_CONF_DIR}/${TOPOLOGY_CONFIG_FILE}
+
+# Download script
+SCRIPT=${ENIQ_BIN_DIR}/${DOWNLOAD_SCRIPT}
+
+# Topology Log Directory
+TOPO_LOG=${ENIQ_LOG_DIR}/topology
+
+# iniget command
+INIGET=${ENIQ_ADMIN_DIR}/bin/iniget
+
+}
+
+# ********************************************************************
+#
+#   Main body of program
+#
+# ********************************************************************
+#
+
+# Check arguments
+if [ $# -ne 1 ]; then
+        usage
+fi
+
+# Setup up path environment etc
+setup_env
+
+if [ -f ${ENIQ_LIB_DIR}/${COMMON_FUN} ]; then
+    . ${ENIQ_LIB_DIR}/${COMMON_FUN}
+else
+    echo "File ${ENIQ_LIB_DIR}/${COMMON_FUN} not found"
+    exit 1
+fi
+
+if [ -f ${ENIQ_BIN_DIR}/${COMMON_VARIABLES} ]; then
+    . ${ENIQ_BIN_DIR}/${COMMON_VARIABLES}
+else
+    echo "File ${ENIQ_BIN_DIR}/${COMMON_VARIABLES} not found"
+    exit 1
+fi
+
+# Create a temporary Directory
+TEM_DIR=/tmp/topology_file.$$.$$
+$RM -rf ${TEM_DIR} > /dev/null 2>&1
+$MKDIR -p ${TEM_DIR}
+if [ $? -ne 0 ]; then
+    _err_msg_="Could not create directory $TEM_DIR"
+    abort_script "${_err_msg_}"
+fi
+
+
+# Check all required files/scripts exist on the server
+check_required_files
+
+# Check/Create Logfile
+create_log_file
+
+case $1 in
+    start) start_topology
+       ;;
+    stop) stop_topology 
+       ;;
+   *) usage
+       exit 1
+       ;;
+esac
+
+# On Successful exit, clean up
+$RM -rf ${TEM_DIR} > /dev/null 2>&1
+
+exit 0

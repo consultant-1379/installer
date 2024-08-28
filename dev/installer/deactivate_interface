@@ -1,0 +1,302 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : deactivate_interface
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : Ericsson Network IQ Interface Deactivation script
+# Usage   : deactivate_interface INTERFACE_NAME OSS_NAME IN_DIR
+# ********************************************************************
+
+NAWK=/usr/bin/nawk
+### Function: usage_msg ###
+#
+#   Print out the usage message
+#
+# Arguments:
+#	none
+# Return Values:
+#	none
+usage_msg() 
+{
+echo ""
+echo "Usage: `basename $0` -f <interfaces_list_file> | -o <OSS_name> -i <interface_name> [-n] "
+echo "options:"
+echo "-f  : Path to a file containing list of interfaces deactivated."
+echo "-o  : Name of the OSS."
+echo "-i  : Name of the interface to deactivate."
+echo "-n  : deactivate interface only. No sets will be copied."
+#echo "-s  : Create snapshots before deactivating interface."
+}
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  echo "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 1
+fi
+
+. ${CONF_DIR}/niq.rc
+
+if [ ! -r "${INSTALLER_DIR}/snapshot_functions.bsh" ] ; then
+  echo "ERROR: Snapshot functions file is not readable at ${INSTALLER_DIR}/snapshot_functions.bsh"
+  exit 15
+fi
+
+# Include the snapshot functions.
+. ${INSTALLER_DIR}/snapshot_functions.bsh
+
+TIMESTAMP=`date +%Y.%m.%d_%H:%M:%S`
+
+MAIN_LOGFILE=${LOG_DIR}/tp_installer/${TIMESTAMP}_deactivate_interface.log
+
+touch ${MAIN_LOGFILE}
+
+if [ -z "${CONF_DIR}" ] ; then
+  echo "Environment variable CONF_DIR is not set or empty. Interface deactivation aborted." | tee -a ${MAIN_LOGFILE}
+  exit 2
+fi
+
+if [ -z "$PLATFORM_DIR" ] ; then
+    echo "Environment variable PLATFORM_DIR is not set or empty. Interface deactivation aborted." | tee -a ${MAIN_LOGFILE}
+    exit 3
+fi
+
+if [ -z "$INSTALLER_DIR" ] ; then
+    echo "Environment variable INSTALLER_DIR is not set or empty. Interface deactivation aborted." | tee -a ${MAIN_LOGFILE}
+    exit 4
+fi
+
+if [ -z "$RT_DIR" ] ; then
+    echo "Environment variable RT_DIR is not set or empty. Interface deactivation aborted." | tee -a ${MAIN_LOGFILE}
+    exit 5
+fi
+
+if [ -z "$ADMIN_BIN" ] ; then
+    echo "Environment variable ADMIN_BIN is not set or empty. Interface deactivation aborted." | tee -a ${MAIN_LOGFILE}
+    exit 13
+fi
+
+if [ -z "$DATA_DIR" ] ; then
+    echo "Environment variable DATA_DIR is not set or empty. Interface deactivation aborted." | tee -a ${MAIN_LOGFILE}
+    exit 14
+fi
+
+while getopts ":f:o:i:ns" Option
+do
+  case $Option in
+    f) INTF_LIST_FILE="$OPTARG" 
+       ;;
+    o) OSS_NAME="$OPTARG" 
+       ;;
+    i) INTF_NAME="$OPTARG" 
+       ;;
+    n) DEACTIVATE_ONLY=true
+       ;;
+    s) CREATE_SNAPSHOTS=true
+       ;;
+   \?) usage_msg
+       exit 6 
+       ;;
+  esac
+done
+
+# Must have either list of interfaces or one interface name to install.
+if [ ! -z "${INTF_LIST_FILE}" ] ; then
+  if [ ! -f "${INTF_LIST_FILE}" ] ; then
+    echo "Can't read tech pack list file ${INTF_LIST_FILE}"  | tee -a ${MAIN_LOGFILE}
+    exit 7
+  fi
+elif [ -z "${INTF_NAME}" ]; then
+    usage_msg
+    exit 8 
+elif [ -z "${OSS_NAME}" ]; then
+	usage_msg
+	exit 9
+fi
+
+# Check that not both the optional parameters are given as parameter.
+if [ ! -z "${INTF_LIST_FILE}" -a ! -z "${INTF_NAME}" ]; then
+    usage_msg
+    exit 10 
+fi
+
+if [ -z "${DEACTIVATE_ONLY}" ]; then
+    DEACTIVATE_ONLY=false
+fi
+
+if [ -z "${CREATE_SNAPSHOTS}" ]; then
+    CREATE_SNAPSHOTS=false
+fi
+
+if [ ! -d ${LOG_DIR}/tp_installer ]; then
+  mkdir ${LOG_DIR}/tp_installer
+fi
+
+CPATH="${INSTALLER_DIR}/lib/installer.jar"
+INSTALLER_JARPATH="${CPATH}"
+
+if [ ! -r "${CPATH}" ] ; then
+  echo "ERROR: Jar file "installer.jar" is not readable at ${CPATH}" | tee -a ${MAIN_LOGFILE}
+  exit 11
+fi
+
+DIRS=`ls ${PLATFORM_DIR}`
+
+for file in $DIRS
+do
+  if [ -d ${PLATFORM_DIR}/$file/dclib ]
+  then
+    JARS=`ls ${PLATFORM_DIR}/$file/dclib/*.jar`
+
+    for jar in $JARS
+    do
+      CPATH="${CPATH}:${jar}"
+    done
+  fi
+done
+
+CURRENT_WORKING_DIRECTORY=`pwd`
+
+#Check that no other deactivate_interface process is running. Simultaneous execution of deactivate_interface will cause trouble.
+LOCK_FILE=${CURRENT_WORKING_DIRECTORY}/install_lockfile
+if [ -f $LOCK_FILE ]; then
+  echo "Another instance of tp_installer or deactivate_interface script is running. Please wait it to finish first and then try again. If no other instance of tp_installer script  or deactivate_interface is running please remove file $LOCK_FILE and try again." | tee -a ${MAIN_LOGFILE}
+  exit 19
+fi
+touch ${LOCK_FILE}
+
+if [ ! -z "${INTF_NAME}" ] ; then
+  echo "${INTF_NAME} ${OSS_NAME}" > /tmp/intflist
+  INTF_LIST_FILE=/tmp/intflist
+fi
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+ANT_OPTS="$ANT_OPTS $PF_ANT_OPTS" 
+export ANT_OPTS 
+
+
+echo "Starting to deactivate interfaces." | tee -a ${MAIN_LOGFILE}
+
+echo "Filtering out duplicate interface deactivations..." | tee -a ${MAIN_LOGFILE}
+
+# Filter out the duplicate interface deactivations from the list
+${RT_DIR}/ant/bin/ant -f tasks_install_utils.xml -lib ${CPATH} -Dfilepath=${INTF_LIST_FILE} remove_duplicate_deactivations
+
+  DUPLICATE_REMOVAL_EXIT_STATUS=$?
+
+  if [ $DUPLICATE_REMOVAL_EXIT_STATUS -ne 0 ] ; then
+    echo "Removal of duplicate interface deactivations failed."
+    exit 20
+  fi
+ 
+
+echo "Filtering done." | tee -a ${MAIN_LOGFILE}
+
+echo "List of interfaces to deactivate:" | tee -a ${MAIN_LOGFILE}
+INTERFACES_TO_DEACTIVATE=`cat ${INTF_LIST_FILE}`
+echo "${INTERFACES_TO_DEACTIVATE}" | tee -a ${MAIN_LOGFILE}
+
+if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+  echo "Creating snapshots before any interface deactivations are done..." | tee -a ${MAIN_LOGFILE}
+  # Create the snapshots.
+  create_snapshots 
+
+  echo "All required snapshots created." | tee -a ${MAIN_LOGFILE}
+fi
+
+
+while read line
+do
+  INTERFACE_NAME=`echo ${line} | $NAWK '{print $1}'`
+  CURRENT_OSS_NAME=`echo ${line} | $NAWK '{print $2}'`
+  
+  if [ "${CURRENT_OSS_NAME}" = " " ] || [ "${CURRENT_OSS_NAME}" = "" ]
+  then
+  	echo "Filtered out empty OSS name with interface ${INTERFACE_NAME} ${CURRENT_OSS_NAME}" | tee -a ${MAIN_LOGFILE}
+    continue
+  fi
+  
+  DEACTIVATE_INTERFACE_TIMESTAMP=`date +%Y.%m.%d_%H:%M:%S`
+  INTERFACE_LOGFILE=${LOG_DIR}/tp_installer/${DEACTIVATE_INTERFACE_TIMESTAMP}_deactivate_${INTERFACE_NAME}_${CURRENT_OSS_NAME}.log
+  
+  touch ${INTERFACE_LOGFILE}
+  
+  echo "Deactivating interface ${INTERFACE_NAME}-${CURRENT_OSS_NAME}" | tee -a ${MAIN_LOGFILE}
+
+  # Do the action interface deactivation.
+  ${RT_DIR}/ant/bin/ant -f tasks_install_utils.xml -lib ${CPATH} -logfile ${INTERFACE_LOGFILE} -Ddc.installer.dir=${INSTALLER_DIR} -Ddc.bin.dir=${BIN_DIR} -DonlyDeactivateInterface=${DEACTIVATE_ONLY} -Dcurrent_working_directory=${CURRENT_WORKING_DIRECTORY} -DconfigurationDirectory=${CONF_DIR} -DinterfaceName=${INTERFACE_NAME} -DossName=${CURRENT_OSS_NAME} deactivate_interface
+
+  DEACTIVATE_INTERFACE_EXIT_STATUS=$?
+
+  if [ $DEACTIVATE_INTERFACE_EXIT_STATUS -ne 0 ] ; then
+    if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+      # DeActivate interface has failed. Restore the snapshot before the interface deactivation.
+      rollback_snapshots
+      # Delete the snapshots.
+      delete_snapshots 
+    fi
+    #Remove the locking file
+    rm ${LOCK_FILE}
+    exit 17
+  fi
+
+  cat ${INTERFACE_LOGFILE}
+
+  if [ -f ${INTERFACE_LOGFILE} ] ; then
+    SUC=`cat ${INTERFACE_LOGFILE} | grep "BUILD SUCCESSFUL"`
+    if [ -z "${SUC}" ] ; then
+    echo "Deactivation failed. See log ${MAIN_LOGFILE} for details." | tee -a ${MAIN_LOGFILE}
+      if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+        # deactivate interface has failed. Restore the snapshot before the interface deactivations.
+        rollback_snapshots
+        # Delete the snapshots.
+        delete_snapshots
+      fi 
+      echo "Exiting interface deactivation." | tee -a ${MAIN_LOGFILE}
+      #Remove the locking file
+      rm ${LOCK_FILE}
+      exit 18
+    fi
+  fi
+
+  echo "Interface ${INTERFACE_NAME}_${CURRENT_OSS_NAME} deactivated" | tee -a ${MAIN_LOGFILE}
+  
+done < ${INTF_LIST_FILE}
+
+LOOP_EXIT_STATUS=$?
+
+if [ ${LOOP_EXIT_STATUS} -eq 66 ] ; then
+  #Remove the locking file
+  rm ${LOCK_FILE}
+  exit 16
+else  
+  ${BIN_DIR}/engine -e refreshTransformations
+  echo "Transformation cache refreshed" | tee -a ${MAIN_LOGFILE}
+fi
+
+# Change the slotprofile back to Normal.
+${BIN_DIR}/engine -e changeProfile Normal
+
+if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+  echo "Deleting the snapshots created before interface deactivations." | tee -a ${MAIN_LOGFILE}
+  # At the end delete the snapshots.
+  delete_snapshots
+
+  echo "Deleted snapshots succesfully. Interface deactivations finished." | tee -a ${MAIN_LOGFILE}
+fi
+
+#Remove the locking file
+rm ${LOCK_FILE}

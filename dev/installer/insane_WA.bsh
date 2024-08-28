@@ -1,0 +1,183 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2017 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : insane_WA.bsh
+# Date    : 03/05/2017
+# Purpose : WA provided for insane partitions which rectifies the column name
+#			mismatch between SYSCOLUMNS and DWHCOLUMN
+# Usage   : ./insane_WA.bsh
+# Author  : xgaurku
+#
+# ********************************************************************
+#
+# Command Section
+#
+# ********************************************************************
+
+DATE=/usr/bin/date
+ECHO=/usr/bin/echo
+RM=/usr/bin/rm
+SED=/usr/bin/sed
+ENIQ_SW_DIR=/eniq/sw/installer
+STARTTIMESTAMP=`$DATE '+%y%m%d_%H%M%S'`
+LOG_DIR=/eniq/log/sw_log/engine
+LOGFILE=${LOG_DIR}/insane_WA_$STARTTIMESTAMP.log
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+        echo "Could not find /eniq/admin/lib/common_functions.lib"
+        exit 1
+fi
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $connection_string ]; then
+  $RM -f $connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string"
+  fi
+fi
+}
+
+trap remove_connection_string EXIT
+
+DWHDBPASSWORD=`inigetpassword DWH -v DCPassword -f ${CONF_DIR}/niq.ini`
+DWHDB_PORT=`inigetpassword DWH -v PortNumber -f ${CONF_DIR}/niq.ini`
+DWH_SERVER_NAME=`inigetpassword DWH -v ServerName -f ${CONF_DIR}/niq.ini`
+DWHREPUSER=`inigetpassword REP -v DWHREPUsername -f ${CONF_DIR}/niq.ini`
+DWHREPPASSWORD=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+
+connection_string=/var/tmp/encrypt_$$.txt
+connection_string_decrypt="-nogui -c \"eng=${REP_SERVER_NAME};links=tcpip{host=${REP_SERVER_NAME};port=${REP_PORT}};uid=$DWHREPUSER;pwd=$DWHREPPASSWORD\"" 
+
+get_encrypt_file "${connection_string_decrypt}" "${connection_string}"
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+if [ ! -x "$DBISQL" ]; then
+    _err_msg_="$DBISQL commands not found or not executable."
+    abort_script "$_err_msg_"
+fi
+
+
+### Function: abort_script ###
+#
+#   This will is called if the script is aborted thru an error
+#   error signal sent by the kernel such as CTRL-C or if a serious
+#   error is encountered during runtime
+#
+# Arguments:
+#       $1 - Error message from part of program (Not always used)
+# Return Values:
+#       none
+abort_script()
+{
+if [ "$1" ]; then
+    _err_msg_=$1
+else
+    _err_msg_="Script aborted.......\n"
+fi
+if [ "${LOGFILE}" ]; then
+    $ECHO "\n$_err_msg_\n"|$TEE -a ${LOGFILE}
+else
+    $ECHO "\n$_err_msg_\n"
+fi
+}
+
+##############################################Main body of the program ###########################################
+
+$ECHO "Execution starts at $STARTTIMESTAMP " |$TEE -a ${LOGFILE}
+
+${DBISQL} @${connection_string} "select distinct storageid,tablename from dwhrep.DWHPartition where status ='INSANE_AC';OUTPUT TO $ENIQ_SW_DIR/storage.txt"
+
+${DBISQL} @${connection_string} "IF EXISTS ((SELECT * FROM sys.systable where table_name='temp_insane' ))BEGIN drop table dwhrep.temp_insane END"
+
+if [[ $? -eq 0 ]]; then
+	$ECHO "Dropped temp_insane table as it existed already" |$TEE -a ${LOGFILE}
+else
+	$ECHO "Could not drop temp_insane table" |$TEE -a ${LOGFILE}		
+fi
+
+${DBISQL} @${connection_string} "select * into dwhrep.temp_insane from sys.syscolumns"
+
+while IFS= read var 
+do
+	storage_f1=`echo $var | cut -d, -f1`
+	storage_f2=`echo $var | cut -d, -f2`
+	storage_f1=${storage_f1//\'}
+	storage_f2=${storage_f2//\'}
+	${DBISQL} @${connection_string} "select * from sys.syscolumns where tname='$storage_f2' order by colno; OUTPUT TO $ENIQ_SW_DIR/$storage_f1.txt"
+	
+	$SED "s/'//g" $ENIQ_SW_DIR/$storage_f1.txt > $ENIQ_SW_DIR/${storage_f1}_new.txt 
+	${DBISQL} @${connection_string} "truncate table dwhrep.temp_insane"
+	
+	if [[ $? -eq 0 ]]; then
+		$ECHO "Table temp_insane truncated successfully" |$TEE -a ${LOGFILE}
+	
+	else
+		$ECHO "Could not truncate temp_insane table"  |$TEE -a ${LOGFILE}		
+	fi
+	
+	$ECHO "LOAD TABLE dwhrep.temp_insane(creator,cname,tname,coltype,nulls,length,syslength,in_primary_key,colno,default_value,column_kind,remarks) from '$ENIQ_SW_DIR/${storage_f1}_new.txt'" > $ENIQ_SW_DIR/load.txt
+	$ECHO "ESCAPES OFF" >> $ENIQ_SW_DIR/load.txt
+	$ECHO "QUOTES OFF DELIMITED BY ','" >> $ENIQ_SW_DIR/load.txt
+	$ECHO "WITH CHECKPOINT OFF" >> $ENIQ_SW_DIR/load.txt
+	
+	${DBISQL} @${connection_string} $ENIQ_SW_DIR/load.txt
+	
+	if [[ $? -eq 0 ]]; then
+		$ECHO "Loaded temp_insane table from file $ENIQ_SW_DIR/${storage_f1}_new.txt" |$TEE -a ${LOGFILE}
+	else
+		$ECHO "Could not load temp_insane table from file $ENIQ_SW_DIR/${storage_f1}_new.txt" |$TEE -a ${LOGFILE}		
+	fi
+	
+	${DBISQL} @${connection_string} "update dwhrep.dwhcolumn  set dwh.colnumber=s.colno from dwhrep.dwhcolumn dwh,dwhrep.temp_insane s where dwh.dataname=s.cname and storageid='$storage_f1'"
+	
+	if [[ $? -eq 0 ]]; then
+		$ECHO "Updated the colnumber in dwhcolumn successfully  "  |$TEE -a ${LOGFILE}
+	else
+		$ECHO "Could not update the dwhcolumn  " |$TEE -a ${LOGFILE}	
+	fi
+	
+	$RM $ENIQ_SW_DIR/$storage_f1.txt
+	$RM $ENIQ_SW_DIR/${storage_f1}_new.txt
+	$RM $ENIQ_SW_DIR/load.txt
+done < $ENIQ_SW_DIR/storage.txt
+$RM  $ENIQ_SW_DIR/storage.txt
+
+${DBISQL} @${connection_string} "drop table dwhrep.temp_insane"
+
+	if [[ $? -eq 0 ]]; then
+		$ECHO "Dropped temp_insane table successfully" |$TEE -a ${LOGFILE}
+	else
+		$ECHO "Failed  to drop the temp_insane table" |$TEE -a ${LOGFILE}		
+	fi

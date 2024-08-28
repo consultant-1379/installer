@@ -1,0 +1,353 @@
+<!--
+     Ericsson Network IQ Platform Installer ant tasks.
+     Copyright (c) 1999 - 2006 AB LM Ericsson Oy  All rights reserved.
+-->
+
+<project name="Platform_installer" default="all">
+
+  <import file="${dc.extract.dir}/install/install.xml"/>
+
+  <taskdef resource="net/sf/antcontrib/antlib.xml"/>
+  <taskdef name="depcheck" classname="com.distocraft.dc5000.install.ant.DependencyCheck"/>
+  <taskdef name="forcedelete" classname="com.distocraft.dc5000.install.ant.ForceDeleteFile"/>
+  <taskdef name="GetDBProperties" classname="com.distocraft.dc5000.install.ant.GetDBProperties"/>
+  <taskdef name="dbusers" classname="com.ericsson.eniq.install.tools.DBUsers"/>
+  <taskdef name="INIGetPassword" classname="com.distocraft.dc5000.install.ant.INIGetPassword"/>
+  <taskdef name="INIGet" classname="com.distocraft.dc5000.install.ant.INIGet"/>
+  <taskdef name="MergeProperties" classname="com.distocraft.dc5000.install.ant.MergeProperties"/>
+  <taskdef name="UpdateProperties" classname="com.distocraft.dc5000.install.ant.UpdateProperties"/>
+  <taskdef name="lstoproperty" classname="com.distocraft.dc5000.install.ant.LsToProperty"/>
+  <taskdef name="IntervalDSTModifier" classname="com.distocraft.dc5000.install.ant.IntervalDSTModifier"/>
+  <taskdef name="MergeWebXML" classname="com.distocraft.dc5000.install.ant.MergeWebXML"/>
+  <taskdef name="trivialxml" classname="com.ericsson.eniq.install.tools.TrivialXMLTask"/>
+	<taskdef name="replaceCrypted" classname="com.ericsson.eniq.install.tools.CryptAndReplaceTask"/> 
+  
+  <property name="versiondb" value="${dc.installer.dir}/versiondb.properties"/>
+  <property name="obsoletedir" value="${dc.installer.dir}/obsolete"/>
+
+  <property name="DWH_INI" value="${dc.conf.dir}/dwh.ini"/>
+  <property name="NIQ_INI" value="${dc.conf.dir}/niq.ini"/>
+
+  <!-- Macro to get a password, looks up repdb.meta_database first, if nothing found looks up dwh.ini then niq.ini (in that order)
+    If no password can be found (in repdb, dwh.ini or niq.ini) the macro will fail (can be turned off by setting fail-if-undefined="false")
+    Uses the ini-section & ini-parameter as the return property i.e. ${ini-section.ini-parameter} see example below:
+    e.g.
+      <get-password dbusers-user="dwhrep" dbusers-conn="dwhrep"
+            ini-section="REP" ini-parameter="DWHREPPassword"/>
+      <echo message="Got a password:${REP.DWHREPPassword}"/>
+
+    Note: On initial install the passwords are in the ini files & get wiped after.
+          Upgrades should read repdb (and ETLCServer.properties) for passwords and error out if nothing/wrong values found.
+  -->
+  <macrodef name="get-password">
+    <attribute name="ini-section"/>
+    <attribute name="ini-parameter"/>
+    <attribute name="dbusers-user"/>
+    <attribute name="dbusers-conn"/>
+    <attribute name="fail-if-undefined" default="true"/>
+    <sequential>
+      <exec executable="/eniq/sw/installer/dbusers" failonerror="false"
+          resultproperty="_@{ini-section}.@{ini-parameter}_exit.code" errorproperty="_errorproperty"
+          outputproperty="_@{ini-section}.@{ini-parameter}">
+        <arg value="@{dbusers-user}"/>
+        <arg value="@{dbusers-conn}"/>
+      </exec>
+	  <property name="@{ini-section}.@{ini-parameter}_exit.code" value="${_@{ini-section}.@{ini-parameter}_exit.code}"/>
+      <if>
+		<and>
+        <equals arg1="${@{ini-section}.@{ini-parameter}_exit.code}" arg2="0"/>
+		<not>
+		<equals arg1="${_@{ini-section}.@{ini-parameter}}" arg2=""/>
+		</not>
+		</and>
+        <then>
+          <property name="@{ini-section}.@{ini-parameter}" value="${_@{ini-section}.@{ini-parameter}}"/>
+          <echo message="Read @{dbusers-user}:@{dbusers-conn} from repdb"/>
+        </then>
+        <else>
+          <echo message="Need to lookup ini files ..."/>
+          <if>
+            <available file="${DWH_INI}"/>
+            <then>
+              <INIGetPassword file="${DWH_INI}" section="@{ini-section}" parameter="@{ini-parameter}"/>
+            </then>
+            <else>
+              <INIGetPassword file="${NIQ_INI}" section="@{ini-section}" parameter="@{ini-parameter}"/>
+            </else>
+          </if>
+          <echo message="Read @{dbusers-user}:@{dbusers-conn} from ini"/>
+        </else>
+      </if>
+      <if>
+        <equals arg1="@{fail-if-undefined}" arg2="true"/>
+        <then>
+          <if>
+            <equals arg1="${@{ini-section}.@{ini-parameter}}" arg2=""/>
+            <then>
+              <fail message="No value available for @{ini-section}.@{ini-parameter} from ini/repdb"/>
+            </then>
+          </if>
+        </then>
+      </if>
+    </sequential>
+  </macrodef>
+
+
+  <target name="all" depends="load_version_info,check_dependencies,run_inst,update_version_list"/>
+
+  <!-- Load and print version information -->
+  <target name="load_version_info">
+    <property file="${dc.extract.dir}/install/version.properties"/>
+    <echo>Installation package information.</echo>
+    <echo>Module name: ${module.name}</echo>
+    <echo>Version: ${module.version}</echo>
+    <echo>Build: ${module.build}</echo>
+  </target>
+
+  <!-- Check package dependencies defined on package to be installed -->
+  <target name="check_dependencies">
+    <property file="${versiondb}"/>
+    <depcheck forceflag="${forceflag}"/>
+    <echo>dependency check succeed</echo>
+  </target>
+
+  <!-- Executes install/upgrade task defined on package to be installed -->
+  <target name="run_inst">
+    <if>
+      <equals arg1="${dc.installation.type}" arg2="update" casesensitive="false"/>
+      <then>
+        <antcall target="update"/>
+      </then>
+    </if>
+    <if>
+      <equals arg1="${dc.installation.type}" arg2="install" casesensitive="false"/>
+      <then>
+        <echo>Executing install target</echo>
+        <antcall target="install"/>
+      </then>
+    </if>
+    <if>
+      <equals arg1="${dc.installation.type}" arg2="force" casesensitive="false"/>
+      <then>
+        <echo>Executing update target</echo>
+        <antcall target="update"/>
+      </then>
+    </if>
+    <if>
+      <equals arg1="${migrateflag}" arg2="update"/>
+      <then>
+        <echo>Executing Migration Step 1 (updating/unloading existing tables on Sybase IQ)</echo>
+        <antcall target="migrate"/>
+      </then>
+    </if> 
+    <if>
+      <equals arg1="${migrateflag}" arg2="migrate"/>
+      <then>
+        <echo>Executing Migration Step 2 (creating/loading tables on SQL Anywhere)</echo>
+        <antcall target="migrate"/>
+      </then>
+    </if> 
+  </target>
+
+  <!-- Updates revision history file -->
+  <target name="update_version_list">
+	<if>
+  	 	  <available file="${versiondb}"/>
+  	  	  <then>
+  	  	  	<UpdateProperties propertiesFile="${versiondb}" action="remove" key="module.AdminUI_BusyHour" verbose="false"/>
+		  </then>
+  	</if>
+  	<propertyfile file="${versiondb}">
+  	      <entry key="module.${module.name}" value="${module.version}b${module.build}"/>
+  	    </propertyfile>
+  	
+  	<echo>Calling update action type </echo>
+  	<UpdateProperties propertiesFile="${versiondb}" action="update" key="module.${module.name}" value ="${module.version}b${module.build}"/>
+  	
+  	
+  	
+  </target>
+
+  <!-- Common targets. These target can be used by scripts of installed packages. -->
+  <!-- This ant script itself does not use these targets. -->
+
+  <target name="moveToObsolete" if="zip_install">
+    <mkdir dir="${obsoletedir}"/>
+    <move todir="${obsoletedir}">
+      <fileset dir="${dc.platform.dir}">
+        <include name="${module.name}-*/**"/>
+      </fileset>
+    </move>
+  </target>
+
+  <target name="copyTmpToDeploy" if="zip_install">
+    <property name="dc.inst_dir" value="${dc.platform.dir}/${module.name}-${module.version}b${module.build}"/>
+    <mkdir dir="${dc.inst_dir}"/>
+    <copy toDir="${dc.inst_dir}">
+      <fileset dir="${dc.installer.dir}/tmp"/>
+    </copy>
+  </target>
+
+  <target name="check_dir">
+    <if>
+      <available file="${dir}"/>
+      <then>
+        <echo>${dir} directory already exists</echo>
+      </then>
+      <else>
+        <mkdir dir="${dir}"/>
+        <chmod dir="${dir}" perm="u+rwx,g+rwx,o-rwx"/>
+      </else>
+    </if>
+  </target>
+
+  <target name="check_link">
+    <trycatch property="msg1">
+      <try>
+        <forcedelete file="${link}"/>
+      </try>
+      <catch>
+        <echo>remove ${link} failed: ${msg1}</echo>
+      </catch>
+    </trycatch>
+
+    <symlink link="${link}" resource="${resource}"/>
+  </target>
+
+  <!-- Executes one sql clause is specified database-->
+  <!-- Parameters: dbname=Name of database in etlrep.Metadatabases sqlfile=Name of sql file-->	
+  <!-- Optional Parameters: typename=the roletype of the user (USER or DBA), default USER -->
+  <target name="run_one_sql">
+
+  	<!-- set a default value for the typename property if it is not already set -->
+  	<property name="typename" value="USER"/>
+
+    <property name="sqlfilesdir" value="${dc.installer.dir}/sqlfiles"/>
+    
+    <if>
+      <equals arg1="${module.name}" arg2="repository" /> <!-- If the module is repository -->
+      <then>
+      <if>
+         <equals arg1="${migrateflag}" arg2="update" />  <!-- if the migrate flag is set to update (update Sybase IQ REPDB) --> 
+         <then>
+           <property name="loaded_filename" value="${module.name}_${sqlfile}"/>
+		   <if>
+				<available file="${loaded_filename}" filepath="${sqlfilesdir}"/>
+				<then>
+					<property name="file_already_loaded" value="true"/>
+				</then>
+			</if>
+         </then>
+         <else> <!-- if the migrate flag is not set to update (create Sybase Anywhere REPDB) -->
+			<!-- need to handle both ASA_repository_sybase and repository_sybase....  names... -->
+			<property name="base_name" value="${module.name}_${sqlfile}"/>
+			<if>
+				<available file="ASA_${base_name}" filepath="${sqlfilesdir}"/>
+				<then>
+					<property name="file_already_loaded" value="true"/>
+				</then>
+				<elseif>
+					<available file="${base_name}" filepath="${sqlfilesdir}"/>
+					<then>
+						<property name="file_already_loaded" value="true"/>
+					</then>
+				</elseif>
+			</if>
+			<property name="loaded_filename" value="ASA_${base_name}"/>
+         </else>
+      </if>   
+      </then>
+      <else>
+         <property name="loaded_filename" value="${module.name}_${sqlfile}"/>
+		 <if>
+			<available file="${loaded_filename}" filepath="${sqlfilesdir}"/>
+			<then>
+				<property name="file_already_loaded" value="true"/>
+			</then>
+		</if>
+      </else>
+    </if>
+    <if>
+      <equals arg1="${file_already_loaded}" arg2="true" />
+      <then>
+        <echo>Sql ${sqlfile} already executed.</echo>
+      </then>
+      <else>
+        <GetDBProperties name="${dbname}" type="${typename}" configurationDirectory="${dc.conf.dir}"/>
+
+      	<condition property="dbaUser">
+      		<equals arg1="${typename}" arg2="DBA"/>
+      	</condition>
+
+      	<if>
+      		<isset property="dbaUser"/>
+      		<then>
+      	       <propertycopy name="rs_usr" from="${dbname}DatabaseDBAUsername" override="true"/>
+      	       <propertycopy name="rs_pwd" from="${dbname}DatabaseDBAPassword" override="true"/>
+      		</then>
+      		<else>
+       	       <propertycopy name="rs_usr" from="${dbname}DatabaseUsername" override="true"/>
+       	       <propertycopy name="rs_pwd" from="${dbname}DatabasePassword" override="true"/>
+      		</else>
+      	</if>
+
+        <propertycopy name="rs_drv" from="${dbname}DatabaseDriver"/>
+        <propertycopy name="rs_url" from="${dbname}DatabaseUrl"/>
+
+      	<if>
+      	  <isset property="statement"/>
+      	  <then>
+      	    <sql driver="${rs_drv}" url="${rs_url}" userid="${rs_usr}" password="${rs_pwd}">
+      	      <classpath>
+      	        <fileset dir="${dc.platform.dir}/">
+      	          <include name="**/dclib/*.jar"/>
+      	        </fileset>
+      	      </classpath>
+      	      <transaction>
+      	      	${statement}
+      	      </transaction>
+      	   </sql>
+      	  </then>
+      	  <else>
+            <sql driver="${rs_drv}" url="${rs_url}" userid="${rs_usr}" password="${rs_pwd}" src="${dc.extract.dir}/sql/${sqlfile}">
+              <classpath>
+                <fileset dir="${dc.platform.dir}/">
+                  <include name="**/dclib/*.jar"/>
+                </fileset>
+              </classpath>
+            </sql>
+
+      	  	<if>
+				<isset property="swipeFile"/>
+				<then>
+					<antcall target="check_dir">
+					  <param name="dir" value="${dc.installer.dir}/sqlfiles"/>
+					</antcall>
+					<touch file="${dc.installer.dir}/sqlfiles/${module.name}_${sqlfile}"/>
+				</then>
+				<else>
+            <copy file="${dc.extract.dir}/sql/${sqlfile}" toFile="${dc.installer.dir}/sqlfiles/${loaded_filename}"/>
+				</else>
+			</if>
+
+      	  	<if>
+                <isset property="wantToExecuteeveryTime"/>
+                <then>
+                      <antcall target="check_dir">
+                      <param name="dir" value="${dc.installer.dir}/sqlfiles"/>
+                      </antcall>
+                        <if>
+                           <available file="${dc.installer.dir}/sqlfiles/${module.name}_${sqlfile}"/>
+                           <then>
+                             <delete file="${dc.installer.dir}/sqlfiles/${module.name}_${sqlfile}"/>
+                           </then>
+                        </if>
+                </then>
+            </if>
+      	  </else>
+      	</if>
+      </else>
+    </if>
+  </target>
+
+</project>

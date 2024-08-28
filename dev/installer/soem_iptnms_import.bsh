@@ -1,0 +1,230 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : soem_iptnms_import.bsh
+# Date    : 17/12/2018
+# Purpose : To download topology files from SO-EM/IPTNMS server using 
+#           SSH connection between ENIQ and SO-EM/IPTNMS server
+#
+# Usage   : soem_iptnms_import.bsh <user@RemoteIP> <CIMName> <FileNamePattern> <RemoteDir> <TargetDir>
+#
+# ********************************************************************
+#
+#   Functions
+#
+# ********************************************************************
+### Function: _echo ###
+#
+# Prints logs in LOG_FILE
+#
+# Arguments:
+#       $1 : LOG_FILE content
+# Return Values:
+#       none
+_echo(){
+	$ECHO "$1" >> $LOG_FILE	
+}
+
+### Function: abort_script ###
+#
+#   This will is called if the script is aborted thru an error
+#   error signal sent by the kernel such as CTRL-C or if a serious
+#   error is encountered during runtime
+#
+# Arguments:
+#       $1 - Error message from part of program (Not always used)
+# Return Values:
+#       none
+abort_script()
+{
+_err_time_=`$DATE '+%Y-%b-%d_%H.%M.%S'`
+
+if [ "$1" ]; then
+        $ECHO "${_err_time_} - ERROR : $1 Script aborted......." >> $LOG_FILE
+        exit 1
+else
+        $ECHO "${_err_time_} - ERROR : Script aborted......." >> $LOG_FILE
+        exit 1
+fi
+}
+
+### Function: setup_env ###
+#
+# Setup up path environment etc
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+setup_env()
+{
+# ENIQ base dir
+ENIQ_BASE_DIR=/eniq
+
+# ENIQ BIN Directory
+ENIQ_BIN_DIR=${ENIQ_BASE_DIR}/sw/bin
+
+COMMON_VARIABLES="common_variables.lib"
+}
+
+
+# ********************************************************************
+#
+#   Main body of program
+#
+# ********************************************************************
+#
+# Setup up path environment etc
+setup_env
+
+if [ -f ${ENIQ_BIN_DIR}/${COMMON_VARIABLES} ]; then
+	. ${ENIQ_BIN_DIR}/${COMMON_VARIABLES}
+else
+    echo "File ${ENIQ_BIN_DIR}/${COMMON_VARIABLES} not found"
+    exit 1
+fi
+
+# Create LOG File
+TOPO_LOG=/eniq/log/topology
+if [ ! -d ${TOPO_LOG} ]; then
+	$MKDIR -p ${TOPO_LOG} > /dev/null 2>&1
+fi
+
+LOG_FILE=${TOPO_LOG}/topology_file_download_`$DATE '+%Y_%m_%d'`.log
+
+# Create a temporary Directory
+TEM_DIR=/tmp/topology_file.$$.$$
+$RM -rf ${TEM_DIR} > /dev/null 2>&1
+$MKDIR -p ${TEM_DIR}
+if [ $? -ne 0 ]; then
+    _err_msg_="Could not create directory $TEM_DIR"
+    abort_script "${_err_msg_}"
+fi
+
+# Check all required parameters
+if [ $# -ne 5 ]; then
+	_err_msg_="Few parameter missed."
+	abort_script ${_err_msg_}
+fi
+
+# Assign Parameters
+_remote_host_=$1
+_cimname_=$2
+_fileNamePattern_=$3
+_rem_dir_=$4
+_target_dir_=$5
+
+if [ `$ECHO $_target_dir_ | $GREP -c "iptnms_cs" ` -gt 0 ]
+then
+	date_pattern_cs=`$DATE +'*_%Y_%m_%d_*'`
+	_fileNamePattern_=$date_pattern_cs$_fileNamePattern_
+
+elif [ `$ECHO $_target_dir_ | $GREP -c "iptnms_ps" ` -gt 0 ]
+then
+	date_pattern_ps=`$DATE +'*_%Y-%m-%d_*'`
+	_fileNamePattern_=$date_pattern_ps$_fileNamePattern_
+else
+	date_pattern=`$DATE +'%Y%m%d'_*`
+        _fileNamePattern_=$_fileNamePattern_$date_pattern
+fi
+
+
+
+# Get the list of files to download
+_echo "Make a file list to download"
+_echo "============================"
+_echo " Connecting to remote host "
+$SSH ${_remote_host_} "cd ${_rem_dir_}; ls ${_fileNamePattern_}" > ${TEM_DIR}/list.txt
+if [ $? != 0 ]; then
+	_err_msg_="while getting list of file using SSH.."
+	abort_script ${_err_msg_}
+fi
+$CAT ${TEM_DIR}/list.txt >> ${LOG_FILE}
+# Start downloading
+while read _rem_file_
+do
+	$CAT ${LOG_FILE} | $GREP "${_rem_file_} file downloaded successfully" > /dev/null 2>&1
+	if [ $? != 0 ]; then		
+		_echo "Start Downloading ${_rem_file_} file."
+		$SCP -qBr ${_remote_host_}:${_rem_dir_}/${_rem_file_} ${_target_dir_}/${_cimname_}-${_rem_file_}
+		if [ $? != 0 ]; then
+	        _err_msg_="Download of files failed from ${_rem_dir_} on ${_remote_host_}"
+			abort_script ${_err_msg_}
+		fi
+		_echo "File : ${_rem_file_} copied successfully."
+		_is_contain_=`$ECHO ${_rem_file_} | $GREP -i ".gz"`
+		if [ ! -z ${_is_contain_} ]; then
+			_echo "This is zip file, unzipping it now"
+			$GUNZIP ${_target_dir_}/${_cimname_}-${_rem_file_}
+			if [ $? != 0 ]; then
+				_err_msg_="While unzip the file (${_cimname_}-${_rem_file_})"
+				abort_script ${_err_msg_}
+			fi
+		fi
+		currentpwd=`pwd`
+		_echo "path  ${currentpwd} "
+		cd ${_target_dir_} 
+		if [ $? != 0 ]; then
+			_echo "not moved to target dir "
+		else
+			_echo " moved to target dir "
+		fi
+		for i in 'AccessPoint' 'Path' 'Routing_'
+		do
+			Circuit=`ls | grep -i $i`
+			if [ ! -z ${Circuit} ] ; then
+				_echo " file matching $i "
+				rm -rf ${Circuit} 
+				if [ $? != 0 ] ; then
+					_echo "file ${Circuit} not able to delete "
+				else
+					_echo "$Circuit file Deleted successfully"
+				fi
+			fi	
+		done
+		Packet=`ls | grep -i CCCBulkTransfer`
+		if [ ! -z ${Packet} ] ; then
+			_echo " file matching CCCBulkTransfer "
+			sed '/EndPoint/,/EndPoint/d' $Packet>> ${TEM_DIR}/temp_$Packet
+			if [ $? != 0 ] ; then
+				_echo "failed to delete the contents in $Packet "
+			else
+				_echo "contents replaced in $Packet  "
+			fi 
+			mv ${TEM_DIR}/temp_$Packet $Packet
+			if [ $? != 0 ] ; then
+				_echo "temp file not moved "
+			fi
+			rm -rf ${TEM_DIR}/temp_$Packet
+			if [ $? != 0 ] ; then
+				_echo "temp file not deleted"
+			fi
+		fi
+		_echo " moving back again to previous  dir "
+		cd ${currentpwd}
+			if [ $? != 0 ] ; then
+				_echo "not able to move to previous dir"
+			else
+				_echo "moved to previous dir "
+			fi		
+		_echo "${_rem_file_} file downloaded successfully to ${_target_dir_} with Pre-fix ${_cimname_}"	
+	else
+		_echo "${_rem_file_} file already parsed"
+	 fi
+done < ${TEM_DIR}/list.txt
+
+# Before exit, Cleanup
+$RM -f ${TEM_DIR}/list.txt > /dev/null 2>&1
+exit 0

@@ -1,0 +1,217 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : LogRetention.bsh
+# Date    : 16/05/2019
+# Purpose : Script to transfer logs for backup purpose from users given source directory 
+#			to users given destination directory.
+# Usage: bash LogRetention.bsh -s <SOURCE_DIR> -d <DESTINATION_DIR> [ -p <START_DATE> -q <END_DATE>]
+# ********************************************************************
+
+if [[ ! -r "${BIN_DIR}/common_variables.lib" ]] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 3
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+
+SOURCE_DIR=''
+DESTINATION_DIR=''
+START_DATE=''
+END_DATE=''
+CURRENT_DATE=$($DATE --date="1 day ago" +'%Y-%m-%d')
+TAR_ERROR_MSG="Tar generation failed"
+
+usage_msg() 
+{
+$CLEAR
+$ECHO "
+Usage: bash LogRetention.bsh -s <SOURCE_DIR> -d <DESTINATION_DIR> [ -p <START_DATE> -q <END_DATE>]
+                      
+options:
+
+-s : Source Directory
+-d : Destination Directory
+-p : Start Date (YYYY-MM-DD)
+-q : End Date (YYYY-MM-DD)"
+
+$ECHO -e "\n Please run the script as per the usage. \n"
+}
+
+
+
+
+
+make_tar()
+{
+	if [[ $# -eq 2 ]]; then
+		log_dir_name=$(basename $1)
+		$TAR -czvf $2/backup_${log_dir_name}_$($DATE +'%m-%d-%Y').tar.gz --exclude *.nfs $1
+		returned_status_code=$?
+        if [ $returned_status_code != 0 ]; then
+			$ECHO -e "\n $TAR_ERROR_MSG with error code $returned_status_code"
+            if [[ -f $2/backup_$($DATE +'%m-%d-%Y').tar.gz ]]; then
+                rm $2/backup_$($DATE +'%m-%d-%Y').tar.gz
+            fi
+			exit $returned_status_code
+		else
+			$ECHO -e  "\n Tar file is successfully created in the directory $2 with name backup_$($DATE +'%m-%d-%Y').tar.gz . \n"
+		fi
+	fi
+	
+	
+# below codes are for creating archive of log files between given dates.
+	
+	if [[ $# -eq 3 ]]; then
+		log_dir_name=$(basename $1)
+		start_date=$($DATE -d $3 +"%Y-%m-%d"+%s)
+		end_date=$($DATE -d $CURRENT_DATE +"%Y-%m-%d"+%s)
+		if [[ $start_date < $end_date ]]; then
+			$FIND $1 -type f -newermt $3 ! -newermt $CURRENT_DATE -exec $TAR -rvf $2/backup_${log_dir_name}_$3_$CURRENT_DATE.tar.gz --exclude *.nfs "{}" \;
+			returned_status_code=$?
+			if [ $returned_status_code != 0 ]; then
+				$ECHO -e "\n $TAR_ERROR_MSG with error code $returned_status_code"
+				exit 1
+			else
+				$ECHO -e "\n Tar file is successfully created in the directory $2 \n"
+			fi
+		else
+			$ECHO -e "\n Start Date should be less than Current Date \n"
+		fi
+	fi
+	
+	if [[ $# -eq 4 ]]; then
+		log_dir_name=$(basename $1)
+		start_date=$($DATE -d $3 +"%Y-%m-%d"+%s)
+		end_date=$($DATE -d $4 +"%Y-%m-%d"+%s)
+		if [[ $start_date < $end_date ]]; then
+			$FIND $1 -type f -newermt $3 ! -newermt $4 -exec $TAR -rvf $2/backup_${log_dir_name}_$3_$4.tar.gz --exclude *.nfs "{}" \;
+			returned_status_code=$?
+			if [ $returned_status_code != 0 ]; then
+				$ECHO -e "\n $TAR_ERROR_MSG with error code $returned_status_code"
+				exit 1
+			else
+				$ECHO -e "\n Tar file is successfully created in the directory $2 \n"
+			fi
+		else
+			$ECHO -e "\n Start Date should be less than End Date \n"
+		fi			
+	fi	
+	
+}
+
+while getopts ":s:d:p:q:" arg; do
+  case $arg in
+    s) 
+		SOURCE_DIR="$OPTARG" 
+       if [ ! -d $SOURCE_DIR ]; then
+			$ECHO -e " \n Source directory : $SOURCE_DIR does not exist \n"
+			exit 1
+		fi
+	   ;;
+	d) 
+		DESTINATION_DIR="$OPTARG"
+		if [ ! -d $DESTINATION_DIR ]; then
+			$ECHO -e " \n Destination directory : $DESTINATION_DIR does not exist \n"
+			exit 1
+		fi		
+		;;
+	p) 
+		input_date="$OPTARG"
+		
+		if [[ $input_date =~ ^[0-9]{4}\-(0?[1-9]|1[012])\-(0?[1-9]|[12][0-9]|3[01])$ ]]; then
+			START_DATE=$input_date
+		else	
+			$ECHO -e "\n Start Date :- $input_date is not in proper format as (YYYY-MM-DD) \n"
+			exit 1
+		fi
+		date -d $input_date 2> /dev/null
+		if [[ $? -ne 0 ]]; then
+			$ECHO -e "\n Start Date :- $input_date is not valid  \n"
+			exit 1
+		fi
+		;;
+	q) 
+		input_date="$OPTARG"
+		
+		if [[ $input_date =~ ^[0-9]{4}\-(0?[1-9]|1[012])\-(0?[1-9]|[12][0-9]|3[01])$ ]]; then
+			END_DATE=$input_date
+		else	
+			$ECHO -e "\n End Date :- $input_date is not in proper format as (YYYY-MM-DD) \n"
+			exit 1
+		fi	
+		date -d $input_date 2> /dev/null
+		if [[ $? -ne 0 ]]; then
+			$ECHO -e "\n End Date :- $input_date is not valid \n"
+			exit 1
+		fi
+		;;	
+		
+   \?) 
+		usage_msg
+       exit 1
+       ;;
+  esac
+done
+
+shift `expr $OPTIND - 1`
+
+if [[ $START_DATE = '' ]] && [[ $END_DATE = '' ]]; then
+	if [[ $SOURCE_DIR = '' ]] || [[ $DESTINATION_DIR = '' ]] ; then
+		$ECHO -e "\n Need to provide both the source and the destination directories. \n"
+		usage_msg
+		exit 1
+	else
+		if [[  $DESTINATION_DIR == /eniq/log* ]]; then
+					while true
+					do
+							$ECHO -e "\n Destination directory should not be a log directory."
+							$ECHO -e  " Do you still want to continue? (Y/N)\n"
+							read option
+							case $option in
+							[Nn]*)
+									$ECHO -e "\n Please try again. Exiting backup creation.\n"
+									exit
+									;;
+							[Yy]*)
+									$ECHO -e "\n Continuing backup creation...\n"
+									break
+									;;
+							*)
+									$ECHO "Invalid choice made"
+									;;
+							esac
+					done
+				make_tar $SOURCE_DIR $DESTINATION_DIR
+			else
+					make_tar $SOURCE_DIR $DESTINATION_DIR
+			fi
+	fi
+
+elif [[ $START_DATE != '' ]] && [[ $END_DATE = '' ]]; then
+	make_tar $SOURCE_DIR $DESTINATION_DIR $START_DATE
+elif [[ $START_DATE != '' ]] && [[ $END_DATE != '' ]]; then
+	make_tar $SOURCE_DIR $DESTINATION_DIR $START_DATE $END_DATE
+elif [[ $START_DATE = '' ]] && [[ $END_DATE != '' ]]; then
+	$ECHO "Start Date is a mandatory parameter when End Date is being provided."
+	exit 1
+else
+	usage_msg
+fi
+
+exit 0
+ 

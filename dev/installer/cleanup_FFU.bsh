@@ -1,0 +1,290 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : cleanup_FFU.bsh
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : Ericsson Network IQ ETLC
+#
+#           NMI to call script for FFU GUI clean-up activities
+# Usage   : cleanup_FFU.bsh
+# Author  : XARJSIN
+# ********************************************************************
+
+UPGRADE_FLAG=/var/tmp/FFU_FLAG_PID
+INSTALL_FLAG=/var/tmp/INSTALL_FLAG_PID
+COMMIT_FLAG=/var/tmp/FFU_COMMIT_PID
+COMMITINS_FLAG=/var/tmp/INSTALL_COMMIT_PID
+ROLLBACK_FLAG=/var/tmp/FFU_ROLLBACK_PID
+ROLLBACKINS_FLAG=/var/tmp/INSTALL_ROLLBACK_PID
+COMMIT_SUCCESS_FLAG=/var/tmp/COMMIT_SUCCESSFUL
+ROLLBACK_SUCCESS_FLAG=/var/tmp/ROLLBACK_SUCCESSFUL
+NMI_FLAG=/var/tmp/pid_of_upgrade_process
+FVM_FEAT_FILE=/var/tmp/FVM_FeatProgress
+INTF_ACTIVATED=/var/tmp/FVM_OSSProgress
+LOG_FOLDER=/eniq/log/sw_log/adminui/ffu_logs
+UPGRADE_PATH_FILE=/var/tmp/FFU_upgrade_path_file
+INSTALL_PATH_FILE=/var/tmp/FFU_install_path_file
+USER_LOCK_FILE=/eniq/local_logs/UserLock.txt
+DATE_VAL=`date +"%Y_%m_%d"`
+TIMESTAMP=`date +"%Y-%m-%d %H:%M:%S"`
+LOG_FILE=${LOG_FOLDER}/cleanup_log-${DATE_VAL}.log
+
+RM=/usr/bin/rm
+CAT=/usr/bin/cat
+PS=/usr/bin/ps
+GREP=/usr/bin/grep
+MKDIR=/usr/bin/mkdir
+
+### Function: postupdate ###
+# Called at the beginning of post-upgrade or rollback
+# Will clean up UI upgrade flag
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+postupdate()
+{
+	echo "$TIMESTAMP :: Cleanup before post-update" >> ${LOG_FILE}
+	if [ -f $UPGRADE_FLAG ]
+	then
+		deleteFlag $UPGRADE_FLAG
+	fi
+	
+	if [ -f $INSTALL_FLAG ]
+	then
+		deleteFlag $INSTALL_FLAG
+	fi
+	
+	if [ -f $FVM_FEAT_FILE ]
+	then
+		deleteFlag $FVM_FEAT_FILE
+	fi
+	
+	if [ -f $COMMIT_SUCCESS_FLAG ]
+	then
+		deleteFlag $COMMIT_SUCCESS_FLAG
+	fi
+	
+	if [ -f $ROLLBACK_SUCCESS_FLAG ]
+	then
+		deleteFlag $ROLLBACK_SUCCESS_FLAG
+	fi
+	
+	if [ -f $USER_LOCK_FILE ]
+	then
+		deleteFlag $USER_LOCK_FILE
+	fi
+	exit 0
+}
+
+### Function: commit ###
+# Called at the end of post-upgrade
+# Will clean up UI commit flag
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+commit()
+{
+	echo "$TIMESTAMP :: Cleanup after commit" >> ${LOG_FILE}
+	if [ -f $COMMIT_FLAG ]
+	then
+		deleteFlag $COMMIT_FLAG
+	fi
+	
+	if [ -f $COMMITINS_FLAG ]
+	then
+		deleteFlag $COMMITINS_FLAG
+	fi
+	
+	echo "$TIMESTAMP :: commit successful" >> ${COMMIT_SUCCESS_FLAG}
+	chmod 777 $COMMIT_SUCCESS_FLAG
+	exit 0
+}
+
+### Function: rollback ###
+# Called at the end of rollback
+# Will clean up UI rollback flag
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+rollback()
+{
+	echo "$TIMESTAMP :: Cleanup after rollback" >> ${LOG_FILE}
+	if [ -f $ROLLBACK_FLAG ]
+	then
+		deleteFlag $ROLLBACK_FLAG
+	fi
+	
+	if [ -f $ROLLBACKINS_FLAG ]
+	then
+		deleteFlag $ROLLBACKINS_FLAG
+	fi
+	
+	if [ -f $UPGRADE_PATH_FILE ]
+	then
+		deleteFlag $UPGRADE_PATH_FILE
+	fi
+	
+	if [ -f $INSTALL_PATH_FILE ]
+	then
+		deleteFlag $INSTALL_PATH_FILE
+	fi
+	
+	echo "$TIMESTAMP :: rollback successful" >> ${ROLLBACK_SUCCESS_FLAG}
+	chmod 777 $ROLLBACK_SUCCESS_FLAG
+	
+	exit 0
+}
+
+### Function: update ###
+# Called at the start of upgrade
+# Will clean up UI upgrade flag
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+update()
+{
+	echo "$TIMESTAMP :: Cleanup before update" >> ${LOG_FILE}
+	if [ -f $UPGRADE_FLAG ]
+	then
+		PID_GUI=`$CAT $UPGRADE_FLAG`
+		PID_NMI=`$CAT $NMI_FLAG`
+		if [ $PID_GUI -eq $PID_NMI ]
+		then
+			PID_ALIVE=`$PS -p $PID_GUI | $GREP -v "COMMAND" | $GREP -v "CMD"`
+			if [ -z "{$PID_ALIVE}" ]
+			then
+				deleteFlag $UPGRADE_FLAG
+			fi
+		else
+			deleteFlag $UPGRADE_FLAG
+		fi
+	fi
+	
+	if [ -f $INSTALL_FLAG ]
+	then
+		PID_GUI=`$CAT $INSTALL_FLAG`
+		PID_NMI=`$CAT $NMI_FLAG`
+		if [ $PID_GUI -eq $PID_NMI ]
+		then
+			PID_ALIVE=`$PS -p $PID_GUI | $GREP -v "COMMAND" | $GREP -v "CMD"`
+			if [ -z "{$PID_ALIVE}" ]
+			then
+				deleteFlag $INSTALL_FLAG
+			fi
+		else
+			deleteFlag $INSTALL_FLAG
+		fi
+	fi
+	
+	if [ -f $FVM_FEAT_FILE ]
+	then
+		deleteFlag $FVM_FEAT_FILE
+	fi
+	
+	if [ -f $COMMIT_SUCCESS_FLAG ]
+	then
+		deleteFlag $COMMIT_SUCCESS_FLAG
+	fi
+	
+	if [ -f $ROLLBACK_SUCCESS_FLAG ]
+	then
+		deleteFlag $ROLLBACK_SUCCESS_FLAG
+	fi
+	
+	if [ -f $INTF_ACTIVATED ]
+	then
+		deleteFlag $INTF_ACTIVATED
+	fi
+	
+	exit 0
+}
+
+
+### Function : deletefile ###
+# Delete feature_ouput_list_* file during snapshot creation failure through AdminUI
+# Arguments:
+#   File to be deleted
+# Return Values:
+#   none
+delete(){
+	file=$1
+	$RM $file >> ${LOG_FILE} 2>&1
+	errorCode=$?
+	if [ $errorCode -ne 0 ]
+	then
+		echo "Cannot delete $file" >> ${LOG_FILE}
+	fi
+
+}
+
+
+### Function: deleteFlag ###
+# funtion for deleting flag files
+#
+# Arguments:
+#   File name to be deleted
+# Return Values:
+#   none
+deleteFlag()
+{
+	flag=$1
+	$RM -f $flag >> ${LOG_FILE} 2>&1
+	errorCode=$?
+	count=0
+	while [ $errorCode -ne 0 -a $count -lt 3 ]
+	do
+		sleep 2
+		$RM -f $flag
+		errorCode=$?
+		count=$((count+1))
+	done
+	if [ $errorCode -ne 0 ]
+	then
+		echo "Cannot delete $flag" >> ${LOG_FILE}
+	fi
+
+}
+
+
+### Main flow of program ###
+
+if [ ! -d $LOG_FOLDER ]; then
+	$MKDIR -m 777 $LOG_FOLDER;
+fi
+
+case $1 in
+	"-postupdate") postupdate
+	;;
+	"-rollback") rollback
+	;;
+	"-commit") commit
+	;;
+	"-update") update
+	;;
+	"-delete") delete $2
+	;;
+	*) echo "$TIMESTAMP :: Incorrect arguments" >> ${LOG_FILE}
+	exit 1
+	;;
+esac

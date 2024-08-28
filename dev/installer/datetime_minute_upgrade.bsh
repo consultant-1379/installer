@@ -1,0 +1,225 @@
+#!/usr/bin/sh
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : datetime_minute_upgrade.bsh
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : Ericsson Network IQ - Upgrade partitions to truncate datetime_id to minute.
+#           This should only be used for a once off upgrade of the database schema.
+# Usage   : datetime_minute_upgrade.bsh
+# ********************************************************************
+
+if [ -z "${CONF_DIR}" ] ; then
+  echo "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  echo "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 2
+fi
+
+. ${CONF_DIR}/niq.rc
+
+# Source the common variables for RHEL
+if [ -z "${BIN_DIR}" ] ; then
+  echo "ERROR: BIN_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+CPATH="${INSTALLER_DIR}/lib/installer.jar"
+
+DIRS=`${LS} ${PLATFORM_DIR}`
+
+for file in $DIRS
+do
+  if [ -d ${PLATFORM_DIR}/$file/dclib ]
+  then
+    JARS=`${LS} ${PLATFORM_DIR}/$file/dclib/*.jar`
+
+    for jar in $JARS
+    do
+      CPATH="${CPATH}:${jar}"
+    done
+  fi
+done
+
+TIMESTAMP=`${DATE} +%y.%m.%d_%H:%M:%S`
+
+LOGFILE=${LOG_DIR}/datetime_minute_upgrade/execute_${TIMESTAMP}.log
+
+HSTNAME=`${HOSTNAME}`
+
+if [ ! -d ${LOG_DIR}/datetime_minute_upgrade ] ; then
+  ${MKDIR} -p ${LOG_DIR}/datetime_minute_upgrade  | ${TEE} -a ${LOGFILE}
+fi
+
+TEMPLATE_DIR="${INSTALLER_DIR}/datetime_minute_upgrade_templates"
+
+if [ ! -d ${TEMPLATE_DIR} ] ; then
+  ${MKDIR} -p ${TEMPLATE_DIR}  | ${TEE} -a ${LOGFILE}
+fi
+
+# ======================= Create SQL Tempalates ===================
+# =================================================================
+
+${CAT} > ${TEMPLATE_DIR}/update.vm << UPDATE
+update \$partitionName set datetime_id = datefloor(MINUTE,datetime_id);
+UPDATE
+
+${ECHO} "====================================================================" | ${TEE} -a ${LOGFILE}
+${ECHO} "  Ericsson Network IQ - Apply datetime_upgrade on @ ${HSTNAME}" | ${TEE} -a ${LOGFILE}
+${ECHO} "===================================================================="  | ${TEE} -a ${LOGFILE}
+
+
+${ECHO} "Changing engine profile to NoLoads" | ${TEE} -a ${LOG_FILE}
+
+${BIN_DIR}/engine -e changeProfile NoLoads
+
+NOLOADS_EXIT_STATUS=$?
+
+if [ ${NOLOADS_EXIT_STATUS} -ne 0 ] ; then
+  ${ECHO} "Engine status NoLoads could not be changed. Aborting upgrade." | ${TEE} -a ${LOG_FILE}
+  exit 43
+  else
+  ${ECHO} "Engine status changed to NoLoads" | ${TEE} -a ${LOG_FILE}
+fi
+
+${ECHO} "Engine profile NoLoads changed successfully at "`${DATE} +%Y.%m.%d_%H:%M:%S` | ${TEE} -a ${LOG_FILE}
+
+  #Systemd is running
+  ${ECHO} "Systemd is running. Setting scheduler on hold and shutting it down with Systemd scripts." | ${TEE} -a ${LOG_FILE}
+
+  ${BIN_DIR}/scheduler hold
+  SCHEDULER_HOLD_EXIT_STATUS=$?
+
+  if [ ${SCHEDULER_HOLD_EXIT_STATUS} -ne 0 ] ; then
+    ${ECHO} "Scheduler could not be set on hold. Scheduler is not running." | ${TEE} -a ${LOG_FILE}
+   else
+    ${ECHO} "Scheduler set on hold at "`${DATE} +%Y.%m.%d_%H:%M:%S` | ${TEE} -a ${LOG_FILE}
+  fi
+
+  ${ECHO} "Shutdown engine before upgrade (no DB partitions should be write locked)." | ${TEE} -a ${LOG_FILE}
+
+  #Systemd is running
+  ${ECHO} "Systemd is running. Stoping engine with Systemd scripts." | ${TEE} -a ${LOG_FILE}
+  ${ECHO} "Stopping engine" | ${TEE} -a ${LOG_FILE}
+  ${BIN_DIR}/engine stop >> /dev/null 2>&1
+
+  ENGINE_STOP_STATUS=$?
+  if [ ${ENGINE_STOP_STATUS} -ne 0 ] ; then
+    ${ECHO} "Engine had running sets. Force shutdown initiated." | ${TEE} -a ${LOG_FILE}
+    ${SMF_BIN_DIR}/eniq_service_start_stop.bsh -s engine -a clear | ${TEE} -a ${LOG_FILE}
+        ${ECHO} "Engine status cleared" | ${TEE} -a ${LOG_FILE}
+        sleep 10
+        ${BIN_DIR}/engine -e shutdown_forceful 1> /dev/null 2> /dev/null
+        ${ECHO} "Engine forced to shutdown" | ${TEE} -a ${LOG_FILE}
+        sleep 10
+  fi
+
+  ENGINE_SMF_STATUS=`${SYSTEMCTL} -a |${GREP} 'eniq-engine.service' | ${NAWK} '{print $3}'`
+  if [ "${ENGINE_SMF_STATUS}" != "inactive" ]; then
+        ${ECHO} "Engine had running sets. Force shutdown initiated." | ${TEE} -a ${LOG_FILE}
+        ${SMF_BIN_DIR}/eniq_service_start_stop.bsh -s engine -a clear | ${TEE} -a ${LOG_FILE}
+        ${ECHO} "Engine status cleared" | ${TEE} -a ${LOG_FILE}
+        sleep 10
+        ${BIN_DIR}/engine -e shutdown_forceful 1> /dev/null 2> /dev/null
+        ${ECHO} "Engine forced to shutdown" | ${TEE} -a ${LOG_FILE}
+        sleep 10
+        ENGINE_SMF_STATUS=`${SYSTEMCTL} -a |${GREP} 'eniq-engine.service' | ${NAWK} '{print $3}'`
+        if [ "${ENGINE_SMF_STATUS}" != "inactive" ]; then
+                RETRY_COUNT=0
+                until [ "${ENGINE_SMF_STATUS}" = "active" ]
+                do
+                        if [ $RETRY_COUNT -gt 30 ]; then
+                                break
+                        fi
+                        sleep 10
+                        ENGINE_SMF_STATUS=`${SYSTEMCTL} -a |${GREP} 'eniq-engine.service' | ${NAWK} '{print $3}'`
+                        RETRY_COUNT=`expr $RETRY_COUNT + 1`
+                        ${ECHO} "Waiting for engine to go online" | ${TEE} -a ${LOG_FILE}
+                done
+                ${ECHO} "Engine initially started" | ${TEE} -a ${LOG_FILE}
+                ${BIN_DIR}/engine stop | ${TEE} -a ${LOG_FILE}
+        fi
+  fi
+  ${ECHO} "Engine stopped successfully at "`${DATE} +%Y.%m.%d_%H:%M:%S` | ${TEE} -a ${LOG_FILE}
+
+#########################
+
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+ANT_OPTS="$ANT_OPTS $PF_ANT_OPTS" 
+export ANT_OPTS 
+
+export ANT_HOME
+
+${CD} ${INSTALLER_DIR}; ${RT_DIR}/ant/bin/ant -f ${INSTALLER_DIR}/tasks_execute_partiton_upgrade_sql.xml -lib ${CPATH} -DpartitionStorageIdList="EVENT_E_SGEH_ERR:RAW,EVENT_E_SGEH_SUC:RAW" -DpartitionTemplateFilepath=${TEMPLATE_DIR}/update.vm -Ddebug="OFF" -DmaxParallel="5" execute | ${TEE} -a ${LOGFILE}
+
+if [ -f ${LOGFILE} ] ; then
+  SUC=`${CAT} ${LOGFILE} | ${GREP} "BUILD SUCCESSFUL"`
+  if [ ! -z "${SUC}" ] ; then
+    ${ECHO} "======================================="  | ${TEE} -a ${LOGFILE}
+    ${ECHO} "Successfully upgraded datetimes in DWHDB database"  | ${TEE} -a ${LOGFILE}
+    ${ECHO} "======================================="  | ${TEE} -a ${LOGFILE}
+  else
+    ${ECHO} "================================"  | ${TEE} -a ${LOGFILE}
+    ${ECHO} "DWHDB datetime upgrade failed"  | ${TEE} -a ${LOGFILE}
+    ${ECHO} "================================"  | ${TEE} -a ${LOGFILE}
+  fi
+fi
+
+###########################
+
+${BIN_DIR}/engine start
+
+ENGINE_START_STATUS=$?
+
+if [ ${ENGINE_START_STATUS} -ne 0 ] ; then
+  ${ECHO} "Engine could not be started. Plese restart manually." | ${TEE} -a ${LOG_FILE}
+  exit 44
+ else
+  ${ECHO} "Engine restarted succesfully" | ${TEE} -a ${LOG_FILE}
+fi
+
+#Activate the scheduler
+SCHEDULER_ACTIVATE=`scheduler activate | ${GREP} "scheduler is running OK"`
+until [ "${SCHEDULER_ACTIVATE}" = "scheduler is running OK" ]
+  do
+        sleep 10
+        SCHEDULER_ACTIVATE=`scheduler activate | ${GREP} "scheduler is running OK"`
+        ${ECHO} "Activating scheduler."
+  done
+${ECHO} "Activated scheduler successfully at "`${DATE} +%Y.%m.%d_%H:%M:%S` | ${TEE} -a ${LOG_FILE}
+
+${BIN_DIR}/engine -e changeProfile Normal
+
+NORMAL_EXIT_STATUS=$?
+
+if [ ${NORMAL_EXIT_STATUS} -ne 0 ] ; then
+  ${ECHO} "Engine status Normal could not be changed." | ${TEE} -a ${LOG_FILE}
+  exit 43
+  else
+  ${ECHO} "Engine status changed to Normal" | ${TEE} -a ${LOG_FILE}
+fi

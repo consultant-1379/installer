@@ -1,0 +1,224 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : adminui_sessions.bsh
+# Date    : 12/12/2019
+# Purpose : Script to change and get adminUi Logon sessions
+# Usage   : bash adminui_sessions.bsh -A <Action>
+# ********************************************************************
+
+if [ `id -un` != "dcuser"  ] ; then
+	echo -e "\n This script must be executed as dcuser \n"
+	exit 1
+fi
+
+if [[ ! -r "${BIN_DIR}/common_variables.lib" ]] ; then
+  echo "ERROR: File does not exists or is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+TIMESTAMP=`$DATE +%d.%m.%Y`
+
+LOGFILE=/eniq/log/sw_log/adminui/adminui_sessions_${TIMESTAMP}.log
+
+FILE=${RT_DIR}/tomcat/webapps/adminui/WEB-INF/web.xml
+
+usage_msg() 
+{
+	$CLEAR
+	$ECHO -e "
+	Usage: bash adminui_sessions.bsh -A <Action>
+		
+	Action options:
+
+	SET_SESSIONS : Number of Logon Sessions
+	GET_SESSIONS : To get the number of Logon sessions set
+	SET_SESSION_TIMEOUT : To Change the session timeout for AdminUI
+	GET_SESSION_TIMEOUT : To get the value of  session timeout "
+
+	$ECHO -e  "\n Please run the script as per the usage. \n"
+}
+
+EchoText() {
+   $ECHO $*
+   $ECHO -e `$DATE '+%Y-%m-%d %H:%M:%S': ` $* >> ${LOGFILE}
+}
+
+check_params()
+{
+if [ ! "${ACTION}" ]; then
+    usage_msg
+    exit 6
+fi
+
+case "${ACTION}" in
+     SET_SESSIONS)  change_sessions
+            ;;
+     GET_SESSIONS)  get_sessions
+            ;;
+     SET_SESSION_TIMEOUT) change_session_timeout
+	        ;;
+     GET_SESSION_TIMEOUT) get_session_timeout
+			  ;;
+            
+	*)  usage_msg
+            exit 7
+            ;;
+esac
+}
+
+change_sessions()
+{
+	EchoText "Enter the number of Logon sessions to be set"
+	read new_value
+	
+	new_value=$($ECHO $new_value | $SED 's/^0*//')
+	if [ -z $new_value ]; then
+		EchoText "Value passed is empty or zero, provide the valid value to proceed"
+		exit 8
+	fi
+	
+	if ! [[ "$new_value" =~ ^[0-9]+$ ]]; then
+		EchoText "Provided value $new_value is not valid, provide valid integer to proceed "
+		exit 9
+	fi
+		
+	string_to_search="maxSessions"
+	line_no=$($GREP -n "$string_to_search" $FILE | $CUT -f1 -d:)
+	if [[ $line_no = '' ]]; then
+		EchoText  "Unable to update maximum Session value."
+		exit 10
+	else
+		line_to_modify=$(($line_no+1))
+		replacing_string="<param-value>$new_value<\/param-value>"
+		$SED -i "${line_to_modify}s/.*/$replacing_string/g" $FILE
+		error_code=$?
+		if [[ $error_code != 0 ]]; then
+			EchoText  "Failed to update the maxSessions, failed with error code $error_code"
+			exit 11
+		else
+			EchoText  "Number of Logon sessions has been updated to : $new_value"
+			EchoText  "Restarting webserver..."
+			${BIN_DIR}/webserver restart
+			webserver_code=$?
+			if [[ $webserver_code != 0 ]]; then
+				EchoText  "Webserver failed to restart, failed with error code $webserver_code"
+				exit $webserver_code
+			else
+				EchoText "Webserver restarted successfully"
+				exit $webserver_code
+			fi
+		fi
+	fi
+}
+
+get_sessions () 
+{
+	string_to_search="maxSessions"
+	line_no=$($GREP -n "$string_to_search" $FILE | $CUT -f1 -d:)
+	line_to_modify=$(($line_no+1))
+	sessions_count=`$SED $line_to_modify'q;d' $FILE | $GREP -oP '(?<=<param-value>).*?(?=</param-value>)'`
+	EchoText "Number of Logon sessions set is : $sessions_count"
+}
+
+change_session_timeout()
+{
+	EchoText "Enter the new session timeout value in minutes"
+	read new_value
+	
+	new_value=$($ECHO $new_value | $SED 's/^0*//')
+	if [ -z $new_value ]; then
+		EchoText "Value entered is empty or zero. Provide a valid value of session timeout to proceed further."
+		exit 8
+	fi
+	
+	if ! [[ "$new_value" =~ ^[0-9]+$ ]]; then
+		EchoText "Provided value of session timeout $new_value is invalid. Provide a valid value of session timeout to proceed further."
+		exit 9
+	fi 
+     
+    if [[ "$new_value" -lt 5 ]]; then
+        EchoText "Provided value of session timeout $new_value is invalid. The value entered must be greater than or equal to 5."
+        exit 10
+    fi
+		
+	string_to_get_session_timeout="session_timeout_in_minute"
+	line_no=$($GREP -n "$string_to_get_session_timeout" $FILE | $CUT -f1 -d:)
+	if [[ $line_no = '' ]]; then
+		EchoText  "No value of user session timeout found in web.xml. Hence, unable to update timeout value."
+		exit 11
+	else
+		line_to_modify=$(($line_no+1))
+		replacing_string="<param-value>$new_value<\/param-value>"
+		$SED -i "${line_to_modify}s/.*/$replacing_string/g" $FILE
+		error_code=$?
+		if [[ $error_code != 0 ]]; then
+			EchoText  "Failed to update the Session timeout, failed with error code $error_code"
+			exit 11
+		else
+		    sessions_timeout_count=`sed $line_to_modify'q;d' $FILE | grep -oP '(?<=<param-value>).*?(?=</param-value>)'`
+		    echo $sessions_timeout_count > /eniq/sw/conf/.adminui_sessions_timeout
+			EchoText  "User session timeout has been updated to $new_value minutes."
+			EchoText  "Restarting webserver..."
+			${BIN_DIR}/webserver restart
+			webserver_code=$?
+			if [[ $webserver_code != 0 ]]; then
+				EchoText  "Webserver failed to restart, failed with error code $webserver_code"
+				exit $webserver_code
+			else
+				EchoText "Webserver restarted successfully"
+				exit $webserver_code
+			fi
+		fi
+	fi
+}
+
+get_session_timeout () 
+{
+	string_to_get_session_timeout="session_timeout_in_minute"
+	line_no=$($GREP -n "$string_to_get_session_timeout" $FILE | $CUT -f1 -d:)
+	line_to_modify=$(($line_no+1))
+	session_timeout_count=`$SED $line_to_modify'q;d' $FILE | $GREP -oP '(?<=<param-value>).*?(?=</param-value>)'`
+	EchoText "User session timeout is set to $session_timeout_count minutes."
+}
+
+
+
+if [[ $# -ne 2 ]]; then 
+	usage_msg
+	exit 3
+fi
+	
+while getopts ":A:" arg; do
+  case $arg in
+    A) ACTION="$OPTARG"
+		;;
+			
+   \?) 
+		usage_msg
+       exit 5
+       ;;
+  esac
+done
+shift `expr $OPTIND - 1`
+
+# Check Input Params
+check_params
+
+exit 0
+ 

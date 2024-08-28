@@ -1,0 +1,38 @@
+<!--
+     Ericsson Network IQ Restore DWHDB utility ant tasks.
+     Copyright (C) 2010 LM Ericsson Limited.  All rights reserved.
+-->
+
+<project name="tasks_execute_partition_data_upgrade" default="noop">
+  <taskdef resource="net/sf/antcontrib/antlib.xml"/>
+
+  <taskdef name="PartitionDataUpgrade" classname="com.distocraft.dc5000.install.ant.PartitionDataUpgrade"/>
+
+  <target name="noop"/>
+
+  <target name="execute">
+
+    <property environment="env"/>
+
+    <!-- set explicit default values for the environment properties -->
+    <!-- these defaults will be overwritten if passed in using ant -Dproperty=value -->
+    <property name="partitionStorageIdList" value=""/>
+    <property name="initTemplateFilepath" value=""/>
+    <property name="partitionTemplateFilepath" value=""/>
+    <property name="partitionRollbackTemplateFilepath" value=""/>
+    <property name="cleanupTemplateFilepath" value=""/>
+    <property name="debug" value=""/>
+    <property name="maxParallel" value="10"/>
+
+    <PartitionDataUpgrade
+	  partitionStorageIdList="${partitionStorageIdList}"
+	  initTemplateFilepath="${initTemplateFilepath}"
+	  partitionTemplateFilepath="${partitionTemplateFilepath}"
+	  partitionRollbackTemplateFilepath="${partitionRollbackTemplateFilepath}"
+	  cleanupTemplateFilepath="${cleanupTemplateFilepath}"
+  	  debug="${debug}"
+  	  maxParallel="${maxParallel}"
+   />
+  </target>
+
+</project>

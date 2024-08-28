@@ -1,0 +1,108 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : Topo_Null_Check.bsh
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Usage   : Topo_Null_Check.bsh
+# ********************************************************************
+TEMP_DIR=/tmp/TopologyCleaner
+IQ_DIR=/eniq/sybase_iq
+IQISQL=${IQ_DIR}/${SYBASE_OCS}/bin/isql
+CONF_DIR=/eniq/sw/conf
+
+########################################################################
+# Function: remove_connection_string_file
+# Displays the usage message
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string_file() {
+	if [ -f $dc_connection_string ]; then 
+		rm -rf $dc_connection_string
+		if [ $? != 0 ]; then
+		  echo "Unable to delete " $dc_connection_string
+		fi
+	fi
+}
+
+trap remove_connection_string_file EXIT
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+        echo "Could not find /eniq/admin/lib/common_functions.lib"
+        exit 1
+fi
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+    echo "Unable to find Sybase environment variables"
+fi
+
+DBISQL=$(which dbisql)
+
+DWHDBPASSWORD=`inigetpassword DWH -v DCPassword -f ${CONF_DIR}/niq.ini`
+DWHDB_PORT=`inigetpassword DWH -v PortNumber -f ${CONF_DIR}/niq.ini`
+DWH_SERVER_NAME=`inigetpassword DWH -v ServerName -f ${CONF_DIR}/niq.ini`
+
+dc_connection_string_decrypt="-nogui -onerror exit -c \"eng=${DWH_SERVER_NAME};links=tcpip{host=${DWH_SERVER_NAME};port=${DWHDB_PORT}};uid=dc;pwd=${DWHDBPASSWORD}\""
+dc_connection_string=/var/tmp/dc_encrypt_$$.file
+get_encrypt_file "${dc_connection_string_decrypt}" "${dc_connection_string}"
+
+mkdir -p $TEMP_DIR
+if [ -f out.txt ] && [ -f out1.txt ]; then
+rm out*.txt
+fi
+
+if [ "${1}" = "" ] || [ "${1}" = "-fix" ] || [ "${1}" = "-FIX" ] || [ "${1}" = "-Fix" ]; then
+
+$DBISQL @${dc_connection_string} "select name from sysobjects where name like '%DIM_%' and name not like '%_V_%' and name not like '%BHTYPE%' and name not like '%WLE%' and name not like '%WIFI%' and name not like '%LLE%' and type ='U'; OUTPUT TO out.txt delimited  by '\n' QUOTE ''" > /dev/null 2>&1
+
+cat out.txt | sed '$d' | sed '$d' > out1.txt
+
+for TableName in $(cat out1.txt)
+do
+  echo "select count(*) from $TableName where oss_id='' and modified=NULL and created=NULL and status=''; OUTPUT TO $TEMP_DIR/nullCount.txt delimited  by '\n' QUOTE ''" > $TEMP_DIR/query.txt
+  $DBISQL @${dc_connection_string} $TEMP_DIR/query.txt > /dev/null 2>&1
+  if [ -f $TEMP_DIR/nullCount.txt ]; then
+    CountNull=`cat $TEMP_DIR/nullCount.txt`
+    # check if CountNull is a number, if not, set it to 0 so a valid check can be run and outputting value to file is then skipped as CountNull is 0
+    case $CountNull in
+      (*[^0-9]*|'') CountNull=0;;				
+    esac
+    if [ "$CountNull" -gt 0 ]; then
+      echo "Found $CountNull Nulls on Table $TableName"
+      if [ "${1}" = "-fix" ] || [ "${1}" = "-FIX" ] || [ "${1}" = "-Fix" ]; then
+        echo "delete from $TableName where oss_id='' and modified=NULL and created=NULL and status=''" > $TEMP_DIR/delete.txt
+        DeleteCount=`$DBISQL @${dc_connection_string} $TEMP_DIR/delete.txt | grep "[0-9]"`
+        echo "$DeleteCount rows Deleted on Table $TableName"
+      fi
+    else
+      echo "No Null Values found on table $TableName"
+      #echo ""
+    fi
+  else 
+     echo "No Null Values found on table $TableName"
+  fi
+  rm -rf $TEMP_DIR/*.txt
+done
+else
+echo "Usage: bash $0 > test.txt"
+#echo "bash $0 -fix > test.txt"
+fi
+rm -rf $TEMP_DIR

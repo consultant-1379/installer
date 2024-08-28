@@ -1,0 +1,261 @@
+#!/usr/sunos/bin/sh
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : hyperLogLog_upgrade
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : Ericsson Network IQ - Upgrade partitions to support hyperLogLog imsi stats.
+#           This should only be used for a once off upgrade of the hyperLogLog data.
+# Usage   : hyperLogLog_upgrade
+# ********************************************************************
+
+NAWK=/usr/bin/nawk
+if [ -z "${CONF_DIR}" ] ; then
+  echo "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  echo "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 2
+fi
+
+. ${CONF_DIR}/niq.rc
+
+CPATH="${INSTALLER_DIR}/lib/installer.jar"
+
+DIRS=`ls ${PLATFORM_DIR}`
+
+for file in $DIRS
+do
+  if [ -d ${PLATFORM_DIR}/$file/dclib ]
+  then
+    JARS=`ls ${PLATFORM_DIR}/$file/dclib/*.jar`
+
+    for jar in $JARS
+    do
+      CPATH="${CPATH}:${jar}"
+    done
+  fi
+done
+
+TIMESTAMP=`date +%y.%m.%d_%H:%M:%S`
+
+LOGFILE=${LOG_DIR}/hyperloglog_upgrade/execute_${TIMESTAMP}.log
+
+HSTNAME=`hostname`
+
+if [ ! -d ${LOG_DIR}/hyperloglog_upgrade ] ; then
+  mkdir -p ${LOG_DIR}/hyperloglog_upgrade  | tee -a ${LOGFILE}
+fi
+
+TEMPLATE_DIR="${INSTALLER_DIR}/hyperloglog_upgrade"
+
+if [ ! -d ${TEMPLATE_DIR} ] ; then
+  mkdir -p ${TEMPLATE_DIR}  | tee -a ${LOGFILE}
+fi
+
+# ======================= Create SQL Tempalates ===================
+# =================================================================
+
+cat > ${TEMPLATE_DIR}/init.vm << INIT
+---- Create temp table
+
+create table dc.upgrade_temp_imsi (
+imsi unsigned bigint not null iq unique(100000000)
+);
+
+-- Populate temp table
+
+insert into dc.upgrade_temp_imsi select distinct(imsi) from dc.event_e_sgeh_raw;
+
+-- create temporary table
+
+create table dc.upgrade_temp_imsi_ase (
+imsi unsigned bigint not null
+) IN SYSTEM;
+
+set temporary option temp_extract_name1 = 'distinctimsi.txt';
+select imsi from dc.upgrade_temp_imsi;
+set temporary option temp_extract_name1 = '';
+
+-- load distinct imsi to ase
+
+load table dc.upgrade_temp_imsi_ase (
+    imsi
+)
+from '/tmp/distinctimsi.txt'
+delimited by ','
+row delimited by '
+';
+
+-- create hash bucket rank
+
+create table dc.upgrade_temp_imsi_hash_ase (
+imsi unsigned bigint not null,
+md5 varchar(32),
+m_bucket smallint null,
+w_rank tinyint null
+) IN SYSTEM;
+
+insert into dc.upgrade_temp_imsi_hash_ase
+select
+imsi, hash(cast(imsi as varchar(15))) myhash, (HEXTOINT(substring(myhash,1,4)) & 0xfff0)/16,
+locate(
+ cast( hextobigint(substring(myhash,3,14)) as varbit ) || cast( hextobigint(substring(myhash,17,16)) as varbit ),
+ '1',
+ 13 ) - 12
+from dc.upgrade_temp_imsi_ase;
+
+-- save hash
+
+unload table dc.upgrade_temp_imsi_hash_ase to '/tmp/hyperimsi.txt';
+
+-- load hash values
+
+create table dc.upgrade_temp_imsi_hash (
+imsi unsigned bigint not null iq unique(100000000),
+m_bucket smallint null,
+w_rank tinyint null
+);
+
+CREATE HG INDEX upgrade_temp_imsi_hash_imsi_hg ON dc.upgrade_temp_imsi_hash (imsi);
+
+load table dc.upgrade_temp_imsi_hash (
+    imsi ',',
+    filler(','),
+    m_bucket ',',
+        w_rank '
+'
+)
+from '/tmp/hyperimsi.txt'
+quotes off
+escapes off;
+INIT
+
+cat > ${TEMPLATE_DIR}/merge.vm << MERGE
+update dc.\$partitionName
+set raw.m_bucket = temp.m_bucket, raw.w_rank=temp.w_rank
+from dc.\$partitionName raw, dc.upgrade_temp_imsi_hash temp
+where raw.imsi = temp.imsi;
+MERGE
+
+cat > ${TEMPLATE_DIR}/rollback.vm << ROLLBACK
+update dc.\$partitionName set m_bucket = null, w_rank=null;
+ROLLBACK
+
+cat > ${TEMPLATE_DIR}/tidyup.vm << TIDYUP
+drop table dc.upgrade_temp_imsi;
+drop table dc.upgrade_temp_imsi_ase;
+drop table dc.upgrade_temp_imsi_hash;
+drop table dc.upgrade_temp_imsi_hash_ase;
+TIDYUP
+
+#cat > ${TEMPLATE_DIR}/setexport.vm << SETEXPORT
+#set option public.temp_extract_directory='/tmp'
+#SETEXPORT
+
+echo "====================================================================" | tee -a ${LOGFILE}
+echo "  Ericsson Network IQ - Apply hyperLogLog on @ ${HSTNAME}" | tee -a ${LOGFILE}
+echo "===================================================================="  | tee -a ${LOGFILE}
+
+  echo "Shutdown engine before upgrade (no DB partitions should be write locked)." | tee -a ${LOG_FILE}
+
+  #SMF is running
+  echo "SMF is running. Stoping engine with SMF scripts." | tee -a ${LOG_FILE}
+  echo "Stopping engine" | tee -a ${LOG_FILE}
+  ${BIN_DIR}/engine stop >> /dev/null 2>&1
+
+  ENGINE_STOP_STATUS=$?
+  if [ ${ENGINE_STOP_STATUS} -ne 0 ] ; then
+    echo "Engine had running sets. Force shutdown initiated." | tee -a ${LOG_FILE}
+    ${ADMIN_BIN}/eniq_service_start_stop.bsh -s engine -a clear | tee -a ${LOG_FILE}
+        echo "Engine status cleared" | tee -a ${LOG_FILE}
+        sleep 10
+        ${BIN_DIR}/engine -e shutdown_forceful 1> /dev/null 2> /dev/null
+        echo "Engine forced to shutdown" | tee -a ${LOG_FILE}
+        sleep 10
+  fi
+
+  ENGINE_SMF_STATUS=`svcs -a | grep 'eniq/engine' | $NAWK '{print $1}'`
+  if [ "${ENGINE_SMF_STATUS}" != "disabled" ]; then
+        echo "Engine had running sets. Force shutdown initiated." | tee -a ${LOG_FILE}
+        ${ADMIN_BIN}/eniq_service_start_stop.bsh -s engine -a clear | tee -a ${LOG_FILE}
+        echo "Engine status cleared" | tee -a ${LOG_FILE}
+        sleep 10
+        ${BIN_DIR}/engine -e shutdown_forceful 1> /dev/null 2> /dev/null
+        echo "Engine forced to shutdown" | tee -a ${LOG_FILE}
+        sleep 10
+        ENGINE_SMF_STATUS=`svcs -a | grep 'eniq/engine' | $NAWK '{print $1}'`
+        if [ "${ENGINE_SMF_STATUS}" != "disabled" ]; then
+                RETRY_COUNT=0
+                until [ "${ENGINE_SMF_STATUS}" = "online" ]
+                do
+                        if [ $RETRY_COUNT -gt 30 ]; then
+                                break
+                        fi
+                        sleep 10
+                        ENGINE_SMF_STATUS=`svcs -a | grep 'eniq/engine' | $NAWK '{print $1}'`
+                        RETRY_COUNT=`expr $RETRY_COUNT + 1`
+                        echo "Waiting for engine to go online" | tee -a ${LOG_FILE}
+                done
+                echo "Engine initially started" | tee -a ${LOG_FILE}
+                ${BIN_DIR}/engine stop | tee -a ${LOG_FILE}
+        fi
+  fi
+  echo "Engine stopped successfully at "`date +%Y.%m.%d_%H:%M:%S` | tee -a ${LOG_FILE}
+
+#########################
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+ANT_OPTS="$ANT_OPTS $PF_ANT_OPTS" 
+export ANT_OPTS 
+
+cd ${INSTALLER_DIR}
+
+# Set export path used by init.vm
+DBNAME="dwh"
+${RT_DIR}/ant/bin/ant -f ${INSTALLER_DIR}/tasks_install_utils.xml -lib ${CPATH} -Ddc.installer.dir=${INSTALLER_DIR} -Ddbname=${DBNAME} -Dsqlfile=${TEMPLATE_DIR}/setexport.vm -Dcon_type=DBA -Ddc.conf.dir=${CONF_DIR} -Ddc.platform.dir=${PLATFORM_DIR} execute_sql | tee -a ${LOGFILE}
+
+# Execute parallel upgrade
+${RT_DIR}/ant/bin/ant -f ${INSTALLER_DIR}/tasks_execute_partiton_upgrade_sql.xml -lib ${CPATH} -DpartitionStorageIdList="EVENT_E_SGEH_ERR:RAW,EVENT_E_SGEH_SUC:RAW" -DpartitionTemplateFilepath=${TEMPLATE_DIR}/merge.vm -DinitTemplateFilepath=${TEMPLATE_DIR}/init.vm -DcleanupTemplateFilepath=${TEMPLATE_DIR}/tidyup.vm -DpartitionRollbackTemplateFilepath=${TEMPLATE_DIR}/rollback.vm -Ddebug="OFF" execute | tee -a ${LOGFILE}
+
+if [ -f ${LOGFILE} ] ; then
+  SUC=`cat ${LOGFILE} | grep "BUILD SUCCESSFUL" | wc -l`
+  if [ "${SUC}"="2" ] ; then
+    echo "======================================="  | tee -a ${LOGFILE}
+    echo "Successfully upgraded hyperLog in DWHDB database"  | tee -a ${LOGFILE}
+    echo "======================================="  | tee -a ${LOGFILE}
+  else
+    echo "================================"  | tee -a ${LOGFILE}
+    echo "DWHDB hyperLogLog upgrade failed"  | tee -a ${LOGFILE}
+    echo "================================"  | tee -a ${LOGFILE}
+  fi
+fi
+
+###########################
+
+${BIN_DIR}/engine start
+
+ENGINE_START_STATUS=$?
+
+if [ ${ENGINE_START_STATUS} -ne 0 ] ; then
+  echo "Engine could not be started. Plese restart manually." | tee -a ${LOG_FILE}
+  exit 44
+ else
+  echo "Engine restarted succesfully" | tee -a ${LOG_FILE}
+fi

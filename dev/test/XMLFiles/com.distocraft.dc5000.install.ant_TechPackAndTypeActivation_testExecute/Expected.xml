@@ -1,0 +1,6 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<dataset>
+  <Typeactivation TECHPACK_NAME="tp_name" STATUS="status" TYPENAME="typeName" TABLELEVEL="tabLevel_1" STORAGETIME="-1" TYPE="Measurement" PARTITIONPLAN="6" />
+  <Typeactivation TECHPACK_NAME="tp_name" STATUS="status" TYPENAME="typeName_PREV" TABLELEVEL="PLAIN" STORAGETIME="-1" TYPE="Measurement" />
+  <Typeactivation TECHPACK_NAME="tp_name" STATUS="status" TYPENAME="3" TABLELEVEL="PLAIN" STORAGETIME="-1" TYPE="Reference" />
+</dataset>

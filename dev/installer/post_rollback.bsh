@@ -1,0 +1,214 @@
+	
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : post_rollback.bsh
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : Ericsson Network script to complete rollback procedure 
+# Usage   : post_rollback.bsh
+# ********************************************************************
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+	echo "Could not find /eniq/admin/lib/common_functions.lib file. Exiting..." 
+	exit 1
+fi
+	
+if [ -z "${BIN_DIR}" ] ; then
+	echo "Environment variable BIN_DIR is not set or empty. Script is aborted." 
+	exit 2
+fi
+	
+if [ -f ${BIN_DIR}/common_variables.lib ] ; then
+	. ${BIN_DIR}/common_variables.lib
+else
+	echo "Cant not find file ${BIN_DIR}/common_variables.lib"
+	exit 3
+fi
+	
+if [ -z "${CONF_DIR}" ] ; then
+	$ECHO "Environment variable CONF_DIR is not set or empty. Script is aborted."
+	exit 4
+fi
+	
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+	$ECHO "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+	exit 5
+fi
+
+. ${CONF_DIR}/niq.rc
+	
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $connection_string ]; then
+  $RM -f $connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string"
+  fi
+fi 
+}
+
+trap remove_connection_string EXIT
+
+#-----------------------------------------------------------------------
+#Global variable
+#-----------------------------------------------------------------------
+start_time=$($DATE "+%Y-%m-%d %H:%M:%S")
+POST_LOG_DIR=/eniq/local_logs/post_rollback
+if [ ! -d ${POST_LOG_DIR} ]; then
+	$MKDIR ${POST_LOG_DIR}
+fi
+LOG_FILE=${POST_LOG_DIR}/`$DATE "+%Y-%m-%d_%H:%M:%S"`_post_rollback.log
+$TOUCH ${LOG_FILE}
+
+# Database configuration 
+ETLREPUser=`inigetpassword REP -v ETLREPUsername -f ${CONF_DIR}/niq.ini`
+ETLREPPASSWORD=`inigetpassword REP -v ETLREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+
+connection_string=/var/tmp/encrypt_$$.txt
+connection_string_decrypt="-c \"uid=${ETLREPUser};pwd=${ETLREPPASSWORD};eng=${REP_SERVER_NAME}\" -host localhost -port $REP_PORT -nogui -onerror exit" 
+
+ get_encrypt_file "${connection_string_decrypt}" "${connection_string}"
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+#Make a set list
+$TOUCH ${POST_LOG_DIR}/setList.txt
+$ECHO "Update_Dates" > ${POST_LOG_DIR}/setList.txt
+$ECHO "Cleanup_logdir" >> ${POST_LOG_DIR}/setList.txt
+$ECHO "Cleanup_transfer_batches" >> ${POST_LOG_DIR}/setList.txt
+$ECHO "Trigger_Partitioning" >> ${POST_LOG_DIR}/setList.txt
+$ECHO "UpdateFirstLoadings" >> ${POST_LOG_DIR}/setList.txt
+$ECHO "AggregationRuleCopy" >> ${POST_LOG_DIR}/setList.txt
+
+#-----------------------------------------------------------------------
+#function to user
+#-----------------------------------------------------------------------
+checkUser() {
+if [ `$ID -un` != "dcuser"  ] ; then
+	$ECHO "\nThis script must be executed as dcuser\n Exiting..." | $TEE -a ${LOG_FILE}
+	exit 3
+fi
+
+}
+
+#-----------------------------------------------------------------------
+#function to check engine status
+#-----------------------------------------------------------------------
+check_engineStatus() {
+NOW=$($DATE "+%Y-%m-%d_%H:%M:%S")
+$ECHO "$NOW :: checking engine status" | $TEE -a ${LOG_FILE}
+S_tmp=$(engine status | $GREP Normal | $WC -l)
+if [ $S_tmp != "1" ] ; then
+	$ECHO "WARNING :: Engine is not running or in Noloads ,Please start engine in normal profile. Exiting..." | $TEE -a ${LOG_FILE}
+	exit 4
+fi
+}
+
+#-----------------------------------------------------------------------
+#function to check if set is executed fine
+#-----------------------------------------------------------------------
+check_isFinished() {
+setName=$1
+${DBISQL} @${connection_string} "select STATUS FROM META_TRANSFER_BATCHES where META_COLLECTION_NAME ='$setName' and START_DATE > '$start_time';output to ${POST_LOG_DIR}/isFinishedSet" > /dev/null
+if [ -s ${POST_LOG_DIR}/isFinishedSet ]; then
+	STATUS=`$CAT ${POST_LOG_DIR}/isFinishedSet`
+	if [ $STATUS != "'FINISHED'" ]; then
+		NOW=$($DATE "+%Y-%m-%d_%H:%M:%S")
+		$ECHO "$NOW :: Set $setName not finished or not found. Exiting..." | $TEE -a ${LOG_FILE}
+		$ECHO "$NOW :: Current set $setName has below status in META_TRANSFER_BATCHES table." | $TEE -a ${LOG_FILE}
+		$ECHO $STATUS | $TEE -a ${LOG_FILE}
+		$ECHO "Please try to run the below set manually from AdminUI" | $TEE -a ${LOG_FILE}
+		$CAT ${POST_LOG_DIR}/setList.txt | $TEE -a ${LOG_FILE}
+		exit 5
+	else
+		$CAT ${POST_LOG_DIR}/setList.txt | grep -wv $setName > ${POST_LOG_DIR}/tempList
+		$CP ${POST_LOG_DIR}/tempList ${POST_LOG_DIR}/setList.txt
+		$RM ${POST_LOG_DIR}/tempList
+		if [ ! -s ${POST_LOG_DIR}/setList.txt ]; then
+			$RM ${POST_LOG_DIR}/setList.txt
+		fi
+	fi
+fi
+
+}
+
+#-----------------------------------------------------------------------
+#function to execute DWH_BASE sets
+#-----------------------------------------------------------------------
+execute_DWH_BASE() {
+$ECHO "triggering Update_Dates" | $TEE -a ${LOG_FILE}
+engine -e startAndWaitSet DWH_BASE Update_Dates
+check_isFinished Update_Dates 
+$ECHO "Update_Dates have been executed" | $TEE -a ${LOG_FILE}
+
+$ECHO "triggering Cleanup_logdir" | $TEE -a ${LOG_FILE}
+engine -e startAndWaitSet DWH_BASE Cleanup_logdir
+check_isFinished Cleanup_logdir
+$ECHO "Cleanup_logdir have been executed" | $TEE -a ${LOG_FILE}
+
+$ECHO "triggering Cleanup_transfer_batches" | $TEE -a ${LOG_FILE}
+engine -e startAndWaitSet DWH_BASE Cleanup_transfer_batches
+check_isFinished Cleanup_transfer_batches
+$ECHO "Cleanup_transfer_batches have been executed" | $TEE -a ${LOG_FILE}
+
+$ECHO "triggering Trigger_Partitioning " | $TEE -a ${LOG_FILE}
+engine -e startAndWaitSet DWH_BASE Trigger_Partitioning
+check_isFinished Trigger_Partitioning
+$ECHO "Trigger_Partitioning has been executed" | $TEE -a ${LOG_FILE}
+
+}
+
+#-----------------------------------------------------------------------
+#function to execute DWH_MONITOR
+#-----------------------------------------------------------------------
+execute_DWH_MONITOR(){
+$ECHO "triggering UpdateFirstLoadings" | $TEE -a ${LOG_FILE}
+engine -e startAndWaitSet DWH_MONITOR UpdateFirstLoadings
+check_isFinished UpdateFirstLoadings
+$ECHO "UpdateFirstLoadings has been executed" | $TEE -a ${LOG_FILE}
+
+$ECHO "triggering AggregationRuleCopy" | $TEE -a ${LOG_FILE}
+engine -e startAndWaitSet DWH_MONITOR AggregationRuleCopy
+check_isFinished AggregationRuleCopy
+$ECHO "AggregationRuleCopy has been executed" | $TEE -a ${LOG_FILE}
+
+}
+
+#-----------------------------------------------------------------------
+#Main Program starts here
+#-----------------------------------------------------------------------
+checkUser
+check_engineStatus
+execute_DWH_BASE
+execute_DWH_MONITOR
+$ECHO "post_rollback script has finished successfully." | $TEE -a ${LOG_FILE}
+

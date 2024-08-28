@@ -1,0 +1,743 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2019 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : Security_Rollback_Procedure.bsh
+# Date    : 11/11/2019
+# Purpose : Script to manage the tomcat users.
+# Usage   : bash Security_Rollback_Procedure.bsh
+# ********************************************************************
+
+if [ `id -un` != "dcuser"  ] ; then
+	echo -e "\n This script must be executed as dcuser \n"
+	exit 1
+fi
+
+if [[ ! -r "${BIN_DIR}/common_variables.lib" ]] ; then
+  echo "ERROR: File does not exists or is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+
+TOMCAT_SERVER_XML=${RT_DIR}/tomcat/conf/server.xml
+TOMCAT_WEB_XML=${RT_DIR}/tomcat/conf/web.xml
+ADMINUI_WEB_XML=${RT_DIR}/tomcat/webapps/adminui/WEB-INF/web.xml
+#BEFORE_WEBSERVER_XML=
+LOGIN_FILE=${RT_DIR}/tomcat/webapps/adminui/login.jsp
+FEATURE_VM_FILE=${RT_DIR}/tomcat/webapps/adminui/WEB-INF/templates/feature_availability.vm
+FEATURE_INSTALL_VM_FILE=${RT_DIR}/tomcat/webapps/adminui/WEB-INF/templates/feature_availability_install.vm
+FEATURE_UPDATE_VM_FILE=${RT_DIR}/tomcat/webapps/adminui/WEB-INF/templates/feature_availability_update.vm
+
+
+TOMCAT_BACKUP_DIR=/eniq/backup/tomcat_back_up
+TIMESTAMP=`date +%Y.%m.%d_%H:%M:%S`
+SUMMARY_FILE=${TOMCAT_BACKUP_DIR}/Rollback_Summary
+#FLAG_FILE=/eniq/sw/conf/security_rollback
+
+TIMESTAMP=`$DATE +%d.%m.%Y`
+
+LOGFILE=/eniq/log/sw_log/engine/security_rollback_${TIMESTAMP}.log
+
+##################################################################################################
+EchoText() {
+   $ECHO -e $*
+   $ECHO -e `$DATE '+%Y-%m-%d %H:%M:%S': ` $* >> ${LOGFILE}
+}
+
+restore_secure_session ()
+{
+if [ -z "$1" ]; then
+	EchoText "Response provided is empty, provide the valid response to proceed\n"
+	exit 11
+fi
+
+if [ "$1" == "No" ]; then
+	if [ -f ${SUMMARY_FILE} ] && [ "`$CAT ${SUMMARY_FILE} |$GREP SECURE_SESSION |$AWK -F ":" '{print $2}'`" == "FALSE" ]; then
+		EchoText "Skipping the Procedure for Secure Session, proceed with next\n"
+		$ECHO -e "\nSECURE_SESSION:FALSE" >> ${SUMMARY_FILE}"_tmp"
+		return
+	else
+		EchoText "Skipping the Procedure for Secure Session, proceed with next\n"
+		$ECHO -e "\nSECURE_SESSION:TRUE" >> ${SUMMARY_FILE}"_tmp"
+		return
+	fi
+	
+elif [ "$1" == "Yes" ]; then
+	#VALUE=`$CAT ${SUMMARY_FILE} |$GREP SECURE_SESSION |$AWK -F ":" '{print $2}'`
+	if [ -f ${SUMMARY_FILE} ] && [ "`$CAT ${SUMMARY_FILE} |$GREP SECURE_SESSION |$AWK -F ":" '{print $2}'`" == "FALSE" ]; then
+		EchoText "Rollback procedure for Secure Session is already executed\n"
+		$ECHO -e "\nSECURE_SESSION:FALSE" >> ${SUMMARY_FILE}"_tmp"
+	else
+		EchoText "Rollback procedure for Secure Session started\n"
+		STRING_TO_SEARCH="cookie-config"
+		$SED -i '/<cookie-config>/,/<\/cookie-config>/d' ${TOMCAT_WEB_XML}
+		$GREP $STRING_TO_SEARCH ${TOMCAT_WEB_XML} > /dev/null
+		if [ $? -ne 0 ]; then
+			EchoText "Secure Session rollback procedure applied successfully\n"
+			$ECHO -e "\nSECURE_SESSION:FALSE" >> ${SUMMARY_FILE}"_tmp"
+			#SUCCESS_SUMMARY=$SUCCESS_SUMMARY" SECURE_SESSION:FALSE"
+		else
+			EchoText "Rollback procedure for Secure Session failed. Re-run the Procedure\n"
+			$ECHO -e "\nSECURE_SESSION:TRUE" >> ${SUMMARY_FILE}"_tmp"
+		#	FAIL_SUMMARY=$FAIL_SUMMARY" SECURE_SESSION:TRUE"
+		fi
+	fi
+else
+	EchoText "Provided response is not valid, aborting the script\n"
+	exit 12
+	
+fi
+
+}
+##################################################################################################
+
+restore_clickJack_Hsts ()
+{
+if [ -z "$1" ]; then
+	EchoText "Response provided is empty, provide the valid response to proceed\n"
+	exit 13
+fi
+
+if [ "$1" == "No" ]; then
+	if [ -f ${SUMMARY_FILE} ] && [ "`$CAT ${SUMMARY_FILE} |$GREP CLICKJACKING_ATTACKS_AND_HSTS |$AWK -F ":" '{print $2}'`" == "FALSE" ]; then
+		EchoText "Skipping the Procedure for Clickjacking attacks and HSTS feature, proceed with next\n"
+		$ECHO -e "\nCLICKJACKING_ATTACKS_AND_HSTS:FALSE" >> ${SUMMARY_FILE}"_tmp"
+		return
+	else
+		EchoText "Skipping the Procedure for Clickjacking attacks and HSTS feature, proceed with next\n"
+		$ECHO -e "\nCLICKJACKING_ATTACKS_AND_HSTS:TRUE" >> ${SUMMARY_FILE}"_tmp"
+		return
+	fi
+	
+elif [ "$1" == "Yes" ]; then 
+
+	#VALUE=`$CAT ${SUMMARY_FILE} |$GREP CLICKJACKING_ATTACKS_AND_HSTS |$AWK -F ":" '{print $2}'`
+	if [ -f ${SUMMARY_FILE} ] && [ "`$CAT ${SUMMARY_FILE} |$GREP CLICKJACKING_ATTACKS_AND_HSTS |$AWK -F ":" '{print $2}'`" == "FALSE" ]; then
+		EchoText "Rollback procedure for Clickjacking attacks and Hsts is already executed\n"
+		$ECHO -e "\nCLICKJACKING_ATTACKS_AND_HSTS:FALSE" >> ${SUMMARY_FILE}"_tmp"
+	else	
+		EchoText "Rollback procedure for Clickjacking attacks and HSTS feature started\n"
+		update_config ${TOMCAT_WEB_XML}
+		res=$?
+		update_config ${ADMINUI_WEB_XML}
+		res1=$?
+		if [ "$res" -eq 0 ] && [ "$res1" -eq 0 ]; then
+			EchoText "Clickjacking attacks and HSTS rollback procedure applied successfully\n"
+			$ECHO -e "\nCLICKJACKING_ATTACKS_AND_HSTS:FALSE" >> ${SUMMARY_FILE}"_tmp"
+			#SUCCESS_SUMMARY=$SUCCESS_SUMMARY" CLICKJACKING_ATTACKS_AND_HSTS:FALSE"
+		else
+			EchoText "Rollback procedure for Clickjacking attacks and Hsts failed. Re-run the Procedure\n"
+			$ECHO -e "\nCLICKJACKING_ATTACKS_AND_HSTS:TRUE" >> ${SUMMARY_FILE}"_tmp"
+			#FAIL_SUMMARY=$FAIL_SUMMARY" CLICKJACKING_ATTACKS_AND_HSTS:TRUE"
+		fi
+	fi
+else
+	EchoText "Provided response is not valid, aborting the script\n"
+	exit 14
+fi
+}
+##################################################################################################
+
+update_config ()
+{
+
+if [ "$1" == ${ADMINUI_WEB_XML} ]; then
+	
+	$SED -i '/<filter>/,/<\/filter>/d' ${ADMINUI_WEB_XML}
+	$GREP "<filter>" ${ADMINUI_WEB_XML} > /dev/null
+	if [ $? -eq 0 ]; then
+		return 1
+	fi
+	
+	$SED -i '/<filter-mapping>/,/<\/filter-mapping>/d' ${ADMINUI_WEB_XML}
+	$GREP "<filter-mapping>" ${ADMINUI_WEB_XML} > /dev/null
+	if [ $? -eq 0 ]; then
+		return 1
+	fi	
+else
+	list_param="antiClickJackingOption hstsEnabled hstsMaxAgeSeconds hstsIncludeSubDomains"
+	for param in $list_param
+	do
+	    myval="<param-name>$param<\/param-name>"
+		line_no=$($GREP -n "$myval" $1 | $CUT -f1 -d:)
+		if [[ $line_no = '' ]]; then
+			:
+		else
+			line_to_modify_start=$(($line_no-1))
+			line_to_modify_end=$(($line_no+2))
+			$SED -e "$line_to_modify_start","$line_to_modify_end"'d' $1 > $1"_tmp"
+			$MV $1"_tmp" $1
+			$GREP "$myval"  $1 > /dev/null
+			if [ $? -eq 0 ]; then
+				$SED "/$myval/d" $1 > $1"_tmp"
+				$MV $1"_tmp" $1
+				$GREP "$myval"  $1 > /dev/null
+				if [ $? -eq 0 ]; then
+					return 1
+				fi
+			fi
+		fi
+	done
+
+	list_val="FORWARD INCLUDE ERROR"
+	for var in $list_val
+	do
+	    myval="<dispatcher>$var<\/dispatcher>"
+		$GREP "$myval"  $1 > /dev/null
+		if [ $? -eq 0 ]; then
+			$SED "/$myval/d" $1 > $1"_tmp"
+			$MV $1"_tmp" $1
+			$GREP "$myval"  $1 > /dev/null
+			if [ $? -eq 0 ]; then
+				return 1
+			fi
+		fi
+	done
+fi
+return 0
+
+}
+##################################################################################################
+
+restore_lockout() {
+if [[ -z "$1" ]]; then
+    EchoText "Response provided is empty, provide the valid response to proceed\n"
+	exit 15
+fi
+
+if [ "$1" == "No" ]; then
+	if [ -f ${SUMMARY_FILE} ] && [ "`$CAT ${SUMMARY_FILE} |$GREP LOCKOUT |$AWK -F ":" '{print $2}'`" == "FALSE" ]; then
+	    EchoText "Skipping the Procedure for tomcat lockout functionality, proceed with next\n"
+		$ECHO -e "\nLOCKOUT:FALSE" >> ${SUMMARY_FILE}"_tmp"
+	    return
+	else
+		EchoText "Skipping the Procedure for tomcat lockout functionality, proceed with next\n"
+		$ECHO -e "\nLOCKOUT:TRUE" >> ${SUMMARY_FILE}"_tmp"
+	    return
+	fi
+elif [ "$1" == "Yes" ]; then
+
+	#VALUE=`$CAT ${SUMMARY_FILE} |$GREP LOCKOUT |$AWK -F ":" '{print $2}'`
+	if [ -f ${SUMMARY_FILE} ] && [ "`$CAT ${SUMMARY_FILE} |$GREP LOCKOUT |$AWK -F ":" '{print $2}'`" == "FALSE" ]; then
+		EchoText "Rollback procedure for adminui lockout is already executed\n"
+		$ECHO -e "\nLOCKOUT:FALSE" >> ${SUMMARY_FILE}"_tmp"
+	else	
+		EchoText "Rollback procedure for tomcat lockout functionality started\n"
+	    result="true"
+		$SED -i 's/failurecount=\"[0-9]*\"//i' ${TOMCAT_SERVER_XML}
+		$GREP 'failureCount' ${TOMCAT_SERVER_XML} > /dev/null
+		if [[ $? -eq 0 ]]; then
+			result="false"
+		fi
+		$SED -i 's/lockouttime=\"[0-9]*\"//i' ${TOMCAT_SERVER_XML}
+		$GREP 'lockOutTime' ${TOMCAT_SERVER_XML} > /dev/null
+		if [[ $? -eq 0 ]]; then
+			result="false"
+		fi
+		if [[ $result == "true" ]]; then
+			EchoText "Rollback for adminui lockout is successfully completed\n"
+			$ECHO -e "\nLOCKOUT:FALSE" >> ${SUMMARY_FILE}"_tmp"
+		else
+			EchoText "Rollback failed for adminui lockout. Re-run the Procedure\n"
+			$ECHO -e "\nLOCKOUT:TRUE" >> ${SUMMARY_FILE}"_tmp"
+		fi
+	fi
+else
+	EchoText "Provided response is not valid, aborting the script\n"
+    exit 16              
+fi
+	
+}
+##################################################################################################
+
+restore_shutdown_port(){
+if [ -z "$1" ]; then
+    EchoText "Response provided is empty, provide the valid response to proceed\n"
+	exit 17
+fi
+
+if [ "$1" == "No" ]; then
+	if [ -f ${SUMMARY_FILE} ] && [ "`$CAT ${SUMMARY_FILE} |$GREP SHUTDOWN_PORT |$AWK -F ":" '{print $2}'`" == "FALSE" ]; then
+	    EchoText "Skipping the Procedure for shutdown port functionality, proceed with next\n"
+		$ECHO -e "\nSHUTDOWN_PORT:FALSE" >> ${SUMMARY_FILE}"_tmp"
+	    return
+	else
+		EchoText "Skipping the Procedure for shutdown port functionality, proceed with next\n"
+		$ECHO -e "\nSHUTDOWN_PORT:TRUE" >> ${SUMMARY_FILE}"_tmp"
+	    return
+	fi
+elif [ "$1" == "Yes" ]; then
+	
+	#VALUE=`$CAT ${SUMMARY_FILE} |$GREP SHUTDOWN_PORT |$AWK -F ":" '{print $2}'`
+	if [ -f ${SUMMARY_FILE} ] && [ "`$CAT ${SUMMARY_FILE} |$GREP SHUTDOWN_PORT |$AWK -F ":" '{print $2}'`" == "FALSE" ]; then
+		EchoText "Rollback procedure for tomcat shutdwon port is already executed\n"
+		$ECHO -e "\nSHUTDOWN_PORT:FALSE" >> ${SUMMARY_FILE}"_tmp"
+	else
+		EchoText "Rollback procedure for tomcat shutdwon port started\n"
+	    result="true"
+		$SED -i 's/command=\"SHUTDOWN\"/shutdown="SHUTDOWN"/g' ${TOMCAT_SERVER_XML}
+		$GREP 'command=\"SHUTDOWN\"' ${TOMCAT_SERVER_XML} > /dev/null
+		if [[ $? -eq 0 ]]; then
+			result="false"
+		fi
+		$SED -i 's/Server[ ]\+port=\"[0-9-]\+\"/Server port=\"8005\"/' ${TOMCAT_SERVER_XML}
+		$GREP 'Server[ ]\+port=\"-1\"' ${TOMCAT_SERVER_XML} > /dev/null
+		if [[ $? -eq 0 ]]; then
+			result="false"
+		fi
+		if [[ $result == "true" ]]; then
+			EchoText "Rollback for shutdown port change successfully completed\n"
+			$ECHO -e "\nSHUTDOWN_PORT:FALSE" >> ${SUMMARY_FILE}"_tmp"
+		else
+			EchoText "Rollback failed for shutdown port change. Re-run the Procedure\n"
+			$ECHO -e "\nSHUTDOWN_PORT:TRUE" >> ${SUMMARY_FILE}"_tmp"
+		fi
+	fi
+else
+	EchoText "Provided response is not valid, aborting the script\n"
+    exit 18              
+fi
+}
+##################################################################################################
+
+restore_autodeploy(){
+if [[ -z "$1" ]]; then
+    EchoText "Response provided is empty, provide the valid response to proceed\n"
+	exit 19
+fi
+
+if [ "$1" == "No" ]; then
+	if [ -f ${SUMMARY_FILE} ] && [ "`$CAT ${SUMMARY_FILE} |$GREP AUTO_DEPLOY |$AWK -F ":" '{print $2}'`" == "FALSE" ]; then
+	    EchoText "Skipping the Procedure for auto-deploy functionality, proceed with next\n"
+		$ECHO -e "\nAUTO_DEPLOY:FALSE" >> ${SUMMARY_FILE}"_tmp"
+	    return
+	else
+		EchoText "Skipping the Procedure for auto-deploy functionality, proceed with next\n"
+		$ECHO -e "\nAUTO_DEPLOY:TRUE" >> ${SUMMARY_FILE}"_tmp"
+	    return
+	fi
+elif [ "$1" == "Yes" ]; then
+	
+	#VALUE=`$CAT ${SUMMARY_FILE} |$GREP AUTO_DEPLOY |$AWK -F ":" '{print $2}'`
+	if [ -f ${SUMMARY_FILE} ] && [ "`$CAT ${SUMMARY_FILE} |$GREP AUTO_DEPLOY |$AWK -F ":" '{print $2}'`" == "FALSE" ]; then
+		EchoText "Rollback procedure for auto-deploy functionality is already executed\n"
+		$ECHO -e "\nAUTO_DEPLOY:FALSE" >> ${SUMMARY_FILE}"_tmp"
+	else
+		EchoText "Rollback procedure for auto-deploy functionality started\n"
+	    result="true"
+		$SED -i 's/autoDeploy=\"false\"/autoDeploy=\"true\"/i' ${TOMCAT_SERVER_XML}
+		$GREP 'autoDeploy=\"false\"' ${TOMCAT_SERVER_XML} > /dev/null
+		if [[ $? -eq 0 ]]; then
+			result="false"
+		fi
+		if [[ $result == "true" ]]; then
+			EchoText "Rollback for auto-deploy successfully completed\n"
+			$ECHO -e "\nAUTO_DEPLOY:FALSE" >> ${SUMMARY_FILE}"_tmp"
+		else
+			EchoText "Rollback failed for auto-deploy. Re-run the Procedure\n"
+			$ECHO -e "\nAUTO_DEPLOY:TRUE" >> ${SUMMARY_FILE}"_tmp"
+		fi
+	fi
+else
+	EchoText "Provided response is not valid, aborting the script\n"
+    exit 20              
+fi
+}
+##################################################################################################
+
+restore_autocomplete(){
+if [ -z "$1" ]; then
+    EchoText "Response provided is empty, provide the valid response to proceed\n"
+	exit 21
+fi
+if [ "$1" == "No" ]; then
+	if [ -f ${SUMMARY_FILE} ] && [ "`$CAT ${SUMMARY_FILE} |$GREP AUTO_COMPLETE |$AWK -F ":" '{print $2}'`" == "FALSE" ]; then
+	    EchoText "Skipping the Procedure for auto-complete functionality, proceed with next\n"
+		$ECHO -e "\nAUTO_COMPLETE:FALSE" >> ${SUMMARY_FILE}"_tmp"
+	    return
+	else
+		EchoText "Skipping the Procedure for auto-complete functionality, proceed with next\n"
+		$ECHO -e "\nAUTO_COMPLETE:TRUE" >> ${SUMMARY_FILE}"_tmp"
+	    return
+	fi
+elif [ "$1" == "Yes" ]; then
+	
+	#VALUE=`$CAT ${SUMMARY_FILE} |$GREP AUTO_COMPLETE |$AWK -F ":" '{print $2}'`
+	if [ -f ${SUMMARY_FILE} ] && [ "`$CAT ${SUMMARY_FILE} |$GREP AUTO_COMPLETE |$AWK -F ":" '{print $2}'`" == "FALSE" ]; then
+		EchoText "Rollback procedure for auto-complete functionality is already executed\n"
+		$ECHO -e "\nAUTO_COMPLETE:FALSE" >> ${SUMMARY_FILE}"_tmp"
+	else
+		EchoText "Rollback procedure for auto-complete functionality started\n"
+	    result="true"
+		$SED -i 's/autocomplete=\"off\"//i' ${LOGIN_FILE}
+		$GREP 'autocomplete' ${LOGIN_FILE} > /dev/null
+		if [[ $? -eq 0 ]]; then
+			result="false"
+		fi
+		$SED -i 's/autocomplete=\"off\"//i' ${FEATURE_VM_FILE}
+		$GREP 'autocomplete' ${FEATURE_VM_FILE} > /dev/null
+		if [[ $? -eq 0 ]]; then
+			result="false"
+		fi
+		$SED -i 's/autocomplete=\"off\"//i' ${FEATURE_INSTALL_VM_FILE}
+		$GREP 'autocomplete' ${FEATURE_INSTALL_VM_FILE} > /dev/null
+		if [[ $? -eq 0 ]]; then
+			result="false"
+		fi
+		$SED -i 's/autocomplete=\"off\"//i' ${FEATURE_UPDATE_VM_FILE}
+		$GREP 'autocomplete' ${FEATURE_UPDATE_VM_FILE} > /dev/null
+		if [[ $? -eq 0 ]]; then
+			result="false"
+		fi
+		if [[ $result == "true" ]]; then
+			EchoText "Rollback for auto-complete successfully completed\n"
+			$ECHO -e "\nAUTO_COMPLETE:FALSE" >> ${SUMMARY_FILE}"_tmp"
+		else
+			EchoText "Rollback failed for auto-complete. Re-run the Procedure\n"
+			$ECHO -e "\nAUTO_COMPLETE:TRUE" >> ${SUMMARY_FILE}"_tmp"
+		fi
+	fi
+else
+	EchoText "Provided response is not valid, aborting the script\n"
+    exit 22              
+fi
+}
+##################################################################################################
+
+restore_cipher_prop ()
+{
+if [ -z "$1" ]; then
+	EchoText "Response provided is empty, provide the valid response to proceed\n"
+	exit 23
+fi
+
+if [ "$1" == "No" ]; then
+	if [ -f ${SUMMARY_FILE} ] && [ "`$CAT ${SUMMARY_FILE} |$GREP CIPHER_PROP |$AWK -F ":" '{print $2}'`" == "FALSE" ]; then
+		EchoText "Skipping the Procedure for cipher functionality, proceed with next\n"
+		$ECHO -e "\nCIPHER_PROP:FALSE" >> ${SUMMARY_FILE}"_tmp"
+		return
+	else
+		EchoText "Skipping the Procedure for cipher functionality, proceed with next\n"
+		$ECHO -e "\nCIPHER_PROP:TRUE" >> ${SUMMARY_FILE}"_tmp"
+		return
+	fi
+elif [ "$1" == "Yes" ]; then
+	
+	#VALUE=`$CAT ${SUMMARY_FILE} |$GREP CIPHER_PROP |$AWK -F ":" '{print $2}'`
+	if [ -f ${SUMMARY_FILE} ] && [ "`$CAT ${SUMMARY_FILE} |$GREP CIPHER_PROP |$AWK -F ":" '{print $2}'`" == "FALSE" ]; then
+		EchoText "Rollback procedure for Cipher Property functionality is already executed\n"
+		$ECHO -e "\nCIPHER_PROP:FALSE" >> ${SUMMARY_FILE}"_tmp"
+	else
+		EchoText "Rollback procedure for Cipher Property functionality started\n"
+		result="true"
+		$SED -i 's/SSLCipherSuite=\"HIGH:!SHA\"/SSLCipherSuite=\"ALL\"/' ${TOMCAT_SERVER_XML}
+		$GREP 'SSLCipherSuite=\"HIGH:!SHA\"' ${TOMCAT_SERVER_XML} > /dev/null
+		if [[ $? -eq 0 ]]; then
+			result="false"
+		fi
+		$SED -i 's/SSLHonorCipherOrder=\"true\"/SSLHonorCipherOrder=\"on\"/' ${TOMCAT_SERVER_XML}
+		$GREP 'SSLHonorCipherOrder=\"true\"' ${TOMCAT_SERVER_XML} > /dev/null
+		if [[ $? -eq 0 ]]; then
+			result="false"
+		fi
+		if [[ $result == "true" ]]; then
+			EchoText "Rollback for ciphers successfully completed\n"
+			$ECHO -e "\nCIPHER_PROP:FALSE" >> ${SUMMARY_FILE}"_tmp"
+		else
+			EchoText "Rollback failed for auto-complete. Re-run the Procedure\n"
+			$ECHO -e "\nCIPHER_PROP:TRUE" >> ${SUMMARY_FILE}"_tmp"
+		fi
+	fi
+else
+	EchoText "Provided response is not valid, aborting the script\n"
+	exit 24              
+fi
+}
+##################################################################################################
+
+
+usage_msg() 
+{
+	$CLEAR
+	EchoText "
+	\n\tUsage: bash Security_Rollback_Procedure.bsh -A <Action>
+	\n	
+	\n\tAction options:
+	\n
+	\n\tALL : To Rollback all security features applied
+	\n\tSELECTIVE : To Rollback security featured applied selectively "
+
+	EchoText "\n Please run the script as per the usage. \n"
+}	
+##################################################################################################
+
+validate_and_backup ()
+{
+$MKDIR -p ${TOMCAT_BACKUP_DIR}
+
+$LS ${TOMCAT_BACKUP_DIR} | $GREP Rollback_Summary_ > /dev/null
+if [ $? -eq 0 ];then
+	for file in `$LS ${TOMCAT_BACKUP_DIR}/Rollback_Summary_*`; do 
+		$MV $file ${TOMCAT_BACKUP_DIR}/Rollback_Summary
+	done
+fi
+
+if [ ! -r ${TOMCAT_SERVER_XML} ]; then
+	EchoText "File ${TOMCAT_SERVER_XML} not found or not readable, aborting the script\n"
+	exit 4
+fi
+
+if [ -f ${TOMCAT_BACKUP_DIR}/server.xml ]; then
+	$CP ${TOMCAT_SERVER_XML} ${TOMCAT_BACKUP_DIR}/server.xml_${TIMESTAMP}
+else
+	$CP ${TOMCAT_SERVER_XML} ${TOMCAT_BACKUP_DIR}/server.xml
+fi
+
+if [ ! -r ${TOMCAT_WEB_XML} ]; then
+	EchoText "File ${TOMCAT_WEB_XML} not found or not readable, aborting the script\n"
+	exit 5
+fi
+
+if [ -f ${TOMCAT_BACKUP_DIR}/tomcat_web.xml ]; then
+	$CP ${TOMCAT_WEB_XML} ${TOMCAT_BACKUP_DIR}/tomcat_web.xml_${TIMESTAMP}
+else
+	$CP ${TOMCAT_WEB_XML} ${TOMCAT_BACKUP_DIR}/tomcat_web.xml
+fi
+	
+if [ ! -r ${ADMINUI_WEB_XML} ]; then
+	EchoText "File ${ADMINUI_WEB_XML} not found or not readable, aborting the script\n"
+	exit 6
+fi
+
+if [ -f ${TOMCAT_BACKUP_DIR}/adminui_web.xml ]; then
+	$CP ${ADMINUI_WEB_XML} ${TOMCAT_BACKUP_DIR}/adminui_web.xml_${TIMESTAMP}
+else
+	$CP ${ADMINUI_WEB_XML} ${TOMCAT_BACKUP_DIR}/adminui_web.xml
+fi
+
+#if [ ! -r $BEFORE_WEBSERVER_XML ]; then
+#	EchoText "File $BEFORE_WEBSERVER_XML not found or not readable, aborting the script"
+#	exit 7
+#fi
+#$CP $BEFORE_WEBSERVER_XML ${TOMCAT_BACKUP_DIR}
+
+if [ ! -r ${LOGIN_FILE} ]; then
+	EchoText "File ${LOGIN_FILE} not found or not readable, aborting the script\n"
+	exit 7
+fi
+
+if [ -f ${TOMCAT_BACKUP_DIR}/login.jsp ]; then
+	$CP ${LOGIN_FILE} ${TOMCAT_BACKUP_DIR}/login.jsp_${TIMESTAMP}
+else
+	$CP ${LOGIN_FILE} ${TOMCAT_BACKUP_DIR}/login.jsp
+fi
+
+
+if [ ! -r ${FEATURE_VM_FILE} ]; then
+	EchoText "File ${FEATURE_VM_FILE} not found or not readable, aborting the script\n"
+	exit 8
+fi
+
+if [ -f ${TOMCAT_BACKUP_DIR}/feature_availability.vm ]; then
+	$CP ${FEATURE_VM_FILE} ${TOMCAT_BACKUP_DIR}/feature_availability.vm_${TIMESTAMP}
+else
+	$CP ${FEATURE_VM_FILE} ${TOMCAT_BACKUP_DIR}/feature_availability.vm
+fi
+	
+if [ ! -r ${FEATURE_INSTALL_VM_FILE} ]; then
+	EchoText "File ${FEATURE_INSTALL_VM_FILE} not found or not readable, aborting the script\n"
+	exit 9
+fi
+
+if [ -f ${TOMCAT_BACKUP_DIR}/feature_availability_install.vm ]; then
+	$CP ${FEATURE_INSTALL_VM_FILE} ${TOMCAT_BACKUP_DIR}/feature_availability_install.vm_${TIMESTAMP}
+else
+	$CP ${FEATURE_INSTALL_VM_FILE} ${TOMCAT_BACKUP_DIR}/feature_availability_install.vm
+fi
+
+
+if [ ! -r ${FEATURE_UPDATE_VM_FILE} ]; then
+	EchoText "File ${FEATURE_UPDATE_VM_FILE} not found or not readable, aborting the script\n"
+	exit 10
+fi
+
+if [ -f ${TOMCAT_BACKUP_DIR}/feature_availability_update.vm ]; then
+	$CP ${FEATURE_UPDATE_VM_FILE} ${TOMCAT_BACKUP_DIR}/feature_availability_update.vm_${TIMESTAMP}
+else
+	$CP ${FEATURE_UPDATE_VM_FILE} ${TOMCAT_BACKUP_DIR}/feature_availability_update.vm
+fi
+}
+
+
+##################################################################################################
+rollback_one_by_one ()
+{
+
+EchoText "Procedure will Rollback the security changes applied selectively, would you like to proceed? (Yes/No)\n"
+read response
+
+if [ -z "$response" ]; then
+	EchoText "Response provided is empty, provide the valid response to proceed\n"
+	exit 25
+fi
+
+if [ "$response" == "No" ]; then
+	EchoText "Skipping the Procedure execution\n"
+	exit 26
+elif [ "$response" == "Yes" ]; then
+	validate_and_backup
+		
+	EchoText "Do you want to rollback Secure Session(Yes/No)"
+	read response
+	restore_secure_session $response
+
+	EchoText "Do you want to rollback Clickjacking attacks and HSTS feature(Yes/No)"
+	read response
+	restore_clickJack_Hsts $response
+	
+	EchoText "Do you want to rollback tomcat lockout functionality(Yes/No)"
+	read response
+	restore_lockout $response
+	
+	EchoText "Do you want to rollback shutdwon port(Yes/No)"
+	read response1
+	restore_shutdown_port $response1
+	
+	EchoText "Do you want to rollback auto deploy functionality(Yes/No)"
+	read response2
+	restore_autodeploy $response2				
+	
+	EchoText "Do you want to rollback auto complete functionality(Yes/No)"
+	read response3
+	restore_autocomplete $response3			
+	
+	EchoText "Do you want to rollback Cipher Property functionality(Yes/No)"
+	read response4
+	restore_cipher_prop $response4
+	
+	$MV ${SUMMARY_FILE}"_tmp" ${SUMMARY_FILE}
+	
+	EchoText "Summary of the Rollback procedure is\n"
+	
+	EchoText "\n##########################################################################\n"
+	$CAT ${SUMMARY_FILE} | $TEE -a ${LOGFILE} 
+	EchoText "\n##########################################################################\n"
+else
+	EchoText "Provided response is not valid Aborting the Script"
+	exit 30
+fi
+}
+##############################################################################################################
+
+rollback_all ()
+{
+EchoText "Procedure will Rollback All the security changes applied, would you like to proceed? (Yes/No)\n"
+read response
+
+if [ -z "$response" ]; then
+	EchoText "Response provided is empty, provide the valid response to proceed\n"
+	exit 25
+fi
+
+if [ "$response" == "No" ]; then
+	EchoText "Skipping the Procedure execution\n"
+	exit 26
+elif [ "$response" == "Yes" ]; then
+	
+	validate_and_backup
+	
+	restore_secure_session Yes
+	
+	restore_clickJack_Hsts Yes
+	
+	restore_lockout Yes
+	
+	restore_shutdown_port Yes
+	
+	restore_autodeploy Yes
+	
+	restore_autocomplete Yes
+	
+	restore_cipher_prop Yes
+	
+	$MV ${SUMMARY_FILE}"_tmp" ${SUMMARY_FILE}
+	
+	EchoText "Summary of the Rollback procedure is\n"
+	
+	EchoText "\n##########################################################################\n"
+	$CAT ${SUMMARY_FILE} | $TEE -a ${LOGFILE}
+	EchoText "\n##########################################################################\n"
+	
+else
+	EchoText "Provided response is not valid Aborting the Script"
+	exit 30
+fi
+
+}
+
+##############################################################################################################
+
+check_params()
+{
+if [ ! "${ACTION}" ]; then
+    usage_msg
+    exit 6
+fi
+
+case "${ACTION}" in
+     ALL)  rollback_all
+            ;;
+    SELECTIVE)  rollback_one_by_one
+            ;;
+	*)  usage_msg
+            exit 7
+            ;;
+esac
+}
+
+##############################################################################################################
+
+
+if [[ $# -ne 2 ]]; then 
+	usage_msg
+	exit 4
+fi
+	
+while getopts ":A:" arg; do
+  case $arg in
+    A) ACTION="$OPTARG"
+		;;
+			
+   \?) 
+		usage_msg
+       exit 5
+       ;;
+  esac
+done
+shift `expr $OPTIND - 1`
+
+# Check Input Params
+check_params
+EchoText "\nRestarting webserver...\n"
+	${BIN_DIR}/webserver restart
+	webserver_code=$?
+	if [[ $webserver_code != 0 ]]; then
+		EchoText "\nWebserver failed to restart with error code $webserver_code"
+		exit $webserver_code
+	fi
+
+exit 0

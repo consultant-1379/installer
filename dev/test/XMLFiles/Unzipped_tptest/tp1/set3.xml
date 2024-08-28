@@ -1,0 +1,4 @@
+<?xml version="1.0"?>
+	<dataset>
+		<META_COLLECTION_SETS COLLECTION_SET_ID="010101" COLLECTION_SET_NAME="set2.3" DESCRIPTION="testing doublicates" VERSION_NUMBER="2.1" ENABLED_FLAG="Y" TYPE="B" />
+        </dataset>

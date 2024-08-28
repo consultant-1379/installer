@@ -1,0 +1,333 @@
+#!/usr/bin/bash
+# ***********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ***********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2017- All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ***********************************************************************
+# Name    : monitor_heap.sh
+# Revision: main/at_eniq/1
+# Purpose : This script will count the heap usage of Engine and Scheduler
+# 
+# The script will save data for each min.
+#
+# Usage   : monitor_heap.sh
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# ***********************************************************************
+# Mrinal Ahuja (mrinal.ahuja1@wipro.com)
+# ***********************************************************************
+
+# ***********************************************************************
+#Global variable
+# ***********************************************************************
+. /eniq/home/dcuser/.profile
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 3
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+SYBASE=/eniq/sybase_iq
+export SYBASE
+
+CONF_DIR=/eniq/sw/conf
+
+IQISQL=/eniq/sybase_iq/OCS-16_0/bin/isql
+export IQISQL
+
+DBISQL="$($LS /eniq/sybase_iq/IQ-*/bin64/dbisql)"
+export DBISQL
+if [ ! -x "$DBISQL" ]; then
+    $ECHO "$DBISQL command not found or not executable."
+    exit 1
+fi
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+    $ECHO "Could not find /eniq/admin/lib/common_functions.lib"
+    exit 1
+fi
+
+LOGSFILE=/eniq/log/sw_log/iq/dwhdb/logscheck.log
+export LOGSFILE
+
+SQLANY=/eniq/sql_anywhere
+export SQLANY
+
+. ${SYBASE}/IQ.sh
+
+# Internal directory variable
+
+CONF_DIR=/eniq/sw/conf
+export CONF_DIR
+
+BIN_DIR=/eniq/sw/bin
+export BIN_DIR
+
+RT_DIR=/eniq/sw/runtime
+export RT_DIR
+
+# ASN.1 library stuff
+OSS_ASN1_JAVA="${RT_DIR}/nokalva/asn1pjav/solaris.tgt/3.0"
+export OSS_ASN1_JAVA
+
+OSSINFO=${OSS_ASN1_JAVA}
+export OSSINFO
+
+# Path extension
+PATH=${PATH}:${OSS_ASN1_JAVA}:/usr/local/bin:${BIN_DIR}
+export PATH
+
+LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${OSS_ASN1_JAVA}/lib:${SQLANY}/lib64
+export LD_LIBRARY_PATH
+
+
+if [ -z "${CONF_DIR}" ] ; then
+  $ECHO "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+. ${CONF_DIR}/niq.rc
+
+_dir_=`/usr/bin/dirname $0`
+SCRIPTHOME=`$CD $_dir_ 2>/dev/null && $PWD || $ECHO $_dir_`
+
+JAVA_HOME="/eniq/sw/runtime/java"
+
+CPATH="${PLATFORM_DIR}"
+
+DIRS=`$LS ${PLATFORM_DIR}`
+
+for file in ${DIRS}
+do
+  if [ -d ${PLATFORM_DIR}/${file}/dclib ]
+  then
+    JARS=`$LS ${PLATFORM_DIR}/${file}/dclib/*.jar`
+
+    for jar in ${JARS}
+    do
+      CPATH="${CPATH}:${jar}"
+    done
+  fi
+done
+
+#$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : $$ LogFile initialised" >> ${LOGSFILE}
+##EQEV-103319. New Rack - manage_heap script calling dbisql resulting in high semaphore consumption
+MAX_TIME=5
+PIDFILE=/eniq/home/dcuser/.monitor_heapPid
+#$ECHO $$ >> ${LOGSFILE}
+if [[ ! -e $PIDFILE ]]; then
+    $TOUCH $PIDFILE
+fi
+if [ ! -f $PIDFILE ]
+then
+  #$ECHO $$ > ${LOGSFILE}
+  #$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Previous instance is running" >> ${LOGSFILE}
+  if [ $? -ne 0 ]
+  then
+    $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Failed to create PID file. Monitor heap script will not proceed." >> ${LOGSFILE}
+    exit 1
+  fi
+else
+  PID=`$CAT $PIDFILE`  
+  for procid in $PID
+  do
+	 #$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : $procid" >> ${LOGSFILE}
+     $PS -p $procid > /dev/null
+     if [ $? -eq 0 ]
+     then
+       psetime=`$PS -o etime= -p $procid|tr -d " "`
+       if [ ! -z $psetime ]
+       then
+          #$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : $psetime and $procid" >> ${LOGSFILE}
+          psmin=$($ECHO $psetime|awk -F":" '{print $1}')
+          psminint=$(($psmin+0))
+          if [ $psminint -ge $MAX_TIME ]
+          then
+             $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Monitor_Heap, Previous process is already running with PID $procid for more than $MAX_TIME minutes. Killing the previous process with PID $procid" >> ${LOGSFILE}
+             #EQEV-112536
+			pgid=$(($(ps -o pgid= -p "$procid")))
+			$KILL -9 -$pgid > /dev/null
+			#--end of EQEV-112536
+             $ECHO "$($GREP -v $procid $PIDFILE)" > $PIDFILE
+	      else
+		     $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Monitor_Heap, Previous process is already running with PID $procid for less than $MAX_TIME minutes. Exiting the current instance with PID $$" >> ${LOGSFILE}
+             $ECHO "$($GREP -v $$ $PIDFILE)" > $PIDFILE
+			 exit 1
+          fi
+       fi
+     else
+        $ECHO "$($GREP -v $procid $PIDFILE)" > $PIDFILE
+        perl -i -n -e "print if /\S/" $PIDFILE
+     fi
+  done
+  $ECHO $$ >> $PIDFILE
+  if [ $? -ne 0 ]
+  then
+    $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Could not create PID file" >> ${LOGSFILE}
+    exit 1
+  fi
+fi
+
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $connection_string ]; then
+  $RM -f $connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string"
+  fi
+fi
+}
+
+trap remove_connection_string EXIT
+
+DCPASSWORD=`inigetpassword DWH -v DCPassword -f ${CONF_DIR}/niq.ini`
+connection_string=/var/tmp/encrypt_$$.txt
+connection_string_decrypt="-c \"eng=dwhdb;links=tcpip{host=dwhdb;port=2640};uid=dc;pwd=$DCPASSWORD\" -nogui -onerror exit"
+
+get_encrypt_file "${connection_string_decrypt}" "${connection_string}"
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+#
+#Initalizing 
+#
+_date1_=`$DATE +%d`
+_time1_=`$DATE '+%T'`
+_time2_="01:00:00"
+
+_htime_=`$DATE '+%H'`
+_mtime_=`$DATE '+%M'`
+_time_=`$DATE '+%H:%M'`
+_date_=`$DATE '+%Y-%m-%d'`
+
+
+#
+# log file name
+#
+touch /eniq/log/sw_log/scheduler/schedulerHeap-$_date_.log
+touch /eniq/log/sw_log/engine/engineHeap-$_date_.log
+SCHEDULER_LOG_FILE="/eniq/log/sw_log/scheduler/schedulerHeap-$_date_.log"
+ENGINE_LOG_FILE="/eniq/log/sw_log/engine/engineHeap-$_date_.log"
+
+# ********************************************************************
+#
+#   Main body of program
+#
+# ********************************************************************
+#
+
+# create temporary table to keep record 
+# - if required table "monitor_heap" already present it will not create again
+# - if the table is not present but script is not able to create the table it will throw an error and exit
+flag=`${DBISQL} @${connection_string} "select count(*) as row from sysobjects where name = 'Monitor_heap'" 2>&1`
+dbErrCode=$?
+if [[ $dbErrCode -ne 0 ]]; then
+$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Could not retrieve data from sysobjects table.Error code: $dbErrCode" >> ${LOGSFILE}
+else
+flag=`$ECHO "$flag" | $GREP "[0-9]" | $GREP -v row | $GREP -v time | $TR -d ' '`
+fi
+if [ $flag -eq 0 ] && [ $dbErrCode -eq 0 ]; then
+$ECHO "Need to create the table "
+$ECHO "creating table"
+${DBISQL} @${connection_string} /eniq/sw/bin/create_engine_heap.sql > /dev/null 2>&1
+dbErrCode=$?
+if [[ $dbErrCode -ne 0 ]]; then
+$ECHO "Could not create the table Monitor_Heap.Error code: $dbErrCode" >> ${LOGSFILE}
+else
+$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Monitor_heap table got created successfully." >> ${LOGSFILE}
+fi
+fi
+
+#To get the Process Id of Scheduler and heap usage.
+Scheduler_PID=`ssh dcuser@scheduler $PS -eaf | $GREP -i ETLCScheduler| $GREP -i java | $NAWK '{print $2}'`
+if [ "$Scheduler_PID" != "" ]
+then
+Scheduler_Heap=`ssh dcuser@scheduler $JAVA_HOME/bin/jmap -heap $Scheduler_PID 2>/dev/null | $TR -d ' ' | $GREP "used=" | $NAWK -F'(' '/(\d+)/{ print $2}' | $NAWK -F'M' '{sum += $1} END {print sum}'`
+
+if [ "$Scheduler_Heap" == "" ]
+then
+$ECHO "Scheduler Heap at $_htime_:$_mtime_ fetched as null for Scheduler-PID:$Scheduler_PID" >> ${LOGSFILE}
+else
+$ECHO "Scheduler Heap at $_htime_:$_mtime_ fetched as $Scheduler_Heap for Scheduler-PID:$Scheduler_PID" >> ${LOGSFILE}
+fi
+else
+$ECHO "Scheduler PID at $_htime_:$_mtime_ fetched as null as Scheduler Process is not running." >> ${LOGSFILE}
+fi
+
+#To get the Process Id of Engine and heap usage.
+Engine_PID=`ssh dcuser@engine $PS -eaf | $GREP -i ETLCengine| $GREP -i java | $NAWK '{print $2}'`
+if [ "$Engine_PID" != "" ]
+then
+Engine_Heap=`ssh dcuser@engine $JAVA_HOME/bin/jmap -heap $Engine_PID 2>/dev/null | $TR -d ' ' | $GREP "used=" | $NAWK -F'(' '/(\d+)/{ print $2}' | $NAWK -F'M' '{sum += $1} END {print sum}'`
+
+if [ "$Engine_Heap" == "" ]
+then
+$ECHO "Engine Heap at $_htime_:$_mtime_ fetched as null for Engine-PID:$Engine_PID" >> ${LOGSFILE}
+else
+$ECHO "Engine Heap at $_htime_:$_mtime_ fetched as $Engine_Heap for Engine-PID:$Engine_PID" >> ${LOGSFILE}
+fi
+
+else
+$ECHO "Engine PID at $_htime_:$_mtime_ fetched as null as Engine Process is not running." >> ${LOGSFILE}
+fi
+
+$ECHO "Heap usage for $_htime_:$_mtime_ :$Scheduler_Heap" >> $SCHEDULER_LOG_FILE
+$ECHO "Heap usage for $_htime_:$_mtime_ :$Engine_Heap" >> $ENGINE_LOG_FILE
+
+#Insert into DataBase
+if [ "$Engine_Heap" != "" ] && [ "$Scheduler_Heap" != "" ]
+then
+${DBISQL} @${connection_string} "INSERT INTO DC.Monitor_Heap(DATETIMEID, ROP,SCHEDULER_HEAP_USAGE,ENGINE_HEAP_USAGE) VALUES ('$_date_', '$_htime_:$_mtime_', '$Scheduler_Heap', '$Engine_Heap')" >/dev/null 2>&1 
+dbErrCode=$?
+if [[ $dbErrCode -ne 0 ]]; then
+$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Could not update the heap usage into the Monitor_Heap table.Error code: $dbErrCode" >> ${LOGSFILE}
+fi
+fi
+#Deleting data older than 2 years from "DC.Monitor_Heap" 
+if [[ $((10#$_date1_)) -eq 07 ]] || [[ $((10#$_date1_)) -eq 14 ]] || [[ $((10#$_date1_)) -eq 21 ]] || [[ $((10#$_date1_)) -eq 28 ]] && [[ "$_time1_" == "$_time2_" ]];then
+	oldDataCount=`${DBISQL} @${connection_string} "SELECT count(*) as row FROM DC.Monitor_Heap WHERE DATETIMEID<dateadd(year, -2, NOW())" 2>&1`
+	dbErrCode=$?
+	if [[ $dbErrCode -ne 0 ]]; then
+	$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Could not delete older data from Monitor_Heap table.Error code: $dbErrCode" >> ${LOGSFILE}
+	exit $dbErrCode
+	else
+	oldDataCount=`$ECHO "$oldDataCount" | $GREP "[0-9]" | $GREP -v row | $GREP -v time | $TR -d ' '`
+	fi
+	if [ $oldDataCount -gt 0 ]; then
+	${DBISQL} @${connection_string} "DELETE FROM DC.Monitor_Heap where DATETIMEID < dateadd(year, -2, NOW())" > /dev/null 2>&1
+	dbErrCode=$?
+	if [ $dbErrCode -eq 0 ]; then
+	$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Data older than 2 years are deleted from DC.Monitor_Heap" >> ${LOGSFILE}
+	else
+	$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Could not delete older data from Monitor_Heap table.Error code: $dbErrCode" >> ${LOGSFILE}
+	fi
+	fi
+fi
+exit 0

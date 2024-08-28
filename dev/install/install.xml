@@ -1,0 +1,7 @@
+<project name="mediation" basedir="." default="all">
+		
+	<target name="install" depends="copyTmpToDeploy"/>
+
+	<target name="update" depends="moveToObsolete,install"/>
+
+</project>

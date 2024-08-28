@@ -1,0 +1,443 @@
+#!/bin/bash 
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2012 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    :change_catalog_cache.bsh
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Revision: A
+# Purpose : Script to change catalog cache
+#
+# Usage   : `$BASENAME $0` -a|-r
+#
+#           options:
+#        -a	: Adjusts the catalog cache values 
+#             -a	: Adjusts the catalog cache values
+#             -r	:Restores the original niq.ini.
+#
+# ********************************************************************
+#
+# 	Command Section
+#
+# ********************************************************************
+#
+
+# Name of SunOS & ENIQ ini Files
+ENIQ_INI=niq.ini
+
+if [ -z "$CONF_DIR" ] ; then
+  echo "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+if [ -z "${BIN_DIR}" ] ; then
+  echo "ERROR: BIN_DIR is not set"
+  exit 1
+fi
+if [ ! "${ENIQ_BASE_DIR}" ]; then
+    # Directory on the root filesystem
+    ENIQ_BASE_DIR=/eniq
+fi
+
+# ENIQ Admin Directory
+ENIQ_ADMIN_DIR=${ENIQ_BASE_DIR}/admin
+# Source the common functions
+if [ -s ${ENIQ_ADMIN_DIR}/lib/common_functions.lib ]; then
+    . ${ENIQ_ADMIN_DIR}/lib/common_functions.lib
+else
+    _err_msg_="File ${ENIQ_ADMIN_DIR}/lib/common_functions.lib not found"
+    abort_script "${_err_msg_}"
+fi
+
+. ${CONF_DIR}/niq.rc
+
+if [ -z "${BIN_DIR}" ] ; then
+  echo "ERROR: BIN_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+abort_script()
+{
+if [ "$1" ]; then
+    _err_msg_=$1
+else
+    _err_msg_="Script aborted.......\n"    
+fi
+echo $_err_msg_  | tee -a ${LOGFILE}
+
+exit 1
+}
+
+### Function: usage_msg ###
+#
+#   Print out the usage message
+#
+# Arguments:
+#       none
+# Return Values:
+#       none
+usage_msg()
+{
+$CLEAR
+$ECHO "
+Usage: `$BASENAME $0` -a|-r
+
+options:
+        -a	: Adjusts the catalog cache values 
+
+        -r	:Restores the original niq.ini.
+
+"
+}
+
+### Function: setup_env ###
+#
+# Setup up path environment etc
+#
+# Arguments:
+#	none
+# Return Values:
+#	DWH_port,DWH_eng and DBA password
+
+setup_env()
+{
+ENIQ_BASE_DIR=/eniq
+ENIQ_SW_DIR=${ENIQ_BASE_DIR}/sw
+ENIQ_BKUPSW_DIR=${ENIQ_BASE_DIR}/bkup_sw
+CLI_CONF_DIR=${ENIQ_BASE_DIR}/sw/conf
+# Main Directory for the Core Installation SW
+ENIQ_INST_DIR=${ENIQ_BASE_DIR}/installation
+
+DWH_PORT=`iniget DWH -v PortNumber -f ${CONF_DIR}/niq.ini`
+DWH_ENG=`iniget DWH -v ServerName -f ${CONF_DIR}/niq.ini`
+if [ ! "${DWH_PORT}" -o ! "${DWH_ENG}" ]; then
+        _err_msg_="Could not read db values from ${CLI_CONF_DIR}/${ENIQ_INI}"
+        abort_script "$_err_msg_"
+fi
+
+DBA_PASSWORD=`iniget DB -f ${CLI_CONF_DIR}/${ENIQ_INI} -v DBAPassword`
+if [ ! ${DBA_PASSWORD} ]; then
+  if [ -f ${ENIQ_BASE_DIR}/sw/installer/dbusers ]; then
+            DBA_PASSWORD=`${ENIQ_BASE_DIR}/sw/installer/dbusers dba dwh`
+     if [ ! "${DBA_PASSWORD}" ] ; then
+                _err_msg_="Could not get dwhdb DBA Password"
+                abort_script "$_err_msg_"
+     fi
+   fi
+fi
+    
+
+#Initialising the environmental variables
+# RESULTSDIR is the location where results are stored
+ RESULTSDIR=/eniq/log/sw_log/iq
+
+# niq.ini path and filename
+niq_ini_path="/eniq/sw/conf/"
+niq_ini_filename="niq.ini"
+niq_ini_full_filename=$niq_ini_path$niq_ini_filename
+niq_ini_backup_filename="niq_backup.ini"
+
+# Temp cache value to use in niq.ini
+REPLACEMENT_CACHE_VALUE=20000
+
+# Default user
+DEFAULT_USER=dcuser
+
+adjust_flag="no"
+restore_ini_flag="no"
+}
+
+### Function: change_cache ###
+#
+# Setup up path environment etc
+#
+# Arguments:
+#	none
+# Return Values:
+#	DWH_port,DWH_eng and DBA password
+
+change_cache()
+{
+
+#check that script has not already been run
+check_for_adjusted_cache   
+     
+# Backup original niq.ini file
+${ECHO} "Backing up $niq_ini_full_filename..." | $TEE -a ${LOGFILE}
+${CP} $niq_ini_full_filename $niq_ini_path$niq_ini_backup_filename
+if [[ $? != 0 ]] ; then
+      abort_script "Failed to back up ${niq_ini_full_filename}. Exiting..."
+fi
+        
+        
+# Get the catalogue cache byte value from .ini
+CACHE_VALUE=$(iniget DWH -f ${CLI_CONF_DIR}/${ENIQ_INI} -v CatalogCache)
+${ECHO} "Catalogue cache value is currently $CACHE_VALUE in ${CLI_CONF_DIR}/${ENIQ_INI}" | $TEE -a ${LOGFILE}
+        
+# Check catalogue cache value is a valid number:
+if ! [[ "$CACHE_VALUE" =~ ^[0-9]+$ ]] ; then
+    restore_backup_file
+    abort_script "Error: failed to parse catalogue cache value ""$CACHE_VALUE"" from ${CLI_CONF_DIR}/${ENIQ_INI}: exiting.";
+    fi
+        
+# Get the difference between current value, and 20000
+DIFFERENCE="0"
+if  [[ $CACHE_VALUE -lt $REPLACEMENT_CACHE_VALUE ]];
+then		
+    let DIFFERENCE=REPLACEMENT_CACHE_VALUE-CACHE_VALUE;
+    # Update value in niq.ini:
+   # TODO: use NMI function to replace the value explicitly in the right section
+    # not just the first occurrence like we're doing here:
+    
+    
+    TEMP_CACHE_VALUE=$(iniget DWH -f ${CLI_CONF_DIR}/${ENIQ_INI} -v TempCache)
+    let NEW_CACHE_VALUE=TEMP_CACHE_VALUE-DIFFERENCE
+               
+    $ECHO "Setting TempCache value to ${NEW_CACHE_VALUE} in ${CLI_CONF_DIR}/${ENIQ_INI}"  | $TEE -a ${LOGFILE}
+    iniset DWH -f ${niq_ini_full_filename} TempCache=${NEW_CACHE_VALUE}
+    if [[ $? != 0 ]] ; then
+    restore_backup_file
+    abort_script "Failed to replace temp cache value in ${niq_ini_full_filename}. Exiting..."
+    fi 
+                
+        if  [[ $CACHE_VALUE = [0-9]* ]] ; then
+            if [ $CACHE_VALUE -ne 20000 ] ; then
+                $ECHO "Setting catalogue cache value to ${REPLACEMENT_CACHE_VALUE} in ${niq_ini_full_filename}." | $TEE -a ${LOGFILE}
+                iniset DWH -f ${niq_ini_full_filename} CatalogCache=${REPLACEMENT_CACHE_VALUE}
+                if [[ $? != 0 ]] ; then
+                    restore_backup_file
+                    abort_script "Failed to replace catalogue cache value in ${niq_ini_full_filename}. Exiting..."
+                fi 
+            fi
+        fi
+    else
+        ${ECHO} "Catalogue cache is ok - no changes made" | $TEE -a ${LOGFILE}
+        restore_backup_file	
+		return 0
+    fi
+
+${TOUCH} ${CLI_CONF_DIR}/cache_already_adjusted
+}
+
+restore_backup_file()
+{
+# Setting flag to check if back up needs to be restored
+restore=0
+if [ "${restore_ini_flag}" == "yes" ];then
+# When script is executed with -r option
+    if [ -f ${CLI_CONF_DIR}/cache_already_adjusted ];then
+# If cache has been adjusted 
+		restore=1
+		${RM} ${CLI_CONF_DIR}/cache_already_adjusted
+	else
+	    ${ECHO} "Catalogue cache has not been changed" | $TEE -a ${LOGFILE}
+		exit 0
+	fi
+else
+	restore=1
+fi
+
+if [ $restore -eq 1 ];then
+	if [ -f $niq_ini_path$niq_ini_backup_filename ];then
+		${ECHO} "Restoring original $niq_ini_full_filename file"| $TEE -a ${LOGFILE}
+		${MV} $niq_ini_path$niq_ini_backup_filename $niq_ini_full_filename
+		if [ $? -ne 0 ]; then
+			_err_msg_="Could not restore the backup file"
+			abort_script "${_err_msg_}"
+		fi
+	else
+	    ${ECHO} "Backup file $niq_ini_path$niq_ini_backup_filename not found!" | $TEE -a ${LOGFILE}
+        ${ECHO} "Failed to restore file $niq_ini_full_filename"| $TEE -a ${LOGFILE}
+	    exit 1
+	fi
+fi
+}
+
+### Function: check_server ###
+#
+#   Check if the script is run on the coordinator
+#   
+#
+# Arguments:
+#       none
+# Return Values:
+#       none
+check_server()
+{
+
+CURR_SERVER_TYPE=`$CAT $ENIQ_CONF_DIR/installed_server_type | $GEGREP -v  '^[[:blank:]]*#' | $SED -e 's/ //g'`
+if [ ! "${CURR_SERVER_TYPE}" ]; then
+    _err_msg_="Could not determine which server type this is"
+    abort_script "$_err_msg_" "${EXEC_SHELL_CMD}"
+fi
+
+if [ "${CURR_SERVER_TYPE}" == "eniq_coordinator" -o "${CURR_SERVER_TYPE}" == "stats_coordinator" \
+    -o "${CURR_SERVER_TYPE}" == "eniq_events" -o "${CURR_SERVER_TYPE}" == "eniq_stats" -o "${CURR_SERVER_TYPE}" == "eniq_iqw" -o "${CURR_SERVER_TYPE}" == "son_coordinator" ]; then
+    SERVER_TYPE="CO"
+fi
+
+if [ "$SERVER_TYPE" != "CO" ]; then
+    _err_msg_="You must be on coordinator to execute this script."
+    abort_script "$_err_msg_"
+fi
+}
+
+### Function: check_id ###
+#
+#   Check that the effective id of the user is correct
+#   If not print error msg and exit.
+#
+# Arguments:
+#       $1 : User ID name
+# Return Values:
+#       none
+check_id()
+{
+_check_id_=`$ID  | $NAWK -F\( '{print $2}' | $NAWK -F\) '{print $1}'`
+if [ "$_check_id_" != "$1" ]; then
+    _err_msg_="You must be $1 to execute this script."
+    abort_script "$_err_msg_"
+fi
+}
+
+
+### Function: check_for_adjusted_cache ###
+#
+#   Check if the cache has already been adjusted
+#   
+#
+# Arguments:
+#       $1 : User ID name
+# Return Values:
+#       none
+check_for_adjusted_cache()
+{
+
+if [ -f ${CLI_CONF_DIR}/cache_already_adjusted ]; then
+  ${ECHO} "The cache has already been adjusted."  | $TEE -a ${LOGFILE}
+  exit 0
+fi
+}
+
+
+
+if [ $# -gt 1 ] || [ $# -lt 1 ]
+then
+	usage_msg 
+    err_msg_="Invalid option used or no option used."
+    abort_script "${_err_msg_}"
+fi
+
+
+# ********************************************************************
+#
+# 	Main body of program
+#
+# ********************************************************************
+#
+
+
+
+TIMESTAMP=`$DATE +%d.%m.%y_%H:%M:%S`
+
+# Pull in the environment
+setup_env
+setup_env_ec=$?
+if [ $setup_env_ec -ne 0 ]; then
+    _err_msg_="Could not set_env"
+    abort_script "$_err_msg_"
+fi
+
+
+# Setup logfile
+if [ ! "$LOGFILE" ] ; then
+        LOGFILE=${RESULTSDIR}/change_catalog_cache_${TIMESTAMP}.log
+fi
+
+
+
+
+
+# Check that the effective id of the user is root
+check_id $DEFAULT_USER
+
+# Check that the script is run on the coordinator
+check_server
+
+
+
+#
+$ECHO "=========================================================================" | $TEE -a ${LOGFILE}
+$ECHO "=========================================================================" | $TEE -a ${LOGFILE}
+
+while getopts "ar" arg; do
+  case $arg in
+    a)adjust_flag="yes"
+       ;;
+    r) restore_ini_flag="yes"
+       ;;
+
+   \?) usage_msg 
+         _err_msg_="Invalid option used or no option used."
+        abort_script "${_err_msg_}"
+       	;;
+       
+  esac
+done
+
+${ECHO} "=========================================================================" | $TEE -a ${LOGFILE}
+${ECHO} "=========================================================================" | $TEE -a ${LOGFILE}
+
+
+if [ "${adjust_flag}" == "yes" ] && [ "${restore_ini_flag}" == "yes" ]
+then
+	usage_msg 
+    _err_msg_="Invalid option used or no option used."
+    abort_script "${_err_msg_}"
+    
+elif [ "${adjust_flag}" == "yes" ]
+then
+		change_cache
+        dwhdb restart
+		if [ $? -ne 0 ]; then
+			_err_msg_="Could not start dwhdb after changing cache value"
+			restore_backup_file
+			abort_script "${_err_msg_}"
+		fi
+		exit 0
+elif [ "${restore_ini_flag}" == "yes" ]
+then
+		restore_backup_file
+        dwhdb restart
+		if [ $? -ne 0 ]; then
+			_err_msg_="Could not start dwhdb after resetting cache value"
+			abort_script "${_err_msg_}"
+		fi
+		exit 0
+else
+	usage_msg 
+	_err_msg_="Invalid option used or no option used."
+    abort_script "${_err_msg_}"
+fi
+${ECHO} "=========================================================================" | $TEE -a ${LOGFILE}
+${ECHO} "=========================================================================" | $TEE -a ${LOGFILE}
+
+exit 0

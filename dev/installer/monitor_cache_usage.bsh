@@ -1,0 +1,297 @@
+#!/usr/bin/bash 
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2017 - All rights reserved.
+#
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied..
+#
+# ********************************************************************
+# Name    : monitor_cache_usage.sh
+# Purpose : This script is used for monitoring Temp and Main Cache
+# usage in the system.  
+# The script will save data for each min.
+#
+# Usage   : monitor_cache_usage.sh
+#
+# ********************************************************************
+# Author : xgaurku
+# ********************************************************************
+
+
+# ***********************************************************************
+#Global variable
+# ***********************************************************************
+. /eniq/home/dcuser/.profile
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 3
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+_date_=`$DATE '+%Y-%m-%d'`
+_time_=`$DATE '+%H:%M'`
+set main=0.0
+set temp=0
+SYBASE=/eniq/sybase_iq
+export SYBASE
+
+SQLANY=/eniq/sql_anywhere
+export SQLANY
+
+IQDIR=`$LS $SYBASE/IQ-16_*`
+export IQDIR
+
+
+. ${SYBASE}/IQ.sh
+
+# Internal directory variable
+
+# ASN.1 library stuff
+OSS_ASN1_JAVA="${RT_DIR}/nokalva/asn1pjav/solaris.tgt/3.0"
+export OSS_ASN1_JAVA
+
+OSSINFO=${OSS_ASN1_JAVA}
+export OSSINFO
+
+# Path extension
+PATH=${PATH}:${OSS_ASN1_JAVA}:/usr/local/bin:${BIN_DIR}
+export PATH
+
+LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${OSS_ASN1_JAVA}/lib:${SQLANY}/lib64
+export LD_LIBRARY_PATH
+
+LOGSFILE=/eniq/log/sw_log/iq/dwhdb/logscheck.log
+export LOGSFILE
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+    $ECHO "Could not find /eniq/admin/lib/common_functions.lib"
+    exit 1
+fi
+
+DWHDB_DIR=/eniq/log/sw_log/iq/dwhdb
+
+_date1_=`$DATE +%d`
+_time1_=`$DATE '+%T'`
+_time2_="01:00:00"
+
+
+if [ -z "${CONF_DIR}" ] ; then
+  $ECHO "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+. ${CONF_DIR}/niq.rc
+
+_dir_=`$DIRNAME $0`
+SCRIPTHOME=`$CD $_dir_ 2>/dev/null && $PWD || $ECHO $_dir_`
+
+#$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : $$ LogFile initialised" >> ${LOGSFILE}
+##EQEV-103319. New Rack - manage_heap script calling dbisql resulting in high semaphore consumption
+MAX_TIME=5
+PIDFILE=/eniq/home/dcuser/.monitor_cache_usagePid
+#$ECHO $$ >> ${LOGSFILE}
+if [[ ! -e $PIDFILE ]]; then
+    $TOUCH $PIDFILE
+fi
+if [ ! -f $PIDFILE ]
+then
+  #$ECHO $$ > ${LOGSFILE}
+  #$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Previous instance is running" >> ${LOGSFILE}
+  if [ $? -ne 0 ]
+  then
+    $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Failed to create PID file. Monitor cache usage script will not proceed." >> ${LOGSFILE}
+    exit 1
+  fi
+else
+  PID=`$CAT $PIDFILE`  
+  for procid in $PID
+  do
+	 #$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : $procid" >> ${LOGSFILE}
+     $PS -p $procid > /dev/null
+     if [ $? -eq 0 ]
+     then
+       psetime=`$PS -o etime= -p $procid|tr -d " "`
+       if [ ! -z $psetime ]
+       then
+          #$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : $psetime and $procid" >> ${LOGSFILE}
+          psmin=$($ECHO $psetime|awk -F":" '{print $1}')
+          psminint=$(($psmin+0))
+          if [ $psminint -ge $MAX_TIME ]
+          then
+             $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Monitor_cache_usage, Previous process is already running with PID $procid for more than $MAX_TIME minutes. Killing the previous process with PID $procid" >> ${LOGSFILE}
+				#EQEV-112536
+			pgid=$(($(ps -o pgid= -p "$procid")))
+			$KILL -9 -$pgid > /dev/null
+			#--end of EQEV-112536
+             $ECHO "$($GREP -v $procid $PIDFILE)" > $PIDFILE
+	      else
+		     $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Monitor_cache_usage, Previous process is already running with PID $procid for less than $MAX_TIME minutes. Exiting the current instance with PID $$" >> ${LOGSFILE}
+             $ECHO "$($GREP -v $$ $PIDFILE)" > $PIDFILE
+			 exit 1
+          fi
+       fi
+     else
+        $ECHO "$($GREP -v $procid $PIDFILE)" > $PIDFILE
+        perl -i -n -e "print if /\S/" $PIDFILE
+     fi
+  done
+  $ECHO $$ >> $PIDFILE
+  if [ $? -ne 0 ]
+  then
+    $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Could not create PID file" >> ${LOGSFILE}
+    exit 1
+  fi
+fi
+
+
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $connection_string_dba ]; then
+  $RM -f $connection_string_dba
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string_dba"
+  fi
+fi
+
+if [ -f $connection_string_dc ]; then
+  $RM -f $connection_string_dc
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string_dc"
+  fi
+fi
+}
+trap remove_connection_string EXIT
+
+DCPASSWORD=`inigetpassword DWH -v DCPassword -f ${CONF_DIR}/niq.ini`
+DBAPASSWORD=`inigetpassword DB -f ${CONF_DIR}/niq.ini -v DBAPassword`
+connection_string_dba=/var/tmp/encrypt_$$.txt
+connection_string_dc=/var/tmp/encrypt2_$$.txt
+connection_string_decrypt_dba="-c \"UID=dba;PWD=$DBAPASSWORD\" -host localhost -port 2640 -onerror exit -nogui"
+connection_string_decrypt_dc="-c \"eng=dwhdb;links=tcpip{host=dwhdb;port=2640};UID=dc;PWD=${DCPASSWORD}\" -onerror exit -nogui"
+get_encrypt_file "${connection_string_decrypt_dba}" "${connection_string_dba}"
+get_encrypt_file "${connection_string_decrypt_dc}" "${connection_string_dc}"
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+CPATH="${PLATFORM_DIR}"
+
+DIRS=`$LS ${PLATFORM_DIR}`
+
+for file in ${DIRS}
+do
+  if [ -d ${PLATFORM_DIR}/${file}/dclib ]
+  then
+    JARS=`$LS ${PLATFORM_DIR}/${file}/dclib/*.jar`
+
+    for jar in ${JARS}
+    do
+      CPATH="${CPATH}:${jar}"
+    done
+  fi
+done
+
+#
+# log file name
+#
+HOSTNAME=`$HOSTNAME`
+LOGFILE="Cache"$HOSTNAME".log"
+$TOUCH ${DWHDB_DIR}/mainBuffer-$_date_.log
+$TOUCH ${DWHDB_DIR}/tempBuffer-$_date_.log
+
+#
+# check sql out-put
+#
+check_sqlout() {
+
+SQLOUTFILE=$1
+
+ERRORMSG=`$CAT $SQLOUTFILE | $GREP -v "already exists" | $EGREP -i "command not found|SQL Anywhere Error|CT-LIBRARY error"`
+ERRORCODE=`$CAT $SQLOUTFILE | $GREP -v "already exists" | $EGREP -i "command not found|SQL Anywhere Error|CT-LIBRARY error" | $WC -l | $AWK '{print $1}'`
+
+if [ "$ERRORCODE" != 0 ]; then
+   $ECHO "Error ! $ERRORMSG"
+   $ECHO "For more error details please check the log file : $LOGFILE"
+   $CAT "Error ! " >> ${LOGFILE}
+   $CAT $SQLOUTFILE >> ${LOGFILE}
+   exit 32
+fi
+}
+
+# ********************************************************************
+#
+#   Main body of program
+#
+# ********************************************************************
+#
+
+
+# create temporary table to keep record 
+# - if required table "DC.Monitor_db" already present it will not create again
+# - if the table is not present but script is not able to create the table it will throw an error and exit
+$ECHO "creating table" 
+${DBISQL} @${connection_string_dc} /eniq/sw/bin/create_monitor_cache.sql > /tmp/Cachetablecreated.txt 
+
+check_sqlout /tmp/Cachetablecreated.txt 
+
+#Taking the values of "Temporary IQ Buffers" and "Main IQ Buffers" from the database.
+main=`${DBISQL} @${connection_string_dba} sp_iqstatus |$GREP -i "Main IQ Buffers"|$GREP -i used|$AWK '{print $5}'|$AWK -F',' '{print $1}'`
+temp=`${DBISQL} @${connection_string_dba} sp_iqstatus |$GREP -i "Temporary IQ Buffers"|$GREP -i used|$AWK '{print $5}'|$AWK -F',' '{print $1}'`
+
+#HU77234
+#Storing output into a file.
+$ECHO "Cache usage for $_time_:$main" >> ${DWHDB_DIR}/mainBuffer-$_date_.log
+$ECHO "Cache usage for $_time_:$temp" >> ${DWHDB_DIR}/tempBuffer-$_date_.log
+
+#Storing into database.
+command="INSERT INTO DC.Monitor_db(DATETIMEID, ROP,MAIN_BUFFER_USAGE,TEMP_BUFFER_USAGE)VALUES ('$_date_', '$_time_', $main, $temp)"
+${DBISQL} @${connection_string_dc} $command   
+                                                                                      
+
+#Deleting data older than 2 years from "DC.Monitor_db" 
+if [ $_date1_ -eq 07 ] || [ $_date1_ -eq 14 ] || [ $_date1_ -eq 21 ] || [ $_date1_ -eq 28 ] && [ "$_time1_" == "$_time2_" ]; then
+	${DBISQL} @${connection_string_dc} "SELECT count(*) FROM DC.Monitor_db WHERE DATETIMEID<dateadd(year, -2, NOW());output to ${DWHDB_DIR}/count.txt"
+	read count < ${DWHDB_DIR}/count.txt
+	if [[ count > 0 ]];then
+		$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Data older than 2 years are deleted from DC.Monitor_db" >> ${LOGSFILE}
+	fi
+	command1="DELETE FROM DC.Monitor_db WHERE DATETIMEID<dateadd(year, -2, NOW())"
+	${DBISQL} @${connection_string_dc} $command1
+fi
+
+$RM -rf ${DWHDB_DIR}/count.txt
+
+$FIND ${DWHDB_DIR}/* -name 'mainBuffer*.log' -mtime +7  -exec rm {} \;
+$FIND ${DWHDB_DIR}/* -name 'tempBuffer*.log' -mtime +7  -exec rm {} \;
+
+if [ $? -ne 0 ] ; then
+		$ECHO "Could not delete logs of mainBuffer and tempbuffer which are older than 7days"
+		exit 102
+fi
+exit 0

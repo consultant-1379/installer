@@ -1,0 +1,188 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2015 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : FileSystemCheck.bsh
+# Date    : 09/06/2016
+# Purpose : Script to check when ENIQ log file system capacity reaches 
+#			80%,any log file under engine or scheduler folder whose 
+#			size is higher than 1GB and older than 3 days is deleted 
+#			and when any file system capacity reaches 90% ,engine is 
+#			set to NoLoads.	     
+# Usage   : FileSystemCheck.bsh
+#
+# ********************************************************************
+#
+# Command Section
+#
+# ********************************************************************
+. /eniq/home/dcuser/.profile
+
+if [ -z "${CONF_DIR}" ] ; then
+  echo "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  echo "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 2
+fi
+
+. ${CONF_DIR}/niq.rc
+
+if [ -z "${BIN_DIR}" ] ; then
+  echo "ERROR: BIN_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+INSTALLER_DIR=/eniq/sw/installer
+export INSTALLER_DIR
+
+LOGFILE=/eniq/log/sw_log/engine/FileSystemCheck-`$DATE +%Y_%m_%d`.log
+export LOGFILE
+
+TEMP=/eniq/sw/installer/tempFileSysCheck-`$DATE +%Y_%m_%d`.txt
+export TEMP
+
+
+#$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : $$ LogFile initialised" >> $LOGFILE
+## EQEV-61247. Check for the previous process of the FileSystemCheck.bsh script
+##EQEV-103319. New Rack - manage_heap script calling dbisql resulting in high semaphore consumption
+MAX_TIME=5
+PIDFILE=/eniq/home/dcuser/.FileSystemCheckPid
+#$ECHO $$ >> $LOGFILE
+if [[ ! -e $PIDFILE ]]; then
+    $TOUCH $PIDFILE
+fi
+if [ ! -f $PIDFILE ]
+then
+  #$ECHO $$ > $LOGFILE
+  #$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Previous instance is running" >> $LOGFILE
+  if [ $? -ne 0 ]
+  then
+    $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Failed to create PID file. File System Check will not proceed." >> $LOGFILE
+    exit 1
+  fi
+else
+  PID=`$CAT $PIDFILE`  
+  for procid in $PID
+  do
+	 #$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : $procid" >> $LOGFILE
+     $PS -p $procid > /dev/null
+     if [ $? -eq 0 ]
+     then
+       psetime=`$PS -o etime= -p $procid|tr -d " "`
+       if [ ! -z $psetime ]
+       then
+          #$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : $psetime and $procid" >> $LOGFILE
+          psmin=$($ECHO $psetime|awk -F":" '{print $1}')
+          psminint=$(($psmin+0))
+          if [ $psminint -ge $MAX_TIME ]
+          then
+             $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Previous process is already running with PID $procid for more than $MAX_TIME minutes. Killing the previous process with PID $procid" >> $LOGFILE
+             $KILL -9 $procid > /dev/null
+             $ECHO "$($GREP -v $procid $PIDFILE)" > $PIDFILE
+	      else
+		     $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Previous process is already running with PID $procid for less than $MAX_TIME minutes. Exiting the current instance with PID $$" >> $LOGFILE
+             $ECHO "$($GREP -v $$ $PIDFILE)" > $PIDFILE
+			 exit 1
+          fi
+       fi
+     else
+        $ECHO "$($GREP -v $procid $PIDFILE)" > $PIDFILE
+        perl -i -n -e "print if /\S/" $PIDFILE
+     fi
+  done
+  $ECHO $$ >> $PIDFILE
+  if [ $? -ne 0 ]
+  then
+    $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Could not create PID file" >> $LOGFILE
+    exit 1
+  fi
+fi
+
+
+engine_status=`ssh dcuser@engine  ". ~/.profile; engine status" | $GREP "Current Profile"`
+engine_profile=`echo $engine_status | ${CUT} -d: -f2`
+
+
+if [[ $engine_status == *Normal ]]; then
+	flag=0
+else
+	flag=1
+fi
+
+
+if [[ $flag -eq 0 ]]; then 
+	line=`${DF} -k /eniq/log | $NAWK '{print $5,$6}' | $SED "1 d"`
+	$ECHO "$line"
+	cap=`$ECHO $line | ${CUT} -d' ' -f1`
+	cap1=`$ECHO $cap | ${CUT} -d% -f1`
+	dirname=`$ECHO $line | ${CUT} -d' ' -f2`
+		# Checks whether capacity of /eniq/log is greater than 80%
+		if [[ $cap1 -gt 80 ]]; then  
+			$ECHO "$dirname has consumed $cap1 % of the file system" >> ${LOGFILE}
+		
+			# Deletes log files whose size is greater than 1GB and older than 3 days under engine folder
+			count1=`$FIND /eniq/log/sw_log/engine -name '*.log' -mtime +3 -size +1000000k | $WC -l`
+			if [[ $count1 -gt 0 ]];then
+				$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : The below log files under engine folder are deleted." >> ${LOGFILE}
+			fi
+			$FIND /eniq/log/sw_log/engine -name '*.log' -mtime +3 -size +1000000k >> ${LOGFILE}
+			$FIND /eniq/log/sw_log/engine -name '*.log' -mtime +3 -size +1000000k | xargs $RM
+		
+			# Deletes log files whose size is greater than 1GB and older than 3 days under scheduler folder
+			count2=`$FIND /eniq/log/sw_log/scheduler -name '*.log' -mtime +3 -size +1000000k | $WC -l`
+			if [[ $count2 -gt 0 ]];then
+				$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : The below log files under scheduler folder are deleted." >> ${LOGFILE}
+			fi
+			$FIND /eniq/log/sw_log/scheduler -name '*.log' -mtime +3 -size +1000000k >> ${LOGFILE}
+			$FIND /eniq/log/sw_log/scheduler -name '*.log' -mtime +3 -size +1000000k | xargs $RM
+
+			cnt=0
+			$CAT /proc/mounts | $GREP -v "/net/" | $NAWK -F" " '{print $2}' |xargs ${DF} -k | $SED "1 d" | $NAWK '{print $5,$6}' > ${TEMP}
+			while IFS= read line 
+			do
+				$ECHO "$line"
+				capacity_tmp=`$ECHO $line | ${CUT} -d' ' -f1`
+				dirName=`$ECHO $line | ${CUT} -d' ' -f2`
+				capacity=`$ECHO $capacity_tmp | ${CUT} -d% -f1`
+				# If capacity of any file system is greater than 90%,engine is set to NoLoads
+                if [ $capacity != "-" ]; then				
+				    if [[ $capacity -gt 90 ]] && [[ $cnt -eq 0 ]]; then
+					    cnt=1
+					    $ECHO  "`$DATE '+%Y_%m_%d_%H:%M:%S'` : WARNING! $dirName directory has consumed $capacity % of the File system" >> ${LOGFILE}
+					    ssh dcuser@engine  ". ~/.profile; engine -e changeProfile NoLoads"	
+					    $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Engine successfully set to NoLoads" >> ${LOGFILE}
+				    fi
+			    fi	
+	
+			done < <(more ${TEMP})
+		else 
+			$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : FileSystem utilization is Normal" >> ${LOGFILE}
+		fi
+	$RM -rf ${TEMP}
+fi
+exit 0
+
+	
+
+

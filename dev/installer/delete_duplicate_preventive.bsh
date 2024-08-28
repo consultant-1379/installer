@@ -1,0 +1,854 @@
+#!/bin/bash
+# ******************************************************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ******************************************************************************************************
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ******************************************************************************************************
+# Name    		: delete_duplicate_preventive.bsh
+# Date    		: 15/07/2020(dummy date) Last modified 10/05/2023
+# Usage   		: ./delete_duplicate_preventive.bsh -t <Technology> -f <<Technology>_node.txt> -o <OSS_ID> -m|-r
+# Created By	        :  Soundarya
+# ******************************************************************************************************
+
+if [ `id -un` != "dcuser"  ] ; then
+  echo "\nThis script must be executed as dcuser\n"
+  exit 1
+fi
+
+INSTALLER_DIR=/eniq/sw/installer
+IQ_DIR=/eniq/sybase_iq
+DATE=/usr/bin/date
+HOME_DIR=/eniq/local_logs/iq/$6
+LOG_DIR=/eniq/log/sw_log/tp_installer
+CONF_DIR=/eniq/sw/conf
+ECHO=/usr/bin/echo
+GREP=/usr/bin/grep
+EGREP=/usr/bin/egrep
+MKDIR=/usr/bin/mkdir
+CHMOD=/usr/bin/chmod
+TOUCH=/usr/bin/touch
+COMM=/usr/bin/comm
+CAT=/usr/bin/cat
+TEE=/usr/bin/tee
+TR=/usr/bin/tr
+RM=/usr/bin/rm
+MV=/usr/bin/mv
+
+STARTTIMESTAMP=`$DATE '+%y%m%d_%H%M%S'`
+
+### Function: usage_msg ###
+#
+#   Print out the usage message
+#
+# Arguments:
+#       none
+# Return Values:
+#       none
+
+usage_msg()
+{
+	$ECHO  ""
+	$ECHO  ""
+	$ECHO  "Usage: ./delete_duplicate_preventive.bsh -t <Technology> -f <<Technology>_node.txt> -o <OSS_ID> -m|-r "
+	$ECHO  "Options:"
+	$ECHO  "-t  : <Technology> is either WCDMA or LTE."
+	$ECHO  "-f  : <Technology>_node.txt is its corresponding WCDMA_node.txt or LTE_node.txt file, which has list of Node Names separated by a new line and should be present in /eniq/sw/installer directory."
+	$ECHO  "-o  : <OSS_ID> is the ENIQ OSS_ID."
+	$ECHO  "-m  : Migration from DU Radio Nodes to Baseband Radio Nodes."
+	$ECHO  "-r  : Rollback from Baseband Radio Nodes to DU Radio Nodes."
+	$ECHO  "You can use only one option -m|-r at a time."
+
+}
+
+
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+        $ECHO "Could not find /eniq/admin/lib/common_functions.lib"
+        exit 1
+fi
+
+DWHDBPASSWORD=`inigetpassword DWH -v DCPassword -f ${CONF_DIR}/niq.ini`
+DWH_SERVER_NAME=`inigetpassword DWH -v ServerName -f ${CONF_DIR}/niq.ini`
+DWHDB_PORT=`inigetpassword DWH -v PortNumber -f ${CONF_DIR}/niq.ini`
+DWHREPUSER=`inigetpassword REP -v DWHREPUsername -f ${CONF_DIR}/niq.ini`
+DWHREPPASSWORD=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+
+if [[ $# -ne 7 ]];then
+
+usage_msg
+exit 2
+
+fi
+
+
+#Creating log file 
+logfile=${LOG_DIR}/${STARTTIMESTAMP}_delete_duplicate_preventive.log
+$TOUCH $logfile
+
+TAB_LTE=(DIM_E_LTE_EUREL DIM_E_LTE_EUCELL_CELL DIM_E_LTE_GERANCELLRELATION DIM_E_LTE_ULINTERFERENCEREP DIM_E_LTE_GIGABITETHERNET DIM_E_LTE_ENODEBFUNCTION DIM_E_LTE_UTRANCELLRELATION DIM_E_LTE_SECTORCARRIER DIM_E_LTE_BBPROCESSINGRESOURCE DIM_E_LTE_EUCELL DIM_E_LTE_PAGING DIM_E_LTE_ERBS DIM_E_LTE_FRU DIM_E_LTE_NBIOTCELL DIM_E_LTE_SITE DIM_E_LTE_SITEDST)
+
+FDN_LTE=(EUCELLREL_FDN EUTRANCELL_FDN GERANCELLRELATION_FDN ULINTERFERENCE_FDN GIGABITETHERNET_FDN ENODEB_FDN UTRANCELLRELATION_FDN SECTORCARRIER_FDN BBPROCESSING_FDN EUTRANCELL_FDN PAGING_FDN ERBS_FDN FRU_FDN NBIOTCELL_FDN SITE_FDN SITE_FDN)
+
+TAB_WCDMA=(DIM_E_RAN_RBSLOCALCELL DIM_E_RAN_RBSIUBLINK DIM_E_RAN_AAL2AP DIM_E_RAN_ATMTRAFFICDESCRIPTOR DIM_E_RAN_DLCODETL DIM_E_RAN_DLPOWER DIM_E_RAN_ETHERNETSMP DIM_E_RAN_ETHERNETSP DIM_E_RAN_GSMREL DIM_E_RAN_HSDSCH DIM_E_RAN_IPINTERFACE DIM_E_RAN_IURLINK DIM_E_RAN_LAG DIM_E_RAN_RELIABLEPROGRAMUNITER DIM_E_RAN_RNCFUNCTION DIM_E_RAN_RNCIUBLINK DIM_E_RAN_RNCMODULE DIM_E_RAN_SLOT DIM_E_RAN_SUBRACK DIM_E_RAN_UCELL DIM_E_RAN_UPLINKLOAD DIM_E_RAN_UREL DIM_E_RAN_VCLTP DIM_E_RAN_RBS DIM_E_RAN_RBS_BACKOFFDL DIM_E_RAN_RBS_BACKOFFUL DIM_E_RAN_RNC DIM_E_RAN_RNC_PRBS_ASSOCIATION DIM_E_RAN_RNC_RBS_ASSOCIATION DIM_E_RAN_RXI DIM_E_RAN_SITE DIM_E_RAN_SITEDST)
+
+FDN_WCDMA=(RBSLOCALCELL_FDN IUBLINK_FDN AAL2AP_FDN ATMTRAF_DESC_FDN UCELL_FDN UCELL_FDN ETHERNETSMP_FDN ETHERNETSP_FDN GSMRELATION_FDN HSDSCH_FDN IPINTERFACE_FDN IURLINK_FDN LAG_FDN RPU_FDN RNCFUNCTION_FDN IUBLINK_FDN RNCMODULE_FDN SLOT_FDN SUBRACK_FDN UCELL_FDN UCELL_FDN UTRANRELATION_FDN VCLTP_FDN RBS_FDN RBS_FDN RBS_FDN RNC_FDN RNC_fdn RNC_fdn RXI_FDN SITE_FDN SITE_FDN)
+
+tablecount=0
+
+MigratedNodesLTE_list=$HOME_DIR/DURadioNodes_backup_data/LTE_nodeslist.txt
+MigratedNodesWCDMA_list=$HOME_DIR/DURadioNodes_backup_data/WCDMA_nodeslist.txt
+                                                                                          
+
+#Creating directory to store the back up data for respective OSS_ID
+if [ ! -d "$HOME_DIR" ]
+then
+	$MKDIR $HOME_DIR
+	$CHMOD 777 $HOME_DIR
+fi
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $dc_connection_string ]; then
+  $RM -f $dc_connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $dc_connection_string"
+  fi
+fi
+
+if [ -f $dwhrep_connection_string ]; then
+  $RM -f $dwhrep_connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $dwhrep_connection_string"
+  fi
+fi
+}
+trap remove_connection_string EXIT
+
+
+dc_connection_string=/var/tmp/encrypt_$$.txt
+dwhrep_connection_string=/var/tmp/encrypt2_$$.txt
+
+dc_connection_string_decrypt="-nogui -onerror exit -c \"eng=${DWH_SERVER_NAME};links=tcpip{host=${DWH_SERVER_NAME};port=${DWHDB_PORT}};uid=dc;pwd=${DWHDBPASSWORD}\""
+dwhrep_connection_string_decrypt="-nogui -onerror exit -c \"eng=${REP_SERVER_NAME};links=tcpip{host=${REP_SERVER_NAME};port=${REP_PORT}};uid=$DWHREPUSER;pwd=$DWHREPPASSWORD\""
+  
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+type get_encrypt_file &>/dev/null && isPresent='true' || isPresent='false'
+if [ ${isPresent} == 'true' ]; then
+  get_encrypt_file "${dc_connection_string_decrypt}" "${dc_connection_string}"
+  get_encrypt_file "${dwhrep_connection_string_decrypt}" "${dwhrep_connection_string}"
+  DBISQL_DC="${DBISQL} @${dc_connection_string}"
+  DBISQL_DWHREP="${DBISQL} @${dwhrep_connection_string}"
+else
+  DBISQL_DC="${DBISQL} ${dc_connection_string_decrypt}"
+  DBISQL_DWHREP="${DBISQL} ${dwhrep_connection_string_decrypt}"
+fi
+
+	
+migration(){
+
+
+	
+	$ECHO "Start time: " `$DATE '+%y%m%d_%H%M%S'` >> $logfile
+
+	$ECHO "Process : Migration" >> $logfile
+	#Creating directory to store the back up DU Radio Nodes data
+	directory=$HOME_DIR/DURadioNodes_backup_data
+	if [ ! -d "$directory" ]
+	then
+		$MKDIR $directory
+		$CHMOD 777 $directory
+	fi
+
+	
+	$ECHO "Technology = $Technology" | $TEE -a $logfile
+	$ECHO "Nodelist = $Nodelist" | $TEE -a $logfile
+	
+	#Handling topology tables in LTE techpack
+
+	if [ $Technology = 'LTE' ];then
+		
+			
+				
+		if [ -s ${INSTALLER_DIR}/$Nodelist ]; then
+			if [ ! -f "$MigratedNodesLTE_list" ]
+			then
+				$TOUCH $MigratedNodesLTE_list
+			fi
+
+
+			#Iterating the 16 affected tables to remove the Duplicate DU Radio Nodes entries in the Topology tables
+			while [ $tablecount -lt 16 ]
+			do
+			
+				if [ ! -f $HOME_DIR/DURadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt ]; then
+					$TOUCH $HOME_DIR/DURadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt
+								
+					$ECHO "Select DATANAME from DWHColumn where STORAGEID like '${TAB_LTE[$tablecount]}:%'; OUTPUT TO $HOME_DIR/DURadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt delimited  by ','" > ${INSTALLER_DIR}/q1.sql
+							
+					$ECHO "Entering the column names of ${TAB_LTE[$tablecount]} " | $TEE -a $logfile 
+				
+					${DBISQL_DWHREP} ${INSTALLER_DIR}/q1.sql
+					
+					$TR -d \' < $HOME_DIR/DURadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt > ${INSTALLER_DIR}/temp.txt
+					
+					$TR '\n' ',' < ${INSTALLER_DIR}/temp.txt > $HOME_DIR/DURadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt
+				fi
+				
+				
+				#Fetching the columnHeader from the backup files				
+				read -r columnHeader < $HOME_DIR/DURadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt
+							
+				columnHeader=${columnHeader:0:(${#columnHeader}-1)}
+				
+				#Reading the Node details from ${INSTALLER_DIR}/$Nodelist file
+				
+				while read line || [ -n "$line" ];           
+				do  
+						if [ "$line" != "" ]; then
+									
+							$ECHO "UNLOAD Select $columnHeader from ${TAB_LTE[$tablecount]} WHERE ${FDN_LTE[$tablecount]} like '%,MeContext=$line,%' and ${FDN_LTE[$tablecount]} like '%,ManagedElement=1,%' and OSS_ID='${OSS_ID}' INTO FILE '$HOME_DIR/DURadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt' APPEND ON;" >> ${INSTALLER_DIR}/query1.sql							
+														
+							$ECHO "delete from ${TAB_LTE[$tablecount]} where ${FDN_LTE[$tablecount]} like '%,MeContext=$line,%' and ${FDN_LTE[$tablecount]} like '%,ManagedElement=1,%' and OSS_ID='${OSS_ID}'" >> query2.sql	
+                            													 
+						fi	
+				done < ${INSTALLER_DIR}/$Nodelist  
+
+				$ECHO "Saving backup of DU Radio Nodes entries of  ${TAB_LTE[$tablecount]} " | $TEE -a $logfile 
+
+                ${DBISQL_DC} ${INSTALLER_DIR}/query1.sql
+				q1=$?
+				
+				$ECHO "Deleting duplicate DU Radio Nodes entries in  ${TAB_LTE[$tablecount]} " | $TEE -a $logfile 
+				
+
+
+				
+				${DBISQL_DC} ${INSTALLER_DIR}/query2.sql
+				q2=$?
+							
+				#Storing the Node details from ${INSTALLER_DIR}/$Nodelist file
+				if [[ $q1 -eq 0 && $q2 -eq 0 ]];
+				then 
+					while read line || [ -n "$line" ];
+					do
+						if [ $($GREP -i -c -w "$line" $MigratedNodesLTE_list) -eq 0 ];
+						then	
+							#Adding the node $line to the LTE_nodeslist.txt
+							$ECHO "$line" >> $MigratedNodesLTE_list
+						fi
+					done < ${INSTALLER_DIR}/$Nodelist
+				else
+					$ECHO "Migration failed for ${TAB_LTE[$tablecount]} table." | $TEE -a $logfile
+				fi 
+
+
+
+			tablecount=`expr $tablecount + 1`
+	
+			#Cleanup steps
+			$RM -rf ${INSTALLER_DIR}/query1.sql ${INSTALLER_DIR}/query2.sql
+
+		   done
+		   
+		    $ECHO "MigratedNodesLTE_list:" >> $logfile
+			$CAT "$MigratedNodesLTE_list" >> $logfile
+		
+		else
+			$ECHO "No nodes available to migrate data" | $TEE -a $logfile
+		fi
+
+	fi
+ 
+	#Handling topology tables in WCDMA techpack
+ 
+	if [ $Technology = 'WCDMA' ];then
+		
+		if [ -s ${INSTALLER_DIR}/$Nodelist ]; then
+			if [ ! -f "$MigratedNodesWCDMA_list" ]
+			then
+				$TOUCH $MigratedNodesWCDMA_list
+			fi
+		
+		
+			#Iterating the 32 affected tables to remove the Duplicate DU Radio Nodes entries in the Topology tables
+			while [ $tablecount -lt 32 ]
+			do
+			
+				if [ ! -f $HOME_DIR/DURadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt ]; then
+					$TOUCH $HOME_DIR/DURadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt
+					
+								
+					$ECHO "Select DATANAME from DWHColumn where STORAGEID like '${TAB_WCDMA[$tablecount]}:%'; OUTPUT TO $HOME_DIR/DURadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt" > ${INSTALLER_DIR}/q2.sql
+							
+					$ECHO "Entering the column names of ${TAB_WCDMA[$tablecount]}" | $TEE -a $logfile 
+				
+					${DBISQL_DWHREP} ${INSTALLER_DIR}/q2.sql
+					
+					$TR -d \' < $HOME_DIR/DURadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt > ${INSTALLER_DIR}/temp.txt
+					
+					$TR '\n' ',' < ${INSTALLER_DIR}/temp.txt > $HOME_DIR/DURadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt
+				fi
+				
+				#Fetching the columnHeader from the backup files				
+				read -r columnHeader < $HOME_DIR/DURadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt
+							
+				columnHeader=${columnHeader:0:(${#columnHeader}-1)}
+						
+				#Reading the Node details from ${INSTALLER_DIR}/$Nodelist file
+				while read line || [ -n "$line" ];           
+				do 
+					if [ "$line" != "" ]; then
+						
+						$ECHO "UNLOAD Select $columnHeader from ${TAB_WCDMA[$tablecount]} WHERE ${FDN_WCDMA[$tablecount]} like '%,MeContext=$line,%' and ${FDN_WCDMA[$tablecount]} like '%,ManagedElement=1,%' and OSS_ID='${OSS_ID}' INTO FILE '$HOME_DIR/DURadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt' APPEND ON;" >> ${INSTALLER_DIR}/query3.sql
+						
+
+						$ECHO "delete from ${TAB_WCDMA[$tablecount]} where ${FDN_WCDMA[$tablecount]} like '%,MeContext=$line,%' and ${FDN_WCDMA[$tablecount]} like '%,ManagedElement=1,%' and OSS_ID='${OSS_ID}'" >> query4.sql 
+
+						
+					fi
+				done < ${INSTALLER_DIR}/$Nodelist   
+				
+				$ECHO "Saving backup of DU Radio Nodes entries of  ${TAB_WCDMA[$tablecount]} " | $TEE -a $logfile 
+				
+				${DBISQL_DC} ${INSTALLER_DIR}/query3.sql
+				q3=$?
+				
+				$ECHO "Deleting duplicate DU Radio Nodes entries in  ${TAB_WCDMA[$tablecount]} " | $TEE -a $logfile 
+				
+
+						
+                ${DBISQL_DC} ${INSTALLER_DIR}/query4.sql
+				q4=$?
+						
+				#Storing the Node details from ${INSTALLER_DIR}/$Nodelist file
+				if [[ $q3 -eq 0 && $q4 -eq 0 ]];
+				then 
+					while read line || [ -n "$line" ];
+					do
+						if [ $($GREP -i -c -w "$line" $MigratedNodesWCDMA_list) -eq 0 ];
+						then	
+							#Adding the node $line to the WCDMA_nodeslist.txt
+							$ECHO "$line" >> $MigratedNodesWCDMA_list
+						fi
+					done < ${INSTALLER_DIR}/$Nodelist
+				else
+					$ECHO "Migration failed for ${TAB_WCDMA[$tablecount]} table." | $TEE -a $logfile
+				fi  
+
+
+
+
+				tablecount=`expr $tablecount + 1`
+				
+				#Cleanup steps
+				$RM -rf ${INSTALLER_DIR}/query3.sql ${INSTALLER_DIR}/query4.sql
+
+			done
+		
+			$ECHO "MigratedNodesWCDMA_list:" >> $logfile
+			$CAT "$MigratedNodesWCDMA_list" >> $logfile
+		
+		else
+			$ECHO "No nodes available to migrate data" | $TEE -a $logfile
+		fi
+
+	fi
+
+	$ECHO "End time: " `$DATE '+%y%m%d_%H%M%S'` >> $logfile
+}
+
+
+rollback(){
+
+	$ECHO "Start time: " `$DATE '+%y%m%d_%H%M%S'` >> $logfile
+
+	$ECHO "Process : Rollback" >> $logfile
+	
+	$ECHO "Technology : $Technology" | $TEE -a $logfile
+	$ECHO "Nodelist : $Nodelist" | $TEE -a $logfile
+	
+	$ECHO "1.Delete the Baseband Radio Nodes data"
+	$ECHO "2.Delete the Baseband Radio Nodes data and restore the DU Radio Nodes data"
+	$ECHO "3.Exit"
+	read process
+	
+	if [ $process = "1" ]; then
+		#Creating directory to store all the temporary files
+		ROLLBACK_DIR=${INSTALLER_DIR}/rollback
+		if [ ! -d "${ROLLBACK_DIR}" ]
+		then
+			$MKDIR ${ROLLBACK_DIR}
+			$CHMOD 777 ${ROLLBACK_DIR}
+		fi
+		
+		#Handling topology tables in LTE techpack
+		if [ $Technology = 'LTE' ];then
+			#Iterating the 16 affected tables to remove the Baseband Radio Nodes entries in the Topology tables
+			while [ $tablecount -lt 16 ]
+			do
+				#Reading the Node details from LTE_node.txt file
+				
+				while read line || [ -n "$line" ];           
+				do  
+							
+						if [ "$line" != "" ]; then	
+						
+														
+							$ECHO "delete from ${TAB_LTE[$tablecount]} where ${FDN_LTE[$tablecount]} like '%,MeContext=$line,%' and ${FDN_LTE[$tablecount]} not like '%,ManagedElement=1,%' and OSS_ID='${OSS_ID}'" >> ${ROLLBACK_DIR}/query1.sql	
+													
+						fi	
+							
+				done < ${INSTALLER_DIR}/$Nodelist   
+
+				$ECHO "Deleting duplicate Baseband Radio Nodes entries in  ${TAB_LTE[$tablecount]} " | $TEE -a $logfile 
+					
+				${DBISQL_DC} ${ROLLBACK_DIR}/query1.sql
+					
+				tablecount=`expr $tablecount + 1`
+				
+				#Cleanup steps
+				$RM -rf ${ROLLBACK_DIR}/query1.sql
+
+		   done
+		fi
+		
+		#Handling topology tables in WCDMA techpack
+		if [ $Technology = 'WCDMA' ];then
+		
+			#Iterating the 32 affected tables to remove the Baseband Radio Nodes entries in the Topology tables
+			while [ $tablecount -lt 32 ]
+			do
+				#Reading the Node details from WCDMA_node.txt file
+				while read line || [ -n "$line" ];           
+				do 
+					if [ "$line" != "" ]; then	
+												
+
+						$ECHO "delete from ${TAB_WCDMA[$tablecount]} where ${FDN_WCDMA[$tablecount]} like '%,MeContext=$line,%' and ${FDN_WCDMA[$tablecount]} not like '%,ManagedElement=1,%' and OSS_ID='${OSS_ID}'" >> ${ROLLBACK_DIR}/query2.sql 
+						                   
+						
+					fi
+				done < ${INSTALLER_DIR}/$Nodelist   
+				
+				$ECHO "Deleting duplicate Baseband Radio Nodes entries in  ${TAB_WCDMA[$tablecount]} " | $TEE -a $logfile 
+				
+				${DBISQL_DC} ${ROLLBACK_DIR}/query2.sql
+
+
+				tablecount=`expr $tablecount + 1`
+				
+				#Cleanup steps
+				$RM -rf ${ROLLBACK_DIR}/query2.sql
+
+			done	
+		fi
+		
+		
+	
+	elif [ $process = "2" ]; then
+	
+		#Creating directory to store all the temporary files
+		ROLLBACK_DIR=${INSTALLER_DIR}/rollback
+		if [ ! -d "${ROLLBACK_DIR}" ]
+		then
+			$MKDIR ${ROLLBACK_DIR}
+			$CHMOD 777 ${ROLLBACK_DIR}
+		fi
+	
+		#Checking if DU Radio Nodes backup folder exists or not
+		directory=$HOME_DIR/DURadioNodes_backup_data
+		if [ ! -d "$directory" ]
+		then
+				$ECHO "Rollback cannot be done as Migration has not been done"
+				
+				exit 0
+		fi
+			
+		#Creating directory to store the back up Baseband Radio Nodes data
+		directory=$HOME_DIR/BasebandRadioNodes_backup_data
+		if [ ! -d "$directory" ]
+		then
+				$MKDIR $directory
+				$CHMOD 777 $directory
+		fi
+			
+		var=""
+			
+		if [ $Technology = 'LTE' ];then
+		
+			#Checking if $MigratedNodesLTE_list exists or not
+			if [ ! -f "$MigratedNodesLTE_list" ]
+			then
+					$ECHO "Rollback cannot be done as Migration has not been done for LTE nodes"
+					
+					exit 0
+			fi
+			
+			#Finding the nodes for which backup data is present
+			$COMM -2 -3 <(sort ${INSTALLER_DIR}/$Nodelist) <(sort $MigratedNodesLTE_list) > ${ROLLBACK_DIR}/nodata.txt
+			$GREP . ${ROLLBACK_DIR}/nodata.txt	> ${ROLLBACK_DIR}/t1.txt
+			$MV ${ROLLBACK_DIR}/t1.txt ${ROLLBACK_DIR}/nodata.txt
+			
+			if [ -s ${ROLLBACK_DIR}/nodata.txt ]; then			
+				$ECHO "Node data cannot be restored for the following nodes as backup data is not available for them" | $TEE -a $logfile
+				$CAT ${ROLLBACK_DIR}/nodata.txt | $TEE -a $logfile
+			fi
+	
+			$COMM -1 -2 <(sort ${INSTALLER_DIR}/$Nodelist) <(sort $MigratedNodesLTE_list) > ${ROLLBACK_DIR}/restore_nodes.txt
+			$GREP . ${ROLLBACK_DIR}/nodata.txt	> ${ROLLBACK_DIR}/t2.txt
+			$MV ${ROLLBACK_DIR}/t2.txt ${ROLLBACK_DIR}/nodata.txt
+			
+			if [ -s ${ROLLBACK_DIR}/restore_nodes.txt ]; then
+			
+				
+				while read line || [ -n "$line" ];           
+				do 
+					if [ "$line" != "" ]; then
+							var="$var$line|"
+					fi
+				done < ${ROLLBACK_DIR}/restore_nodes.txt   			
+				var=${var:0:(${#var}-1)}
+					
+				
+				#Iterating the 16 affected tables to remove the Baseband Radio Nodes entries in the Topology tables
+				while [ $tablecount -lt 16 ]
+				do
+					  
+					if [ ! -f $HOME_DIR/BasebandRadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt ]; then
+						$TOUCH $HOME_DIR/BasebandRadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt
+									
+						$ECHO "Select DATANAME from DWHColumn where STORAGEID like '${TAB_LTE[$tablecount]}:%'; OUTPUT TO $HOME_DIR/BasebandRadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt" > ${ROLLBACK_DIR}/q.sql
+								
+						$ECHO "Entering the column names of ${TAB_LTE[$tablecount]}" | $TEE -a $logfile 
+					
+						${DBISQL_DWHREP} ${ROLLBACK_DIR}/q.sql
+						
+						$TR -d \' < $HOME_DIR/BasebandRadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt > ${ROLLBACK_DIR}/temp.txt
+						
+						$TR '\n' ',' < ${ROLLBACK_DIR}/temp.txt > $HOME_DIR/BasebandRadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt
+					fi
+					
+					#Fetching the columnHeader from the backup files				
+					read -r columnHeader < $HOME_DIR/DURadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt
+									
+					columnHeader=${columnHeader:0:(${#columnHeader}-1)}						
+
+					#Reading the Node details from restore_nodes.txt file
+				
+					while read line || [ -n "$line" ];           
+					do			
+															
+								$ECHO "UNLOAD Select $columnHeader from ${TAB_LTE[$tablecount]} WHERE ${FDN_LTE[$tablecount]} like '%,MeContext=$line,%' and ${FDN_LTE[$tablecount]} not like '%,ManagedElement=1,%' and OSS_ID='${OSS_ID}' INTO FILE '$HOME_DIR/BasebandRadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt' APPEND ON;" >> ${ROLLBACK_DIR}/query1.sql
+							 
+								
+								$ECHO "delete from ${TAB_LTE[$tablecount]} where ${FDN_LTE[$tablecount]} like '%,MeContext=$line,%' and ${FDN_LTE[$tablecount]} not like '%,ManagedElement=1,%' and OSS_ID='${OSS_ID}'" >> ${ROLLBACK_DIR}/query2.sql	
+		
+							
+					done < ${ROLLBACK_DIR}/restore_nodes.txt   
+					
+					
+					$ECHO "Saving backup of Baseband Radio Nodes entries of  ${TAB_LTE[$tablecount]} " | $TEE -a $logfile 
+
+					${DBISQL_DC} ${ROLLBACK_DIR}/query1.sql
+					
+					$ECHO "Deleting duplicate Baseband Radio Nodes entries in  ${TAB_LTE[$tablecount]} " | $TEE -a $logfile
+					
+					${DBISQL_DC} ${ROLLBACK_DIR}/query2.sql
+
+					#$GREPping for the given nodes data
+					$EGREP -i  "$var" $HOME_DIR/DURadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt > ${ROLLBACK_DIR}/${TAB_LTE[$tablecount]}_data.txt
+					
+						
+					$ECHO "Inserting the data into the ${TAB_LTE[$tablecount]} table " | $TEE -a $logfile
+					
+				
+					$ECHO "LOAD TABLE ${TAB_LTE[$tablecount]}
+						($columnHeader) FROM '${ROLLBACK_DIR}/${TAB_LTE[$tablecount]}_data.txt'
+						ESCAPES OFF
+						QUOTES ON
+						DELIMITED BY ','
+						FORMAT BCP
+						IGNORE CONSTRAINT UNIQUE 1000 
+						IGNORE CONSTRAINT NULL 1000 
+						IGNORE CONSTRAINT DATA VALUE 1000
+						WITH CHECKPOINT OFF;" > ${ROLLBACK_DIR}/q1.sql
+				
+					${DBISQL_DC} ${ROLLBACK_DIR}/q1.sql
+					e1=$?
+				
+				
+					if [ $e1 -eq 0 ];
+					then
+						$ECHO "Deleting the DU Radio Nodes backup data from the ${TAB_LTE[$tablecount]} backup file" | $TEE -a $logfile
+						$COMM -2 -3 <(sort $HOME_DIR/DURadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt) <(sort ${ROLLBACK_DIR}/${TAB_LTE[$tablecount]}_data.txt) > ${ROLLBACK_DIR}/temp.txt
+						$MV ${ROLLBACK_DIR}/temp.txt $HOME_DIR/DURadioNodes_backup_data/${TAB_LTE[$tablecount]}.txt
+					else
+						$ECHO "${TAB_LTE[$tablecount]}" >> ${ROLLBACK_DIR}/Failed_tables.txt
+					fi
+
+				tablecount=`expr $tablecount + 1`
+
+			   done
+			   
+			   
+				if [ -s ${ROLLBACK_DIR}/Failed_tables.txt ]; then
+					$ECHO "Restore failed for the following table/tables:" | $TEE -a $logfile
+					$CAT "${ROLLBACK_DIR}/Failed_tables.txt" | $TEE -a $logfile 
+				else
+					$COMM -2 -3 <(sort $MigratedNodesLTE_list) <(sort ${ROLLBACK_DIR}/restore_nodes.txt) > ${ROLLBACK_DIR}/temp.txt
+					$MV ${ROLLBACK_DIR}/temp.txt $MigratedNodesLTE_list
+					$ECHO "RestoredNodes_list:" >> $logfile
+					$CAT "${ROLLBACK_DIR}/restore_nodes.txt" >> $logfile 	
+				fi
+				
+			
+			else
+				$ECHO "No nodes available to restore data" | $TEE -a $logfile
+			fi
+			
+			
+			
+		fi
+		
+		#Handling topology tables in WCDMA techpack
+ 
+		if [ $Technology = 'WCDMA' ];then
+		
+			#Checking if $MigratedNodesWCDMA_list exists or not
+			if [ ! -f "$MigratedNodesWCDMA_list" ]
+			then
+					$ECHO "Rollback cannot be done as Migration has not been done for WCDMA nodes"
+					
+					exit 0
+			fi
+			
+			#Finding the nodes for which backup data is present
+			$COMM -2 -3 <(sort ${INSTALLER_DIR}/$Nodelist) <(sort $MigratedNodesWCDMA_list) > ${ROLLBACK_DIR}/nodata.txt
+			$GREP . ${ROLLBACK_DIR}/nodata.txt	> ${ROLLBACK_DIR}/t1.txt
+			$MV ${ROLLBACK_DIR}/t1.txt ${ROLLBACK_DIR}/nodata.txt
+		
+			if [ -s ${ROLLBACK_DIR}/nodata.txt ]; then			
+				$ECHO "Node data cannot be restored for the following nodes as backup data is not available for them" | $TEE -a $logfile
+				$CAT ${ROLLBACK_DIR}/nodata.txt | $TEE -a $logfile
+			fi
+		
+			$COMM -1 -2 <(sort ${INSTALLER_DIR}/$Nodelist) <(sort $MigratedNodesWCDMA_list) > ${ROLLBACK_DIR}/restore_nodes.txt
+			$GREP . ${ROLLBACK_DIR}/nodata.txt	> ${ROLLBACK_DIR}/t2.txt
+			$MV ${ROLLBACK_DIR}/t2.txt ${ROLLBACK_DIR}/nodata.txt
+
+			if [ -s ${ROLLBACK_DIR}/restore_nodes.txt ]; then
+			
+				
+				while read line || [ -n "$line" ];           
+				do 
+					if [ "$line" != "" ]; then
+							var="$var$line|"
+					fi
+				done < ${ROLLBACK_DIR}/restore_nodes.txt   			
+				var=${var:0:(${#var}-1)}
+				
+				#Iterating the 32 affected tables to remove the Baseband Radio Nodes entries in the Topology tables
+				while [ $tablecount -lt 32 ]
+				do
+					 
+							if [ ! -f $HOME_DIR/BasebandRadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt ]; then
+								$TOUCH $HOME_DIR/BasebandRadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt
+											
+								$ECHO "Select DATANAME from DWHColumn where STORAGEID like '${TAB_WCDMA[$tablecount]}:%'; OUTPUT TO $HOME_DIR/BasebandRadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt" > ${ROLLBACK_DIR}/q.sql
+										
+								$ECHO "Entering the column names of ${TAB_WCDMA[$tablecount]}" | $TEE -a $logfile 
+							
+								${DBISQL_DWHREP} ${ROLLBACK_DIR}/q.sql
+								
+								$TR -d \' < $HOME_DIR/BasebandRadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt > ${ROLLBACK_DIR}/temp.txt
+								
+								$TR '\n' ',' < ${ROLLBACK_DIR}/temp.txt > $HOME_DIR/BasebandRadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt
+							fi
+							
+
+
+
+
+					#Fetching the columnHeader from the backup files				
+					read -r columnHeader < $HOME_DIR/DURadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt
+									
+					columnHeader=${columnHeader:0:(${#columnHeader}-1)}
+							
+					#Reading the Node details from restore_nodes.txt file
+					while read line || [ -n "$line" ];           
+					do		
+							
+						
+							$ECHO "UNLOAD Select $columnHeader from ${TAB_WCDMA[$tablecount]} WHERE ${FDN_WCDMA[$tablecount]} like '%,MeContext=$line,%' and ${FDN_WCDMA[$tablecount]} not like '%,ManagedElement=1,%' and OSS_ID='${OSS_ID}' INTO FILE '$HOME_DIR/BasebandRadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt' APPEND ON;" >> ${ROLLBACK_DIR}/query3.sql
+					
+
+							$ECHO "delete from ${TAB_WCDMA[$tablecount]} where ${FDN_WCDMA[$tablecount]} like '%,MeContext=$line,%' and ${FDN_WCDMA[$tablecount]} not like '%,ManagedElement=1,%' and OSS_ID='${OSS_ID}'" >> ${ROLLBACK_DIR}/query4.sql 
+						
+						
+					done < ${ROLLBACK_DIR}/restore_nodes.txt  
+
+
+					$ECHO "Saving backup of Baseband Radio Nodes entries of  ${TAB_WCDMA[$tablecount]} " | $TEE -a $logfile 
+							
+					${DBISQL_DC} ${ROLLBACK_DIR}/query3.sql
+									
+					$ECHO "Deleting duplicate Baseband Radio Nodes entries in  ${TAB_WCDMA[$tablecount]} " | $TEE -a $logfile 
+					
+
+
+					${DBISQL_DC} ${ROLLBACK_DIR}/query4.sql
+
+
+
+
+					#$GREPping for the given nodes data
+					$EGREP -i  "$var" $HOME_DIR/DURadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt > ${ROLLBACK_DIR}/${TAB_WCDMA[$tablecount]}_data.txt
+
+							
+					$ECHO "Inserting the data into the ${TAB_WCDMA[$tablecount]} table " | $TEE -a $logfile
+
+					$ECHO "LOAD TABLE ${TAB_WCDMA[$tablecount]}
+						($columnHeader) FROM '${ROLLBACK_DIR}/${TAB_WCDMA[$tablecount]}_data.txt'
+						ESCAPES OFF
+						QUOTES ON
+						DELIMITED BY ','
+						FORMAT BCP
+						IGNORE CONSTRAINT UNIQUE 1000 
+						IGNORE CONSTRAINT NULL 1000 
+						IGNORE CONSTRAINT DATA VALUE 1000
+						WITH CHECKPOINT OFF;" > ${ROLLBACK_DIR}/q1.sql
+					
+					${DBISQL_DC} ${ROLLBACK_DIR}/q1.sql
+					e1=$?
+					
+					if [ $e1 -eq 0 ];
+					then
+						$ECHO "Deleting the DU Radio Nodes backup data from the ${TAB_WCDMA[$tablecount]} backup file" | $TEE -a $logfile
+						$COMM -2 -3 <(sort $HOME_DIR/DURadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt) <(sort ${ROLLBACK_DIR}/${TAB_WCDMA[$tablecount]}_data.txt) > ${ROLLBACK_DIR}/temp.txt
+						$MV ${ROLLBACK_DIR}/temp.txt $HOME_DIR/DURadioNodes_backup_data/${TAB_WCDMA[$tablecount]}.txt
+					else
+						$ECHO "${TAB_WCDMA[$tablecount]}" >> ${ROLLBACK_DIR}/Failed_tables.txt
+					fi
+
+					tablecount=`expr $tablecount + 1`
+
+				   done
+				   
+				   
+					if [ -s ${ROLLBACK_DIR}/Failed_tables.txt ]; then
+						$ECHO "Restore failed for the following table/tables:" | $TEE -a $logfile
+						$CAT "${ROLLBACK_DIR}/Failed_tables.txt" | $TEE -a $logfile 
+					else
+						$COMM -2 -3 <(sort $MigratedNodesWCDMA_list) <(sort ${ROLLBACK_DIR}/restore_nodes.txt) > ${ROLLBACK_DIR}/temp.txt
+						$MV ${ROLLBACK_DIR}/temp.txt $MigratedNodesWCDMA_list
+						$ECHO "RestoredNodes_list:" >> $logfile
+						$CAT "${ROLLBACK_DIR}/restore_nodes.txt" >> $logfile 	
+					fi
+
+			else
+				$ECHO "No nodes available to restore data" | $TEE -a $logfile
+			fi
+			
+
+		fi
+		
+		
+	elif [ $process = "3" ]; then  
+		
+		exit 0		
+	
+	else 
+		$ECHO "Invalid input"
+		usage_msg
+	fi
+	
+	#Cleanup steps
+	
+	$RM -rf ${ROLLBACK_DIR}
+	
+
+	$ECHO "End time: " `$DATE '+%y%m%d_%H%M%S'` >> $logfile
+	
+}
+
+
+
+flag1=0
+flag2=0
+
+while getopts ":t:f:o:mr" Option
+	do
+	case $Option in
+		t)  if [[ $OPTARG = 'WCDMA' || $OPTARG = 'LTE' ]];then
+				Technology="$OPTARG"
+			else
+				$ECHO "Please enter a valid Technology name."
+				exit 2
+			fi
+				;;
+		f)  if [[ $OPTARG = 'WCDMA_node.txt' || $OPTARG = 'LTE_node.txt' ]];then
+				if [ -f ${INSTALLER_DIR}/$OPTARG ];then
+					Nodelist="$OPTARG"
+				else	
+					$ECHO "The node list file should be placed in /eniq/sw/installer directory"
+					exit 1
+				fi
+			else 
+				$ECHO "Please enter a valid node list file."
+				exit 2
+			fi
+				;;
+		o)	OSS_ID=$OPTARG
+				;;
+		m)	flag1=1
+				;;
+		r)	flag2=1
+				;;
+
+	\?)	usage_msg
+			exit 2
+				;;
+	esac
+done
+
+if [[ $flag1 -eq 1 && $flag2 -eq 1 ]]; then
+	$ECHO "You can enter only one option -m|-r at a time."
+elif [[ $flag1 -eq 1 ]]; then
+	migration
+elif [[ $flag2 -eq 1 ]]; then
+	rollback
+else 
+	 usage_msg
+	 
+	 exit 2
+fi
+exit 0;
+

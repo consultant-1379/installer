@@ -1,0 +1,291 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : load_tp_node_version.bsh
+# Date    : 04/10/2018
+# Purpose : Script to load TPNodeVersion table
+# Usage   : ./load_tp_node_version.bsh -f <path_to_feature_sw> | -u <path_to_feature_sw> <feature_name_list_file>
+#
+# ********************************************************************
+#
+# Command Section
+#
+# ********************************************************************
+
+
+ENIQ_CONF_DIR=/eniq/installation/config
+CONF_DIR=/eniq/sw/conf
+TPNODEVERSIONFILE="TP_R_NodeVersion.txt"
+TMP_DIR=/var/tmp
+HOME_DIR=/eniq/home/dcuser
+LOG_DIR=/eniq/log/sw_log/tp_installer
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+        echo "Could not find /eniq/admin/lib/common_functions.lib"
+        exit 1
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 3
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $connection_string ]; then
+  $RM -f $connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string"
+  fi
+fi
+}
+
+trap remove_connection_string EXIT
+
+DWHREPUSER=`inigetpassword REP -v DWHREPUsername -f ${CONF_DIR}/niq.ini`
+DWHREPPASSWORD=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+LOG_FILE=${LOG_DIR}/load_tp_node_version_`$DATE '+%Y%m%d_%H%M%S'`.log
+
+connection_string=/var/tmp/encrypt_$$.txt
+connection_string_decrypt="-c \"eng=${REP_SERVER_NAME};links=tcpip{host=${REP_SERVER_NAME};port=${REP_PORT}};uid=$DWHREPUSER;pwd=$DWHREPPASSWORD\" -onerror exit -nogui"
+
+get_encrypt_file "${connection_string_decrypt}" "${connection_string}"
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+if [ ! -x "$DBISQL" ]; then
+    _err_msg_="$DBISQL commands not found or not executable."
+    abort_script "$_err_msg_"
+fi
+
+check_and_create_table(){
+${DBISQL} @${connection_string} "IF not EXISTS ((SELECT * FROM sys.systable where table_name='TPNodeVersion'))
+BEGIN
+        create table TPNodeVersion (
+        TECHPACK_NAME    varchar(30) not null,
+        TECHPACK_VERSION varchar(10) ,
+        NODE_TYPE      varchar(50) ,
+        NODE_VERSION varchar(50),
+        CONSTRAINT TPNODEVERSION_prim_key primary key(TECHPACK_NAME,TECHPACK_VERSION,NODE_TYPE)
+        )
+END" > /dev/null 2>&1
+dbErrCode=$?
+if [[ $dbErrCode -eq 0 ]]; then
+	${DBISQL} @${connection_string} "IF not EXISTS ((SELECT * FROM sys.SYSCONSTRAINT where constraint_name='TPNODEVERSION_prim_key'))
+	BEGIN
+        ALTER TABLE TPNodeVersion ADD CONSTRAINT TPNODEVERSION_prim_key PRIMARY KEY (TECHPACK_NAME,TECHPACK_VERSION,NODE_TYPE) 
+	END"
+	dbErrCode=$?
+	if [[ $dbErrCode -ne 0 ]]; then
+		$ECHO "Could not add composite key constraint to TPNODEVERSION." | $TEE -a ${LOG_FILE} 
+	fi
+else
+	$ECHO "Could not create table TPNODEVERSION." | $TEE -a ${LOG_FILE} 
+fi
+}
+
+
+get_count(){
+${DBISQL} @${connection_string} "select count(*) from TPNodeVersion;OUTPUT TO ${TMP_DIR}/count" > /dev/null 2>&1
+count_table=`$HEAD -n 1 ${TMP_DIR}/count`
+$ECHO "$count_table"
+# Delete the temporary file created so far
+if [[ -s ${TMP_DIR}/count ]]; then
+	$RM ${TMP_DIR}/count  
+fi	
+}
+
+perform_delta_and_insert(){
+#create temp table if it exists
+${DBISQL} @${connection_string} "IF not EXISTS ((SELECT * FROM sys.systable where table_name='TPNodeVersion_temp'))
+BEGIN
+        create table TPNodeVersion_temp (
+        TECHPACK_NAME    varchar(30) not null,
+        TECHPACK_VERSION varchar(10) ,
+        NODE_TYPE      varchar(50) ,
+        NODE_VERSION varchar(50),
+        CONSTRAINT TPNODEVERSION_temp_prim_key primary key(TECHPACK_NAME,TECHPACK_VERSION,NODE_TYPE)
+        )
+END" > /dev/null 2>&1
+dbErrCode=$?
+if [[ $dbErrCode -eq 0 ]] ; then
+	#load once the temp table is created
+	count_temp=`${DBISQL} @${connection_string} "select count(*) from TPNodeVersion_temp" > /dev/null 2>&1`
+	dbErrCode=$?
+	if [[ $dbErrCode -eq 0 ]] ; then
+		if [[ $count_temp -eq 0 ]] | [[ $count_temp == "" ]]; then
+			load_table $1 "TPNodeVersion_temp"
+			
+			#revalidate the data in original TPNodeVersion table
+			${DBISQL} @${connection_string} "Delete from TPNodeVersion TP where TP.TECHPACK_NAME ||':'|| TP.NODE_TYPE NOT IN (SELECT TP_temp.TECHPACK_NAME ||':'|| TP_temp.NODE_TYPE FROM TPNodeVersion_temp TP_temp)" > /dev/null 2>&1
+			dbErrCode=$?
+			if [[ $dbErrCode -ne 0 ]] ; then
+				$ECHO "Revalidation of TPNodeVersion couldn't be executed." | $TEE -a ${LOG_FILE}
+			fi
+		
+			#insert the delta data into the table TPNodeVersion
+			${DBISQL} @${connection_string} "Insert into TPNodeVersion(TECHPACK_NAME,TECHPACK_VERSION,NODE_TYPE,NODE_VERSION) Select TECHPACK_NAME,TECHPACK_VERSION,NODE_TYPE,NODE_VERSION FROM TPNodeVersion_temp curr WHERE curr.TECHPACK_NAME ||':'||curr.TECHPACK_VERSION ||':'||curr.NODE_TYPE NOT IN (SELECT tbl.TECHPACK_NAME ||':'||tbl.TECHPACK_VERSION ||':'||tbl.NODE_TYPE FROM TPNodeVersion tbl)" > /dev/null 2>&1
+			dbErrCode=$?
+			if [[ $dbErrCode -eq 0 ]] ; then
+				drop_table "tpnodeversion_temp"
+			fi
+		fi
+	fi
+fi	
+}
+
+
+ 
+update_table(){
+
+#get the number of lines in .cxc
+count_lines=`$WC -l < $1/.$2`
+#loop through 2 to n-1 lines
+if [[ $count_lines -gt 1 ]] ; then
+	cxc_content=`$TAIL -n +2 $1/.$2`
+	IFS=$'\n'
+	for line in $cxc_content
+	do 
+		node_type=`$ECHO $line | $AWK -F'::' '{print $2}'`
+		#query to obtain tp and rstate for particular nodetype and cxc and store
+		${DBISQL} @${connection_string} "select distinct TECHPACK_NAME from TPNodeVersion where node_Type='${node_type}';OUTPUT TO ${HOME_DIR}/tp_temp" > /dev/null 2>&1
+		tp_temp_con=`$WC -l ${HOME_DIR}/tp_temp | $AWK -F' ' '{print $1}'`
+		if [[ "$node_type" == "NA" ]] ; then
+			if [[ $tp_temp_con -gt 0 ]];then
+				${DBISQL} @${connection_string}  "select top 1 TECHPACK_NAME,TECHPACK_VERSION from versioning WHERE VERSIONID in (select distinct VERSIONID from tpActivation where STATUS='ACTIVE') and LICENSENAME like '%$2%' and TECHPACK_NAME in (select distinct TECHPACK_NAME from TPNodeVersion where node_Type='${node_type}') order by TECHPACK_NAME;OUTPUT TO ${HOME_DIR}/temp_tp_node_version HEXADECIMAL ASIS FORMAT TEXT QUOTE ''" > /dev/null 2>&1
+				TP_name=`$HEAD -n 1 ${HOME_DIR}/temp_tp_node_version | $CUT -d',' -f1`
+				TP_rstate=`$HEAD -n 1 ${HOME_DIR}/temp_tp_node_version | $CUT -d',' -f2`
+				node_version=$TP_rstate
+			else
+				$ECHO "No techpack mapping found for '${node_type}' in TPNodeVersion table." | $TEE -a ${LOG_FILE}
+			fi
+		else
+			if [[ $tp_temp_con -gt 0 ]];then
+				${DBISQL} @${connection_string} "select top 1 TECHPACK_NAME,TECHPACK_VERSION from versioning WHERE VERSIONID in (select distinct VERSIONID from tpActivation where STATUS='ACTIVE') and LICENSENAME like '%$2%' and TECHPACK_NAME in (select distinct TECHPACK_NAME from TPNodeVersion where node_Type='${node_type}') order by TECHPACK_NAME;OUTPUT TO ${HOME_DIR}/temp_tp_node_version HEXADECIMAL ASIS FORMAT TEXT QUOTE ''" > /dev/null 2>&1
+				node_version=`$ECHO $line | $AWK -F'::' '{print $6}'`
+				TP_name=`$HEAD -n 1 ${HOME_DIR}/temp_tp_node_version | $CUT -d',' -f1`
+				TP_rstate=`$HEAD -n 1 ${HOME_DIR}/temp_tp_node_version | $CUT -d',' -f2`
+			else
+				$ECHO "No techpack mapping found for '${node_type}' in TPNodeVersion table." | $TEE -a ${LOG_FILE}
+			fi
+		fi
+
+		#insert into load_tp_node_version
+			${DBISQL} @${connection_string} "IF not EXISTS ((SELECT * FROM tpnodeversion where TECHPACK_NAME='$TP_name' and TECHPACK_VERSION='$TP_rstate' and NODE_TYPE='$node_type'))
+			BEGIN
+			insert into tpnodeversion(TECHPACK_NAME,TECHPACK_VERSION,NODE_TYPE,NODE_VERSION) values ('$TP_name','$TP_rstate','$node_type','$node_version')
+			END 
+			ELSE
+			BEGIN
+			update tpnodeversion set NODE_VERSION='$node_version' where TECHPACK_NAME='$TP_name' and TECHPACK_VERSION='$TP_rstate' and NODE_TYPE='$node_type'
+			END"> /dev/null 2>&1
+			dbErrCode=$?
+		if [[ $dbErrCode -ne 0 ]]; then
+			$RM -rf ${HOME_DIR}/temp_tp_node_version
+			$RM -rf ${HOME_DIR}/tp_temp
+			$ECHO "Could not insert data into TpNodeVersion table - exiting with error code: $dbErrCode" | $TEE -a ${LOG_FILE}
+		else
+			$ECHO "Successfully updated the table TPNodeVersion with $TP_name , $TP_rstate, $node_type, $node_version " | $TEE -a ${LOG_FILE}
+		fi
+		done
+fi
+}
+
+
+drop_table()
+{
+${DBISQL} @${connection_string}  "drop table $1" > /dev/null 2>&1
+}
+
+
+load_table()
+{
+	if [[ -f ${1}/${TPNODEVERSIONFILE} ]];
+		then
+			$TOUCH ${TMP_DIR}/${TPNODEVERSIONFILE}_temp
+			$TOUCH ${TMP_DIR}/temp_tp_node_version
+			$AWK 'NR==1' ${1}/${TPNODEVERSIONFILE} > ${TMP_DIR}/temp_tp_node_version
+			while read line
+			do
+				if [[ "$line" != "" ]] ; then
+				var=`$ECHO $line | $CUT -d':' -f1-6`
+				$GREP "$var" ${TMP_DIR}/temp_tp_node_version ||  $ECHO $line >> ${TMP_DIR}/temp_tp_node_version
+				fi
+			done < ${1}/${TPNODEVERSIONFILE}
+			$SED '1,2d' ${TMP_DIR}/temp_tp_node_version > ${TMP_DIR}/${TPNODEVERSIONFILE}_temp
+			#load the contents to table
+			${DBISQL} @${connection_string} "set temporary option CONVERSION_ERROR = OFF;
+			load table $2( TECHPACK_NAME,
+			TECHPACK_VERSION,
+			NODE_TYPE,
+			NODE_VERSION) from '${TMP_DIR}/${TPNODEVERSIONFILE}_temp' 
+			ESCAPES OFF 
+			QUOTES OFF 
+			DELIMITED BY '::';" > /dev/null 2>&1
+			if [[ $? -eq 0 ]]; then
+				$ECHO "Successfully loaded the table TPNodeVersion from ${1}/${TPNODEVERSIONFILE}" 
+				$RM ${TMP_DIR}/temp_tp_node_version
+				$RM ${TMP_DIR}/${TPNODEVERSIONFILE}_temp
+			else
+				$ECHO "Loading into table TPNodeVersion failed" | $TEE -a ${LOG_FILE} 
+			fi
+		else
+			$ECHO "File ${1}/${TPNODEVERSIONFILE} not found" | $TEE -a ${LOG_FILE} 
+	fi
+}
+
+
+#------------------------------------------ Main body of the Script ------------------------------------------------------------
+
+if [[ $# -eq 2 ]]; then
+	if [[ "$1" == "-f" ]] ; then
+	#invoked from feature upgrade/install
+	check_and_create_table
+	count_of_table=$(get_count)
+	if [[ $count_of_table -eq 0 ]] ; then
+		load_table $2 "TPNODEVERSION"
+	else
+		perform_delta_and_insert $2
+	fi
+	fi	
+elif  [[ $# -eq 3 ]]; then
+#invoked from per feature upgrade/install
+	if [[ "$1" == "-u" ]] ;  then
+		update_table $2 $3
+	fi 	
+else
+	$ECHO "Usage   : ./load_tp_node_version.bsh -f <path_to_feature_sw> | -u <path_to_feature_sw> <feature_name_list_file>";	
+fi
+

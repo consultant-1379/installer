@@ -1,0 +1,146 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2015 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : dropRBSView.bsh
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Usage   : bash dropRBSView.bsh
+#
+# ********************************************************************
+#
+# Command Section
+#
+# ********************************************************************
+
+AWK=/usr/bin/awk
+CAT=/usr/bin/cat
+CHMOD=/usr/bin/chmod
+CHOWN=/usr/bin/chown
+CP=/usr/bin/cp
+DATE=/usr/bin/date
+ECHO=/usr/bin/echo
+EGREP=/usr/bin/egrep
+FIND=/usr/bin/find
+GEGREP=/usr/sfw/bin/gegrep
+GREP=/usr/bin/grep
+MKDIR=/usr/bin/mkdir
+MORE=/usr/bin/more
+NAWK=/usr/bin/nawk
+RM=/usr/bin/rm
+SED=/usr/bin/sed
+SU=/usr/bin/su
+TEE=/usr/bin/tee
+TOUCH=/usr/bin/touch
+UNZIP=/usr/bin/unzip
+
+# ********************************************************************
+#
+# Configuration 
+#
+# ********************************************************************
+
+TEMP_DIR=/var/tmp/dropRbsCombined
+CONF_DIR=/eniq/sw/conf
+
+if [ -d $TEMP_DIR ]; then
+        $RM -rf $TEMP_DIR
+        $MKDIR -p $TEMP_DIR
+        $CHMOD 775 $TEMP_DIR
+else
+        $MKDIR -p $TEMP_DIR
+        $CHMOD 775 $TEMP_DIR
+fi
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+        $ECHO "Could not find /eniq/admin/lib/common_functions.lib"
+        exit 1
+fi
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $connection_string ]; then
+  $RM -f $connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string"
+  fi
+fi
+}
+
+trap remove_connection_string EXIT
+
+DWHDBPASSWORD=`inigetpassword DWH -v DCPassword -f ${CONF_DIR}/niq.ini`
+DWHDB_PORT=`inigetpassword DWH -v PortNumber -f ${CONF_DIR}/niq.ini`
+DWH_SERVER_NAME=`inigetpassword DWH -v ServerName -f ${CONF_DIR}/niq.ini`
+DWHREPUSER=`inigetpassword REP -v DWHREPUsername -f ${CONF_DIR}/niq.ini`
+DWHREPPASSWORD=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+DBAPASSWORD=`inigetpassword DB -v DBAPassword -f ${CONF_DIR}/niq.ini`
+
+connection_string=/var/tmp/encrypt_$$.txt
+connection_string_decrypt="-nogui -c \"eng=${REP_SERVER_NAME};links=tcpip{host=${REP_SERVER_NAME};port=${REP_PORT}};uid=$DWHREPUSER;pwd=$DWHREPPASSWORD\""
+
+get_encrypt_file "${connection_string_decrypt}" "${connection_string}"
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+# ********************************************************************
+#
+# Method Section
+#
+# ********************************************************************
+dropView(){
+	${DBISQL} @${connection_string} "select DISTINCT STORAGEID from dwhrep.DWHColumn WHERE STORAGEID like 'DC|_E|_RBS|_%' escape '|';OUTPUT TO $TEMP_DIR/Views.txt" HEXADECIMAL ASIS FORMAT TEXT
+	$MORE $TEMP_DIR/Views.txt | $SED 's/:/_/g' | $SED "s/\'//g" | $SED 's/DC_/drop view if exists dc.DC_/g' > $TEMP_DIR/rbsViews.sql
+	$CAT $TEMP_DIR/rbsViews.sql
+	${DBISQL} @${connection_string} $TEMP_DIR/rbsViews.sql
+}
+
+# ********************************************************************
+#
+# Main Section
+#
+# ********************************************************************
+$ECHO "Checking if both the techpacks are installed..."
+${DBISQL} @${connection_string} "select DISTINCT TECHPACK_NAME from Versioning WHERE TECHPACK_NAME like 'DC_E_RBS%';OUTPUT TO $TEMP_DIR/tmp.txt"
+
+x=$($EGREP -c 'DC_E_RBS' $TEMP_DIR/tmp.txt)
+
+if [[ $x -eq 2 ]]
+then
+	dropView
+else 
+   $ECHO "WARNING : Either DC_E_RBS or DC_E_RBSG2 or both Techpack(s) is/are not installed. So skipping drop views..." 
+   exit 0
+fi
+
+#Clean-up.
+$RM -rf $TEMP_DIR
+

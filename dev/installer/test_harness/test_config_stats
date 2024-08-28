@@ -1,0 +1,4 @@
+#NAME::FEATURE_LIST_FILENAME::EXPECTED_ERROR_CODE::MOCK_RECORD_FILENAME::MOCK_FUNCTION_TO_FAIL
+1::cxc_num_mtas::0::dep_expect_mtas::nofail
+2::cxc_num_mtas::38::dep_expect_mtas_fail::call_tech_pack_installation
+real::cxc_num_mtas::0::nomock::nofail

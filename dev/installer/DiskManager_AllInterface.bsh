@@ -1,0 +1,266 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied .
+#
+# ********************************************************************
+# Name    : DiskManager_AllInterface.bsh
+# Purpose : Main script to archive all active interfaces and 
+#			installed teckpacks	log files. 
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Usage   : bash DiskManager_AllInterface.bsh
+#
+# ********************************************************************
+#
+#   Command Section
+#
+# ********************************************************************
+. /eniq/home/dcuser/.profile
+
+if [ -z "${CONF_DIR}" ] ; then
+  echo "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  echo "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 2
+fi
+
+. ${CONF_DIR}/niq.rc
+
+if [ -z "${BIN_DIR}" ] ; then
+  echo "ERROR: BIN_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+# ********************************************************************
+#
+#       Configuration Section
+#
+# ********************************************************************
+#Set paramters and configurations
+archivePrefix=archive
+fileAgeDay=2
+DC_fileAgeDay=7
+
+#Define variable
+intf_list=/var/tmp/intf_all.txt
+tp_list=/var/tmp/tp_all.txt
+file_list=/var/tmp/file_list.txt
+archive_list=/var/tmp/archive_list.txt
+LOG_DIR=/eniq/log/sw_log
+PWD=`$PWD`
+LOG_FILE=$LOG_DIR/engine/DiskManagerSet_`$DATE +%Y_%m_%d`.log
+CONF_DIR=/eniq/sw/conf
+export CONF_DIR
+
+# ********************************************************************
+#
+#       Pre-execution Operations
+#
+# ********************************************************************
+#Set Comparsion Date
+filAgeDay=$(( $fileAgeDay + 0 ))
+DC_fileAgeDay=$(($DC_fileAgeDay - 1))
+ignore_day=$(( 24 * $fileAgeDay ))
+ignore_tpday=$(( 24 * $DC_fileAgeDay ))
+time_zone=`$DATE | $NAWK -F" " '{print $5}'`
+comp_date=`TZ=$time_zone+${ignore_day} $DATE +%Y%m%d`
+comp_tpdate=`TZ=$time_zone+${ignore_tpday} $DATE +%Y%m%d`
+comp_tpdate=$(($comp_tpdate - 1))
+$ECHO "Comparsion Date for Interface : $comp_date" >> ${LOG_FILE}
+$ECHO "Comparsion Date for Techpack : $comp_tpdate" >> ${LOG_FILE}
+
+# ********************************************************************
+#
+# 	Main body of program
+#
+# ********************************************************************
+#Get all active interface list
+bash /eniq/sw/installer/get_active_interfaces | $GREP eniq_ > $intf_list
+if [ $? -ne 0 ]; then
+        $ECHO "ERROR : Failed during generating interface list." >> ${LOG_FILE}
+        exit 3
+fi
+
+#Get all installed teckpacks
+bash /eniq/sw/installer/installed_techpacks -s > $tp_list
+if [ $? -ne 0 ]; then
+        $ECHO "ERROR : Failed during generating techpacks list." >> ${LOG_FILE}
+fi
+#Do zipping
+for dir in ${LOG_DIR}/engine ${LOG_DIR}/scheduler
+do
+$ECHO "---------------------------------------Archiving Interfaces--------------------------------------" >> ${LOG_FILE}
+$ECHO "DiskManager running for $dir directory ." >> ${LOG_FILE}
+while read each_intf; do
+        #Create temp files
+        $RM -f $file_list
+        $TOUCH $file_list
+
+        $RM -f $archive_list
+        $TOUCH $archive_list
+
+        #get interface and oss
+        intf_name=`$ECHO $each_intf | $NAWK -F" " '{print $1}'`
+        oss_alias=`$ECHO $each_intf | $NAWK -F" " '{print $2}'`
+        $ECHO "DiskManager will archive the files for ${intf_name} interface activated for ${oss_alias}." >> ${LOG_FILE}
+
+        #Check for directory
+        if [ ! -d $dir/${intf_name}-${oss_alias} ]; then
+                $ECHO "WARNING : Directory path '$dir/${intf_name}-${oss_alias}' not found. Skipping DiskManager set for ${intf_name} interface activated for ${oss_alias}. " >> ${LOG_FILE}
+                continue
+        fi
+
+        #Generate list of un-archived files
+        $LS $dir/${intf_name}-${oss_alias} | $GREP -v archive > $file_list
+
+        #Generate list of archive file
+        for each_file in `$CAT $file_list`; do
+                log_date=`$ECHO $each_file | $NAWK -F"-" '{print $2}' | $NAWK -F"." '{print $1}' | tr -d '_'`
+                #echo "LOG DATE : $log_date"
+                if [ $log_date -lt $comp_date ]; then
+                        $ECHO $each_file >> $archive_list
+                fi
+        done
+
+        #check count
+        if [ `$CAT $archive_list | ${WC} -l` -eq 0 ]; then
+                $ECHO "We have zero file to archive for ${intf_name} interface activated for ${oss_alias}. Skipping DiskManager set. " >> ${LOG_FILE}
+                $ECHO "" >> ${LOG_FILE}
+                continue
+        fi
+
+        #Get zip file name and zip the files
+		if [[ "$dir" == *"engine"* ]] ; then
+		start_date=`$CAT $archive_list | $GREP engine- | ${HEAD} -1 | $NAWK -F"-" '{print $2}' | $NAWK -F"." '{print $1}'`
+		end_date=`$CAT $archive_list | $GREP engine- | ${TAIL} -1 | $NAWK -F"-" '{print $2}' | $NAWK -F"." '{print $1}'`
+		elif [[ "$dir" == *"scheduler"* ]] ; then
+		start_date=`$CAT $archive_list | $GREP scheduler- | ${HEAD} -1 | $NAWK -F"-" '{print $2}' | $NAWK -F"." '{print $1}'`
+		end_date=`$CAT $archive_list | $GREP scheduler- | ${TAIL} -1 | $NAWK -F"-" '{print $2}' | $NAWK -F"." '{print $1}'`
+		fi
+		
+        zip_file_name=${archivePrefix}${start_date}-${end_date}.zip
+        zip_file_list=""
+        for each_content in `$CAT $archive_list`; do
+                zip_file_list="$zip_file_list $each_content"
+        done
+
+        ${CD} $dir/${intf_name}-${oss_alias}
+        $ZIP ${zip_file_name} $zip_file_list > /dev/null 2>&1
+        if [ $? -ne 0 ]; then
+                $ECHO "WARNING : Problem during archiving the file for ${intf_name} interface activated for ${oss_alias}. Skipping DiskManager set." >> ${LOG_FILE}
+        else
+                $ECHO "Succesfully archived the files from $start_date to $end_date for ${intf_name} interface activated for ${oss_alias}." >> ${LOG_FILE}
+                #Delete the files which are archived.
+				$RM -rf $zip_file_list
+
+                ${CD} $PWD
+
+                #clean up
+                $RM -f $archive_list
+                $RM -f $file_list
+        fi
+
+        $ECHO "" >> ${LOG_FILE}
+
+done < $intf_list
+
+$ECHO "---------------------------------------Archiving Techpack--------------------------------------" >> ${LOG_FILE}
+while read each_tp;do
+#Creat temp files
+		$RM -f $file_list
+		$TOUCH $file_list
+
+        $RM -f $archive_list
+        $TOUCH $archive_list
+
+
+	#fetch individual techpack names
+		
+		tp_name=`$ECHO $each_tp | $NAWK -F" " '{print $1}'`
+	$ECHO "DiskManager will archive the files for ${tp_name}." >> ${LOG_FILE}
+
+#Check for directory
+       if [ ! -d $dir/${tp_name} ]; then
+               $ECHO "WARNING : Directory path '$dir/${tp_name}' not found. Skipping DiskManager set for ${tp_name}." >> ${LOG_FILE}
+                continue
+        fi
+	#Generate list of un-archived files
+      $LS $dir/${tp_name} | $GREP -v archive > $file_list	
+
+	#Generate list of archive file
+     for each_tp in `$CAT $file_list`; do
+               log_date=`$ECHO $each_tp | $NAWK -F"-" '{print $2}' | $NAWK -F"." '{print $1}' | tr -d '_'`
+                #echo "LOG DATE : $log_date"
+                if [ $log_date -lt $comp_tpdate ]; then
+						#echo "log date is less than compared date"
+						$ECHO $each_tp >> $archive_list
+                fi
+       done
+
+        #check count
+        if [ `$CAT $archive_list | ${WC} -l` -eq 0 ]; then
+                $ECHO "We have zero file to archive for ${tp_name}. Skipping DiskManager set. " >> ${LOG_FILE}
+                $ECHO "" >> ${LOG_FILE}
+                continue
+        fi
+
+        #Get zip file name and zip the files
+        if [[ "$dir" == *"engine"* ]] ; then
+		start_date=`$CAT $archive_list | $GREP engine- | ${HEAD} -1 | $NAWK -F"-" '{print $2}' | $NAWK -F"." '{print $1}'`
+		end_date=`$CAT $archive_list | $GREP engine- | ${TAIL} -1 | $NAWK -F"-" '{print $2}' | $NAWK -F"." '{print $1}'`
+		elif [[ "$dir" == *"scheduler"* ]] ; then
+		start_date=`$CAT $archive_list | $GREP scheduler- | ${HEAD} -1 | $NAWK -F"-" '{print $2}' | $NAWK -F"." '{print $1}'`
+		end_date=`$CAT $archive_list | $GREP scheduler- | ${TAIL} -1 | $NAWK -F"-" '{print $2}' | $NAWK -F"." '{print $1}'`
+		fi
+		
+        zip_file_name=${archivePrefix}${start_date}-${end_date}.zip
+		
+        zip_file_list=""
+        for each_content in `$CAT $archive_list`; do
+               zip_file_list="$zip_file_list $each_content"
+			   
+        done
+
+        ${CD} $dir/${tp_name}
+        $ZIP ${zip_file_name} $zip_file_list > /dev/null 2>&1
+        if [ $? -ne 0 ]; then
+                $ECHO "WARNING : Problem during archiving the file for ${tp_name}. Skipping DiskManager set." >> ${LOG_FILE}
+        else
+                $ECHO "Succesfully archived the files from $start_date to $end_date for ${tp_name}." >> ${LOG_FILE}
+                #Delete the files which are archived.
+				$RM -rf $zip_file_list
+
+                ${CD} $PWD
+
+                #clean up
+                $RM -f $archive_list
+                $RM -f $file_list
+       fi
+
+       $ECHO "" >> ${LOG_FILE}	
+done < $tp_list
+
+
+done
+#clean up
+$RM -f $intf_list
+$RM -f $tp_list

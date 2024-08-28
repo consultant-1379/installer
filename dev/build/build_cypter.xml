@@ -1,0 +1,23 @@
+<project name="build_crypter" default="build_jar">
+
+<target name="build_jar">
+
+  <mkdir dir="../build_tmp"/>
+  <javac srcdir="../java" destdir="../build_tmp" classpath="../buildlib" source="1.5">
+    <classpath>
+      <pathelement path="classpath" />
+	  <fileset dir="../buildlib">
+	    <include name="**/*.jar" />
+	  </fileset>
+    </classpath>
+  </javac>
+
+  <jar destfile="../ZipCrypter.jar">
+    <fileset dir="../build_tmp" includes="**/*.class" />
+  </jar>
+
+  <delete dir="../build_tmp"/>
+
+</target>
+
+</project>

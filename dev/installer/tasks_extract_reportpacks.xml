@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+     Ericsson Network IQ Tech Pack installer ant tasks.
+     Copyright (c) 1999 - 2006 AB LM Ericsson Oy  All rights reserved.
+-->
+
+<project name="task_extract_reportpacks" default="extract">
+	<typedef name="ZipCrypterExtractor" classname="com.distocraft.dc5000.install.ant.ZipCrypterExtractor"/>
+	<property environment="env" />
+
+	<target name="extract">
+		<ZipCrypterExtractor OutputFile="${env.DST}" File="${env.SRC}" CryptType="decrypt" isPublicKey="true"/>
+	</target>
+</project>

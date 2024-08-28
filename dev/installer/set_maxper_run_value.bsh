@@ -1,0 +1,154 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : set_maxper_run_value.bsh
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : Ericsson Network IQ Interface Property change Script
+#
+# Usage   :  ./set_maxper_run_value -change
+#            ./set_maxper_run_value -rollback 
+# Author  : XWOTOKU & XSUBBHO for TR HQ31710
+# ********************************************************************
+
+unalias stop 2> /dev/null
+
+if [ ${LOGNAME} != "dcuser"  ] ; then
+  echo "This script must be executed as dcuser"
+  exit 1
+fi
+
+if [ -z "$CONF_DIR" ] ; then
+  echo "ERROR: CONF_DIR is not set"
+  exit 2
+fi
+
+. ${CONF_DIR}/niq.rc
+
+JAVA_HOME="/eniq/sw/runtime/java"
+
+CPATH="${PLATFORM_DIR}"
+
+DIRS=`ls ${PLATFORM_DIR}`
+
+for file in `ls ${PLATFORM_DIR}/*/dclib/sajdbc[0-9].jar`
+do
+  CLASSPATH=${CLASSPATH}:${file}
+  break
+done 
+
+CPATH="${CPATH}:MaxFilePerRunReduced.jar"
+
+ossName="oss"
+nodeName="rnc"
+maxValue=0
+option="ss"
+
+function userinput { 
+
+      choice="n"  
+
+      while [ "$choice" = "n" ] || [ "$choice" = "N" ] 
+      do
+        echo "Enter OSS NAME <ex :: eniq_oss_1> ::"
+        read ossName
+
+        echo "Enter Node Name <RNC or RBS or RXI> ::"
+        read nodeName
+
+        if [ "$option" = "change" ] 
+        then 
+            echo "Enter New MAXPER RUN value :: "
+            read maxValue
+
+            echo "" 
+            echo "WARNING !!!!"
+            echo "The MAXPER RUN value should be minimum twice the number of nodes being loaded"
+        fi 
+        
+        echo "" 
+        echo "Are the above given inputs are correct Yy|Nn"
+        read choice
+      done 
+        
+        chkoss=`echo $ossName | egrep '^eniq_oss_[1-9][0-9]?$|^ENIQ_OSS_[1-9][0-9]?$' | wc -l`
+        chknode=`echo $nodeName | egrep '^RNC$|^RXI$|^RBS$|^rnc$|^rxi|^rbs$' | wc -l`
+        
+        if [ "$option" = "change" ]
+        then
+           chkval=`echo $maxValue | egrep '^[1-9][0-9]*$' | wc -l`
+        else
+           chkval=1
+        fi
+ 
+        if [ $chkoss -ne 1 ] || [ $chknode -ne 1 ] || [ $chkval -ne 1 ]
+        then
+          clear 
+          echo "ERROR !!!! wrong input "
+          echo "============================================================================"
+          echo "Enter OSS NAME as :: eniq_oss_XX"
+          echo "Enter Node Name as :: RNC or RBS or RXI."
+          echo "The MAXPER RUN value should be minimum twice the number of nodes being loaded"
+          echo "============================================================================" 
+          exit 32
+        fi   
+}
+
+function chkEngine {
+        chkeng=`svcs -a|grep engine | egrep '^online'|wc -l`
+
+        if [ $chkeng -eq 1 ]
+        then
+           echo "WARNING !!!! "
+           echo "Please STOP the engine first..." 
+           exit 32
+        fi
+}
+
+function changeValue {
+        ${JAVA_HOME}/bin/java -classpath ${CPATH} MaxFilePerRunReduced $ossName $nodeName $maxValue
+}
+
+function rollbackValue {
+        ${JAVA_HOME}/bin/java -classpath ${CPATH} MaxFilePerRunReduced $ossName $nodeName 
+}
+
+function usage {
+        echo "==========================================" 
+        echo "Usage: $0 [operation]"
+        echo "where [operation] is one of the followings:"
+        echo "  -change"
+	echo "  -rollback"
+ 	echo "=========================================="
+}
+
+
+case "$1" in
+-change)
+     option="change" 
+     chkEngine 
+     userinput 
+     changeValue
+     ;;
+-rollback)
+     option="rollback"
+     chkEngine 
+     userinput 
+     rollbackValue
+     ;;
+*)
+     usage
+     ;;
+esac

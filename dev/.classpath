@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<classpath>
+	<classpathentry kind="src" path="src"/>
+	<classpathentry kind="src" path="test"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/apache/ant/v1_6_2/prod/ant.jar"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/sybase/sybase_iq/v15_1/client/prod/jconn3.jar"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/apache/xerces_impl/v2_0_2/prod/xercesImpl-2.0.2.jar"/>
+	<classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/dbunit/dbunit/v2_2/prod/dbunit-2.2.jar"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/apache/jakarta_velocity/v1_5/prod/velocity-dep-1.5.jar"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/hsqldb/v2_2_4/hsqldb.jar"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/junit/v4_5/prod/junit-4.5.jar"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/jmock-2.5.1/bsh-core-2.0b4.jar"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/jmock-2.5.1/cglib-2.1_3-src.jar"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/jmock-2.5.1/cglib-nodep-2.1_3.jar"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/jmock-2.5.1/hamcrest-core-1.1.jar"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/jmock-2.5.1/hamcrest-library-1.1.jar"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/jmock-2.5.1/jmock-2.5.1.jar"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/jmock-2.5.1/jmock-junit3-2.5.1.jar"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/jmock-2.5.1/jmock-junit4-2.5.1.jar"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/jmock-2.5.1/jmock-legacy-2.5.1.jar"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/jmock-2.5.1/jmock-script-2.5.1.jar"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/jmock-2.5.1/objenesis-1.0.jar"/>
+	<classpathentry kind="src" path="/repository"/>
+	<classpathentry kind="src" path="/ETLC_TestHelper"/>
+	<classpathentry kind="src" path="/common"/>
+	<classpathentry kind="src" path="/licensing"/>
+	<classpathentry kind="src" path="/engine"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_tools/testhelper/build/testhelper.jar"/>
+	<classpathentry kind="src" path="/export"/>
+	<classpathentry kind="var" path="VIEW_PATH/eniq_3pp/jsch_ssh2/jsch_ssh2/v0_1_51/prod/jsch-0.1.51.jar"/>
+	<classpathentry kind="output" path="classes"/>
+</classpath>

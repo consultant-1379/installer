@@ -1,0 +1,48 @@
+<project name="installer" default="test_all">
+  <property name="module.name" value="installer"/>
+  <property file="${user.home}/EniqBuild/BH/build.properties"/>
+  <property name="ant.common" value="${cc.base}/tools/ant_common"/>
+  <property file="${ant.common}/common.properties"/>
+  <property name="module.base" value="${module.installer.base}"/>
+  <property name="module.build" value="${module.installer.build}"/>
+  <property name="module.dependants" value="${module.installer.dependants}"/>
+  <import file="${ant.common}/common.xml"/>
+  <property name="tests.to.run" value="**/*Test.class"/>
+  <property name="tests.to.exclude" value="**com/distocraft/dc5000/install/ant/UpdateAlarmInterfaceTest.class"/>
+  <property name="mods.needed" value="common_utilities, repository, licensing, export"/>
+
+  <target name="pre_compile">
+    <antcall target="copy.sqlfiles.to.classpath"/>
+    <antcall target="copy.dbunit.xml.files.to.classpath"/>
+  </target>
+
+  <target name="copy.sqlfiles.to.classpath" description="need to copy in the sql/ files to the classes folder">
+    <property name="module.build.sqlfiles" value="${module.build}/test/classes/sql"/>
+    <mkdir dir="${module.build.sqlfiles}"/>
+    <copy todir="${module.build.sqlfiles}">
+      <fileset dir="${module.base}/test/sql"/>
+    </copy>
+  </target>
+
+
+  <target name="copy.dbunit.xml.files.to.classpath" description="need to copy in the xml files to the classes folder">
+    <property name="module.build.dbunit.xmlfiles" value="${module.build}/test/classes/XMLFiles"/>
+    <mkdir dir="${module.build.dbunit.xmlfiles}"/>
+    <copy todir="${module.build.dbunit.xmlfiles}">
+      <fileset dir="${module.base}/test/XMLFiles"/>
+    </copy>
+  </target>
+
+  <path id="installer.lib.classpath">
+    <path refid="plaform.lib.classpath"/>
+    <path location="${module.repository.pkg}"/>
+    <path location="${module.licensing.pkg}"/>
+    <path location="${module.common_utilities.pkg}"/>
+    <path location="${module.export.pkg}"/>
+    <path location="${module.engine.pkg}"/>
+  </path>
+  <path id="installer.test.classpath">
+    <path refid="platform.test.classpath"/>
+    <path refid="installer.lib.classpath"/>
+  </path>
+</project>

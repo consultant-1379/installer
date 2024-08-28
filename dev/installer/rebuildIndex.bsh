@@ -1,0 +1,335 @@
+#!/usr/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+# ---------------------------------------------------------------------
+# (c) Ericsson Radio Systems AB 2019 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+# ---------------------------------------------------------------------
+# Name    : rebuildIndex.bsh
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : The script for Rebuilt index for topology tables
+#	
+# Usage   : bash rebuildIndex.bsh
+#		  
+# ********************************************************************
+#--------------------------------------------------------------------
+#Global variable
+#--------------------------------------------------------------------
+BIN_DIR=/eniq/sw/bin
+#CURRENTDATE=`date +%d.%m.%Y`
+CURRENTDATE=`date +%Y.%m.%d`
+TP_INSTALLER_DIR=/eniq/log/sw_log/tp_installer
+ENGINE_LOG_DIR=/eniq/log/sw_log/engine/
+#LOGFILE="${TP_INSTALLER_DIR}/rebuildIndex_${CURRENTDATE}.log"
+LOGFILE="${ENGINE_LOG_DIR}/rebuildIndex_${CURRENTDATE}.log"
+ERRORLOGFILE="${ENGINE_LOG_DIR}/ERRORLOGFILE.txt"
+CONF_DIR=/eniq/sw/conf
+CURRENTTIMESTAMP=`date '+%y-%m-%d_%H:%M:%S'`
+DIM_TABLES_WITH_DATA="${ENGINE_LOG_DIR}/DIM_TABLES_WITH_DATA_REbuildINdex.txt"
+INDEXFILE="${ENGINE_LOG_DIR}/IndexFile_RebuildIndex.txt"
+QUERYFILE="${ENGINE_LOG_DIR}/QueryFile_RebuildIndex.txt"
+INDEXQUERY="${ENGINE_LOG_DIR}/IndexQuery_RebuildIndex.txt"
+TEMPFILE="${ENGINE_LOG_DIR}/TempFile_RebuildIndex.txt"
+FILE="${ENGINE_LOG_DIR}/rebuild_output"
+SYBASE_VERSION="${ENGINE_LOG_DIR}/SybaseVersion_RebuildIndex.txt"
+#--------------------------------------------------------------------
+#Source variables and functions
+#-------------------------------------------------------------------
+if [ -z "$CONF_DIR" ] ; then
+  $ECHO "ERROR: CONF_DIR is not set" | $TEE -a ${LOGFILE}
+  exit 1
+fi
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+        $ECHO "Could not find /eniq/admin/lib/common_functions.lib" | $TEE -a ${LOGFILE}
+        exit 2
+fi
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib" | $TEE -a ${LOGFILE}
+  exit 3
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+#-----------------------------------------------
+
+#Database configuration
+#--------------------------------------------------------------------
+
+DWHDBPASSWORD=`inigetpassword DWH -v DCPassword -f ${CONF_DIR}/niq.ini`
+DWHDB_PORT=`inigetpassword DWH -v PortNumber -f ${CONF_DIR}/niq.ini`
+DWH_SERVER_NAME=`inigetpassword DWH -v ServerName -f ${CONF_DIR}/niq.ini`
+DWHREPUSER=`inigetpassword REP -v DWHREPUsername -f ${CONF_DIR}/niq.ini`
+DWHREPPASSWORD=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+DBAPASSWORD=`inigetpassword DB -v DBAPassword -f ${CONF_DIR}/niq.ini`
+
+connection_string_dc=/var/tmp/encrypt_$$.txt
+connection_string_dba=/var/tmp/encrypt2_$$.txt
+connection_string_dwhrep=/var/tmp/encrypt3_$$.txt
+
+connection_string_decrypt_dc="-onerror exit -nogui -c \"eng=${DWH_SERVER_NAME};links=tcpip{host=${DWH_SERVER_NAME};port=${DWHDB_PORT}};uid=dc;pwd=${DWHDBPASSWORD}\""
+connection_string_decrypt_dba="-nogui -c \"eng=dwhdb;links=tcpip{host=dwhdb;port=2640};uid=dba;pwd=${DBAPASSWORD}\""
+connection_string_decrypt_dwhrep="-nogui -c \"eng=${REP_SERVER_NAME};links=tcpip{host=${REP_SERVER_NAME};port=${REP_PORT}};uid=$DWHREPUSER;pwd=$DWHREPPASSWORD\""
+ 
+ . /eniq/sybase_iq/IQ-*/IQ-*.sh
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+if [ ! -x "$DBISQL" ]; then
+    _err_msg_="$DBISQL commands not found or not executable."
+    abort_script "$_err_msg_"
+fi
+type get_encrypt_file &>/dev/null && isPresent='true' || isPresent='false'
+if [ ${isPresent} == 'true' ]; then
+  get_encrypt_file "${connection_string_decrypt_dc}" "${connection_string_dc}"
+  get_encrypt_file "${connection_string_decrypt_dba}" "${connection_string_dba}"
+  get_encrypt_file "${connection_string_decrypt_dwhrep}" "${connection_string_dwhrep}"
+  
+  DBISQL_DC="${DBISQL} @${connection_string_dc}"
+  DBISQL_DBA="${DBISQL} @${connection_string_dba}"
+  DBISQL_DWHREP="${DBISQL} @${connection_string_dwhrep}"
+ 
+else
+  DBISQL_DC="${DBISQL} ${connection_string_decrypt_dc}"
+  DBISQL_DBA="${DBISQL} ${connection_string_decrypt_dba}"
+  DBISQL_DWHREP="${DBISQL} ${connection_string_decrypt_dwhrep}"
+fi
+#--------------------------------------------------------------------
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+# Arguments: None
+# Return Values: None
+#--------------------------------------------------------------------
+
+remove_connection_string()
+{
+if [ -f $connection_string_dc ]; then
+  $RM -f $connection_string_dc
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string_dc" | $TEE -a ${LOGFILE}
+  fi
+fi
+
+if [ -f $connection_string_dba ]; then
+  $RM -f $connection_string_dba
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string_dba" | $TEE -a ${LOGFILE}
+  fi
+fi
+
+if [ -f $connection_string_dwhrep ]; then
+  $RM -f $connection_string_dwhrep
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string_dwhrep" | $TEE -a ${LOGFILE}
+  fi
+fi
+
+}
+trap remove_connection_string EXIT
+
+#-------------------------------------------------------------------
+#move the log in tp_installer path to engine log path.
+#--------------------------------------------------------------------
+check_tpInstaller(){
+$ECHO "Checking if any rebuildIndex logs are present in ${TP_INSTALLER_DIR}"
+output="$(ls ${TP_INSTALLER_DIR}/rebuildIndex* 2>/dev/null)"
+if [ -n "$output" ] ;then 
+$ECHO  "logs are found in tp_installer log path" | $TEE -a ${LOGFILE}
+copy_log_from_tpInstaller_to_engine
+
+else $ECHO "logs are not present in tp_installer log path" | $TEE -a ${LOGFILE}
+fi
+ }
+ 
+copy_log_from_tpInstaller_to_engine(){
+
+mv ${TP_INSTALLER_DIR}/rebuildIndex* $ENGINE_LOG_DIR
+
+$ECHO "moved log files from tp_installer to engine log directory " | $TEE -a ${LOGFILE}
+
+}
+ 
+ 
+ 
+#--------------------------------------------------------------------
+#Function to check the sybase version
+#--------------------------------------------------------------------
+check_sybaseVersion(){
+
+if [ -e ${SYBASE_VERSION} ]; then
+		rm $SYBASE_VERSION
+		$ECHO "Deleted SYBASE_VERSION file" | $TEE -a ${LOGFILE}
+	fi
+
+$ECHO "checking sybase version" | $TEE -a ${LOGFILE}
+${DBISQL_DC} "select version from syshistory where version like '15.2%' and operation ='LAST_BACKUP'; OUTPUT TO ${SYBASE_VERSION} APPEND" | $TEE -a ${LOGFILE}
+if [[ -s ${SYBASE_VERSION} ]]; then 
+	${DBISQL_DC} "select version from syshistory where version like '16%' and operation ='START'; OUTPUT TO ${SYBASE_VERSION} APPEND" | $TEE -a ${LOGFILE}
+	if [[ $? -eq 0  ]]; then
+		if $GREP -q "15.2" ${SYBASE_VERSION} &&  $GREP -q "16" ${SYBASE_VERSION}; then
+		$ECHO "The machine has migrated from SAP 15.2v . Rebuilding the index. " | $TEE -a ${LOGFILE}
+		check_flag
+		else
+		$ECHO "Rebuild index is not required for this server as the  server has not migrated from SAP 15.2 version. Exiting the script" | $TEE -a ${LOGFILE}
+		exit 0
+		fi
+	fi	
+else 
+	$ECHO "Rebuild index is not required for this server as the  server has not migrated from SAP 15.2 version. Exiting the script" | $TEE -a ${LOGFILE}
+	exit 0
+fi
+}
+#--------------------------------------------------------------------
+#Function to check the flag file
+#--------------------------------------------------------------------
+check_flag(){
+$ECHO "Checking the FLAG file" | $TEE -a ${LOGFILE}
+
+if [ -e ${ENGINE_LOG_DIR}/flag_rebuildIndexERROR ];then
+$ECHO "Last run for rebuilding index stopped with error, restarting " | $TEE -a ${LOGFILE}
+	checkExecutionSlot_RebuildIndex
+fi
+
+
+if [ -e ${ENGINE_LOG_DIR}/flag_rebuildIndex ]; then
+	
+	$ECHO " Rebuilding topology index already completed in the last run . exiting script " | $TEE -a ${LOGFILE}
+	exit 0
+fi
+
+}
+
+#--------------------------------------------------------------------
+#Function to fetch DIM tables
+#--------------------------------------------------------------------
+
+
+ fetch_tableNames(){
+ 
+	if [ -e ${DIM_TABLES_WITH_DATA} ]; then
+		rm $DIM_TABLES_WITH_DATA
+		$ECHO "Deleted DIM table file"
+	fi
+	if [ -e ${TEMPFILE} ]; then
+		rm $TEMPFILE
+		$ECHO "Deleted temp file"
+	fi
+
+ $ECHO "Execution started at  $CURRENTTIMESTAMP " | $TEE -a ${LOGFILE}	
+ $ECHO "getting list of DIM tables" | $TEE -a ${LOGFILE}
+ ${DBISQL_DWHREP} "select TYPENAME from DWHType where PARTITIONCOUNT=1 and TYPENAME like 'DIM_%';OUTPUT TO ${DIM_TABLES_WITH_DATA}" | $TEE -a ${LOGFILE}
+	if [[ $? -eq 0 ]]; then
+    $ECHO "Finished fetching DIM table names" $(date +%D-%T) | $TEE -a ${LOGFILE}
+	fi
+	COUNTTABLE=$(wc -l <${DIM_TABLES_WITH_DATA})
+	$ECHO "number of table is ${COUNTTABLE}" | $TEE -a ${LOGFILE}
+    
+	if [[ ! -s ${DIM_TABLES_WITH_DATA} ]] ; then
+		$ECHO "No DIM table present . script exiting ..." | $TEE -a ${LOGFILE}
+		exit 4		 
+	fi ;
+	
+}	
+
+#--------------------------------------------------------------------
+#Function to fetch indexes DIM tables
+#---------------------------------------------------------------------
+
+fetch_Index_for_DIMTables(){
+
+exec<${DIM_TABLES_WITH_DATA}
+	$ECHO "fetching the indexes for the topology tables" $(date +%D-%T) | $TEE -a ${LOGFILE}
+	
+		while read line
+		do
+	${DBISQL_DC} "select iname,tname from sys.sysindexes where tname = $line;OUTPUT TO ${TEMPFILE} APPEND">>${LOGFILE}	
+		done
+	if [[ $? -eq 0 ]]; then
+    $ECHO "Successfully fetched indexes for the given DIM tables " $(date +%D-%T) | $TEE -a ${LOGFILE}
+	fi
+$SED -i "s/'//g" ${TEMPFILE}
+$SED -i "s/,/ /g" ${TEMPFILE}
+COUNT=$(wc -l <${TEMPFILE})
+$ECHO "There are a total of ${COUNT} indexes" >>${LOGFILE}
+$ECHO "creating query file" |$TEE -a ${LOGFILE}
+exec< ${TEMPFILE}
+		while read iname tname 
+		do
+			$ECHO "call sp_iqrebuildindex('$tname','index $iname');">>${QUERYFILE}
+		done
+}
+
+
+#--------------------------------------------------------------------
+#Function to Rebuild indexes for DIM table 
+#--------------------------------------------------------------------
+
+retry_count=1
+checkExecutionSlot_RebuildIndex(){
+	$ECHO "Checking executionslot for topology sets"
+	flag=$(sh ${BIN_DIR}/engine -e showSetsInExecutionSlots | grep -i "DIM_"| wc -l)
+	$ECHO "topology sets in execution slot is $flag" | $TEE -a ${LOGFILE}
+	if [ ${flag} -eq 0 ]; then
+		$ECHO "No topology sets are running,rebuilding the index"| $TEE -a ${LOGFILE}
+		(${DBISQL_DC} ${QUERYFILE}) &>${FILE}
+			if [[ ! $? -eq 0 ]]; then	
+					n=$(grep -i "1 row(s) affected" ${FILE} | wc -l)
+					errorline=$(($n+1))
+					$SED -n  " ${errorline}p " ${QUERYFILE}>>${ERRORLOGFILE}
+					$SED -i " ${errorline}d " ${QUERYFILE}				
+				$ECHO "Rebuild index has failed for one index.Check the ${ERRORLOGFILE} file for details" $(date +%D-%T) | $TEE -a ${LOGFILE}	
+				$TOUCH ${ENGINE_LOG_DIR}/flag_rebuildIndexERROR
+				exit 1
+			else
+				$TOUCH ${ENGINE_LOG_DIR}/flag_rebuildIndex
+				if [ -e ${ENGINE_LOG_DIR}/flag_rebuildIndexERROR ];then
+					$RM  ${ENGINE_LOG_DIR}/flag_rebuildIndexERROR
+				fi
+				$ECHO "Rebuild index completed without any errors" $(date +%D-%T)  | $TEE -a ${LOGFILE}
+				exit 0
+			fi
+	else
+			$ECHO "Topology sets are running, waiting for 15 min" | $TEE -a ${LOGFILE}
+			sleep 900
+			$ECHO "checking exceution slots again" | $TEE -a ${LOGFILE}
+		if [ $retry_count -ne "3" ];then	
+			retry_count=$(($retry_count+1))
+			$ECHO "retry count is $retry_count" | $TEE -a ${LOGFILE}
+			checkExecutionSlot_RebuildIndex
+		else 
+			$ECHO "3 retry completed exiting..." $(date +%D-%T)| $TEE -a ${LOGFILE}
+			exit 5;
+		fi
+	fi
+	}
+
+
+#--------------------------------------------------------------------
+#MAIN PROGRAM
+#--------------------------------------------------------------------
+
+if [ ${LOGNAME} != "dcuser" ] ; then
+    echo "This script has to be run by dcuser" | $TEE -a ${LOGFILE}
+    exit 6
+else
+	check_tpInstaller
+    check_sybaseVersion
+	fetch_tableNames
+	fetch_Index_for_DIMTables
+	checkExecutionSlot_RebuildIndex
+fi

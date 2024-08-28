@@ -1,0 +1,1771 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2016 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : rolling_tp_installer
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Revision: \at_eniq\5
+# Purpose : Ericsson Network IQ Rolling Tech pack installer script
+# Usage: rolling_tp_installer -p <path_to_tech_packs> -f <tech_pack_list_file> | -t <tech_pack_name> | -c <feature_name_list_file> [-n] [-s] [-d]
+#
+# Author: Mairtin Deady
+# ********************************************************************
+
+AWK=/usr/bin/awk
+BASH=/usr/bin/bash
+CAT=/usr/bin/cat
+ECHO=/usr/bin/echo
+GEGREP=/usr/sfw/bin/gegrep
+EGREP=/usr/bin/egrep
+HOSTNAME=/usr/bin/hostname
+NAWK=/usr/bin/nawk
+RM=/usr/bin/rm
+SSH=/usr/bin/ssh
+
+### Function: usage_msg ###
+#
+#   Print out the usage message
+#
+# Arguments:
+#	none
+# Return Values:
+#	none
+usage_msg()
+{
+  $ECHO ""
+  $ECHO "Usage: `basename $0` -p <path_to_tech_packs> -c <feature_name_list_file> [-n] [-s] [-d] [-N]"
+  $ECHO "options:"
+  $ECHO "-p  : Path to the directory containing tech pack installation files."
+  $ECHO "-n  : Skip required tech pack's checking during tech pack installation."
+  $ECHO "-s  : Create snapshots before installing any tech packs."
+  $ECHO "-d  : Skip R-state check during installation."
+  $ECHO "-c  : Path to a file containing list of feature names to be installed."
+  $ECHO "-N  : Do not use the service_names file to lookup where engine is running"
+  $ECHO "      presume it's running on the same host as the $0 script is running on."
+  $ECHO "      This flag should only be set if called from eniq_core_[install|upgrade].sh scripts."
+   
+	# If -N flag is set, it is presumed the service is running locally and not
+	# under SMFs control, otherwise the /eniq/sw/conf/service_names file is used to 
+	# determine whether to call the service locally or remotely via SMF.
+	# The NMI flag should only be set when this script is called from the eniq_core_install
+	# or eniq_core_upgrade scripts.
+}
+
+failed_installation_exit()
+{
+	#Remove the locking file
+	$RM -rf ${LOCK_FILE}
+	if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+		# Tech pack installation has failed. Restore the snapshot before the tech pack installation/upgrade.
+		rollback_snapshots
+		# Delete the snapshots.
+		delete_snapshots
+	fi
+	# Unlock the dcbo and dcpublic user's from the dwh database after the installation or upgrade.
+	${INSTALLER_DIR}/change_db_users_perm.bsh -a unlock -u ALL >> ${MAIN_LOGFILE} 2>&1
+	if [ $? -ne 0 ] ; then
+		$ECHO "Failed to unlock database users.." | tee -a ${MAIN_LOGFILE}
+		
+		exit 102
+	fi
+}
+
+### Function: run_command ###
+#
+# Function to figure out what host a command should be run on
+# Stuff like svcs/smf command need to be executed on the host the service
+# is defined on, so get the host from the service_names file and ssh to that
+# host and execute the command.
+#
+# If $3 is set to 'force_local' the command get execute locally regarless of what
+# the service_names file says
+#
+# Arguments:
+#   $1 : The service to call the action on
+#	$2 : The action to call on the service
+#	$3 : Determine if the command get called locally or use the service_name 
+#		 file to see if the command need to get executed remotely
+# Return Values:
+#   none
+run_command()
+{
+	if [ $# -ne 3 ] ; then
+		$ECHO "Usage $0 <service_name> <command> [force_local|lookup]"
+		$RM ${LOCK_FILE}
+		exit 61
+	fi
+	local _service_name_filter_=$1
+	local _command_="$2"
+	local _local_remote_=$3
+	local _line_=`$CAT ${SERVICE_NAMES} | $GEGREP -v "^[[:blank:]]*#" | $EGREP ".*::.*::${_service_name_filter_}$"`
+	if [ $? -ne 0 ] ; then
+		$ECHO "No service called '${_service_name_filter_}' found in ${SERVICE_NAMES}!" | tee -a ${MAIN_LOGFILE}
+		$RM ${LOCK_FILE}
+		exit 62
+	fi
+	local _service_host_=`$ECHO $_line_ | $NAWK -F:: '{print $2}'`
+	local _service_name_=`$ECHO $_line_ | $NAWK -F:: '{print $3}'`
+	local _mapped_service_=`map_servicename_to_servicecommand "$_service_name_"`
+	local _local_hostname_=`$HOSTNAME`
+	
+	local _cmd_log_=/var/tmp/ssr.log
+	$RM -rf ${_cmd_log_}
+	local _error_=0
+	
+	# ${_local_remote_} should only be set to 'force_local' is the tp_installer script
+	# is being called from the eniq_core_install/eniq_core_upgrade scripts.
+	if [ "$_local_remote_" == "force_local" -o "$_local_hostname_" == "$_service_host_" ] ; then
+		$ECHO "Getting status for local service $_service_name_filter_ ..." >> ${MAIN_LOGFILE}
+		$ECHO "Executing command [${_command_}] on local host ${_service_host_}" >> ${MAIN_LOGFILE}
+		${_command_} > ${_cmd_log_} 2>&1
+		local _error_=$?
+		$ECHO "Return code from local command execution was ${_error_}" >> ${MAIN_LOGFILE}
+	else
+		$ECHO "Getting status for service $_service_name_filter_ on $_service_host_ ..." >> ${MAIN_LOGFILE}
+		local _etlc_user_=`iniget ETLC -f ${NIQ_INI} -v UserName`
+		local _full_command_="source ${CONF_DIR}/niq.rc ; ${_command_}"
+		$ECHO "Executing command [${_full_command_}] on remote host ${_service_host_}" >> ${MAIN_LOGFILE}
+		${SSH} ${_etlc_user_}@$_service_name_ "${_full_command_}" > ${_cmd_log_} 2>&1
+		local _error_=$?
+		$ECHO "Return code from remote command execution was ${_error_}" >> ${MAIN_LOGFILE}
+	fi
+	
+	if [ $_error_ -ne 0 ] ; then
+		$ECHO "Failed to execute status command for service '${_service_name_filter_}'" | tee -a ${MAIN_LOGFILE}
+		$CAT ${_cmd_log_} | tee -a ${MAIN_LOGFILE}
+	else
+		$CAT ${_cmd_log_}
+	fi
+	$RM -rf ${_cmd_log_} > /dev/null
+	return $_error_
+}
+
+svcs_status()
+{
+	if [ $# -ne 1 ] ; then
+		$ECHO "Usage $0 <service_name>"
+		$RM ${LOCK_FILE}
+		exit 63
+	fi
+	local _service_name_=$1
+	local _mapped_service_=`map_servicename_to_servicecommand "$_service_name_"`
+	local _status_command_="svcs -H svc:/eniq/${_mapped_service_}"
+	local _output_=`run_command $_service_name_ "${_status_command_}" lookup`
+	if [ $? -ne 0 ] ; then
+		$ECHO $_output_ | tee -a ${MAIN_LOGFILE}
+		return 1
+	fi
+	$ECHO "Result of status command: $_output_ " >> ${MAIN_LOGFILE}
+	local _status_=`$ECHO "$_output_" | tail -1 | $NAWK '{print $1}'`
+	$ECHO "$_service_name_ status is [$_status_]" >> ${MAIN_LOGFILE}
+	$ECHO $_status_
+	return $?
+}
+
+### Function: svcs_clear ###
+#
+# Clear a service in SMF
+#
+# Arguments:
+#   $1 : The service to call the action on
+# Return Values:
+#   0 : Cleared OK
+#	>=1 : Errors
+svcs_clear()
+{
+	if [ $# -ne 1 ] ; then
+		$ECHO "Usage $0 <service_name>"
+		$RM ${LOCK_FILE}
+		exit 64
+	fi
+	local _service_name_=$1
+	local _mapped_service_=`map_servicename_to_servicecommand "$_service_name_"`
+	local _clear_command_="${SMF_BIN_DIR}/eniq_service_start_stop.bsh -s $_mapped_service_ -a clear"
+	run_command "$_service_name_" "${_clear_command_}" "lookup"
+	return $?
+}
+
+### Function: ssr ###
+#
+# Start Stop Restart Function
+# e.g. ssr 'engine' 'stop'
+# e.g. ssr 'engine' 'start'
+#
+# If flag $NMI is set, it is presumed the service is running locally and not
+# under SMFs control, otherwise the /eniq/sw/conf/service_names file is used to 
+# determine whether to call the service locally or remotely via SMF.
+#
+# Arguments:
+#   $1 : The service to call the action on
+#	$2 : The action to call on the service
+# Return Values:
+#   none
+ssr()
+{
+	if [ $# -ne 2 ] ; then
+		$ECHO "Usage $0 <service_name> <start|stop>"
+		$RM ${LOCK_FILE}
+		exit 65
+	fi
+	local _service_name_filter_=$1
+	local _action_=$2
+	local _line_=`$CAT ${SERVICE_NAMES} | $GEGREP -v "^[[:blank:]]*#" | $EGREP ".*::.*::${_service_name_filter_}$"`
+	if [ $? -ne 0 ] ; then
+		$ECHO "No service called '${_service_name_filter_}' found in ${SERVICE_NAMES}!" | tee -a ${MAIN_LOGFILE}
+		exit 66
+	fi
+	local _service_host_=`$ECHO $_line_ | $NAWK -F:: '{print $2}'`
+	local _service_name_=`$ECHO $_line_ | $NAWK -F:: '{print $3}'`
+	local _mapped_service_=`map_servicename_to_servicecommand "$_service_name_"`
+	local _local_hostname_=`$HOSTNAME`
+	
+	local _lr_="lookup"
+	if [ "$NMI" ] ; then
+		local _lr_="force_local"
+	fi
+	
+	#The NMI flag is only set when called from the eniq_core_install/eniq_core_upgrade scripts
+	#Engine is running on the coordinator for installs & small upgrades so we need to ignore
+	#what the service_names file says and just assume engine is running in localhost.
+	if [ "$_local_hostname_" == "$_service_host_" ] ; then
+		_cmd_dir_=${BIN_DIR}
+		if [ "$NMI" ] ; then
+			# Called from eniq_core_install/upgrade therefore SMF is not used so use direct start/stop script
+			_cmd_dir_=${ADMIN_DIR}
+		fi
+		local _command_="${_cmd_dir_}/$_mapped_service_ $_action_"
+	else
+		local _command_="${BIN_DIR}/$_mapped_service_ $_action_"
+	fi
+	run_command $_service_name_ "${_command_}" "${_lr_}"
+	return $?
+}
+
+map_servicename_to_servicecommand()
+{
+	local _mapped_service_=$1
+	if [[ $_mapped_service_ == dwh_reader_* ]] ; then
+		_mapped_service_="dwh_reader"
+	elif [[ $_mapped_service_ == licenceservice ]] ; then
+		_mapped_service_="licmgr"
+	fi
+	$ECHO $_mapped_service_
+}
+
+
+check_ecs() {
+
+	SERVER_NAME=`/usr/bin/hostname`
+	IP_ADDRESS=`getent hosts ${SERVER_NAME} | $NAWK '{print $1}' | head -1`
+
+	ECS=`$CAT ${CONF_DIR}/service_names | grep ec_[1-2]`
+
+	# check if 'ec' service exists, if it does, then we are doing an upgrade.
+	EC_SMF=`svcs -a | grep 'eniq/ec' | $NAWK '{print $3}'`
+	if [[ "${EC_SMF}" == "svc:/eniq/ec:default" ]]; then
+		UPGRADE=true
+		$ECHO "upgrade scenario" | tee -a ${MAIN_LOGFILE}
+	else
+		UPGRADE=false
+		$ECHO "initial install scenario" | tee -a ${MAIN_LOGFILE}
+	fi
+
+	for EC in ${ECS}; do
+		CURRENTECIP=`$ECHO ${EC} | $NAWK -F"::" '{print $1}'`
+		CURRENTEC=`$ECHO ${EC} | $NAWK -F"::" '{print $3}' | $NAWK -F\_ '{print $NF}'`
+	
+		# first check if EC is already online, if it is, then we have nothing more to do for that ec.
+		STATUS=`${MZ_HOME}/bin/mzsh status EC${CURRENTEC}`
+		if [[ "${STATUS}" != "EC${CURRENTEC} is running" ]]; then
+
+			# check if ec is 'supposed' to be on a different server than coordinator
+			if [[ ${CURRENTECIP} != ${IP_ADDRESS} ]]; then
+				$ECHO "EC${CURRENTEC} is to run on remote host: ${CURRENTECIP}" | tee -a ${MAIN_LOGFILE}
+				# are we upgrading, if so...
+				if [[ ${UPGRADE} == "true" ]]; then
+					# remote execute this ec (/eniq/sw/bin/ec)
+					$ECHO "Onlining EC${CURRENTEC} on remote host: ${CURRENTECIP} (ec)" | tee -a ${MAIN_LOGFILE}
+					remote_tp_ec "${CURRENTECIP}" "source ${HOME}/.profile;\${BIN_DIR}/ec start"		
+				else
+					# not upgrade, ec service doesn't exist, neither does mz server at this point.
+					$ECHO "Initial install detected. Onlining EC${CURRENTEC} on coordinator. (mzsh)" | tee -a ${MAIN_LOGFILE}
+					${MZ_HOME}/bin/mzsh startup EC${CURRENTEC} | tee -a ${MAIN_LOGFILE}
+				fi
+			else
+				$ECHO "EC${CURRENTEC} is to run on local host: ${CURRENTECIP}" | tee -a ${MAIN_LOGFILE}
+				# are we upgrading, if so...
+				if [[ ${UPGRADE} == "false" ]]; then
+					# online (/eniq/sw/bin) [EC1 only]
+					if [[ "${CURRENTEC}" -eq 1 ]]; then
+						$ECHO "Initial install detected. Onlining EC${CURRENTEC} on coordinator. (ec)" | tee -a ${MAIN_LOGFILE}
+						${BIN_DIR}/ec start | tee -a ${MAIN_LOGFILE}
+					else
+						# if this is EC2+, then this is a non-supported standalone/FT environment and
+						# EC2 will have no service on this machine as there is only one ec SMF service per supported server
+						# so to handle 2 EC's on FT server, online 2nd and subsequent EC's via Dr's mzsh script outside of SMF. (mzsh)
+						$ECHO "FT deployment detected. Additional EC EC${CURRENTEC} will be onlined on coordinator. (mzsh)" | tee -a ${MAIN_LOGFILE}
+						${MZ_HOME}/bin/mzsh startup EC${CURRENTEC} | tee -a ${MAIN_LOGFILE}
+					fi
+				else
+					$ECHO "Initial install detected. Onlining EC${CURRENTEC} on coordinator. (mzsh)" | tee -a ${MAIN_LOGFILE}
+					${MZ_HOME}/bin/mzsh startup EC${CURRENTEC} | tee -a ${MAIN_LOGFILE}
+				fi
+			fi
+		else
+			$ECHO "EC${CURRENTEC} is already online." | tee -a ${MAIN_LOGFILE}
+		fi
+	done
+}
+
+remote_tp_ec() {
+	IPADDRESS=${1}
+	COMMAND=${2}
+	
+	$ECHO "Trying to Execute Mediation Gateway Command : ${COMMAND} on host ${IPADDRESS}" | tee -a ${MAIN_LOGFILE}	
+	${JAVA_HOME}/bin/java -d64 -classpath ${CPATH} com.ericsson.eniq.common.RemoteExecutor dcuser "${IPADDRESS}" "${COMMAND}" | tee -a ${MAIN_LOGFILE}
+
+	$ECHO "command returned: ${?}" | tee -a ${MAIN_LOGFILE}
+	
+}
+
+
+_pad_zeros_() {
+    if [ "${1}" -le "9" ] ; then
+        #need to insert a zero if less than 10
+        findex="0"${1}
+    else
+       findex=${1}
+    fi
+    $ECHO "${findex}"
+}
+
+
+
+getConfigurationsForMzTP(){
+        WFPKG=${1}
+	#M_E_SGEH techpack
+	if [[ "${WFPKG}" == "M_E_SGEH" ]] ;
+	then
+		# check to see are we upgrading techpack from old configuration, can be removed when EE11.3 Sh1.3.7 is no longer on supported upgrade path
+		###### SUPPORT OLD TECHPACK CONFIG BEGIN #####
+		if [[ -f /eniq/mediation_inter/bin/provision_workflows.sh ]] ; then
+			$ECHO "Copying old ${WFPKG} configurations to new location" | tee -a ${MAIN_LOGFILE}
+			mkdir -p /eniq/mediation_inter/M_E_SGEH/etc
+			mkdir -p /eniq/mediation_inter/M_E_SGEH/bin
+			cp /eniq/mediation_inter/etc/configuration.prop /eniq/mediation_inter/M_E_SGEH/etc/configuration.prop
+			# TODO: install.xml in techpack should be responsible for removing old configurations
+			# and dirs after workflows are imported so we dont fall in here again
+
+			# Intermediate directories
+			INTERMEDIATE_DIRECTORIES="INTER_FOLDER_"
+			# Sybase binary directories
+			###### SUPPORT OLD TECHPACK CONFIG END #####
+			PRE_PROCESSING_WG="SGEH.WG01*"
+			PRE_PROCESSING_WF="SGEH.WF01*"
+			PROCESSING_WG="SGEH.WG02*"
+			PROCESSING_WF="SGEH.WF02*"
+			LOG_PARSING_WG="SGEH.WG00*"
+			LOG_PARSING_WF="SGEH.WF00*"
+		else
+			# new configurations for MZ techpacks
+			$ECHO "Getting ${WFPKG} configuration info" | tee -a ${MAIN_LOGFILE}
+			source /eniq/mediation_inter/${WFPKG}/etc/tp.prop
+		fi
+	fi
+
+	if [[ "${WFPKG}" == "M_E_GSN" ]] ;
+	then
+		# check to see are we upgrading techpack from old configuration, can be removed when EE11.3 Sh1.3.7 is no longer on supported upgrade path
+		###### SUPPORT OLD TECHPACK CONFIG BEGIN #####
+		if [[ -f /eniq/mediation_inter/bin/dvtp_populate.sh ]] ; then
+
+			$ECHO "Copying old ${WFPKG} configurations to new location" | tee -a ${MAIN_LOGFILE}
+			mkdir -p /eniq/mediation_inter/M_E_GSN/etc
+			mkdir -p /eniq/mediation_inter/M_E_GSN/bin
+			cp /eniq/mediation_inter/etc/configuration_dvtp.prop /eniq/mediation_inter/M_E_GSN/etc/configuration.prop
+			# TODO: install.xml in techpack should be responsible for removing old configurations
+			# and dirs after workflows are imported so we dont fall in here again
+
+			# Intermediate directories
+			INTERMEDIATE_DIRECTORIES="INTER_FOLDER_"
+			# Sybase binary directories
+			PROCESSING_WG=`${MZ_HOME}/bin/mzsh ${MZADMIN} wfgrouplist DVTP.WG02_Processing* -mode E | cut -f1 -d" " | grep DVTP.WG02_Processing`
+			PRE_PROCESSING_WG=`${MZ_HOME}/bin/mzsh ${MZADMIN} wfgrouplist DVTP.WG01_PreProcessing* -mode E | cut -f1 -d" " | grep DVTP.WG01_PreProcessing`
+
+			$ECHO "Pre Processing WG = ${PRE_PROCESSING_WG}"
+
+			PRE_PROCESSING_WF="DVTP.WF01*"
+			PROCESSING_WF="DVTP.WF02*"
+			LOG_PARSING_WG="DVTP.WG04*"
+			LOG_PARSING_WF="DVTP.WF04*"
+
+		else
+			# new configurations for MZ techpacks
+			$ECHO "Getting ${WFPKG} configuration info" | tee -a ${MAIN_LOGFILE}
+			source /eniq/mediation_inter/${WFPKG}/etc/tp.prop
+		fi
+	fi
+
+	if [[ "${WFPKG}" == "M_E_MSS" ]] ;
+	then
+		# check to see are we upgrading techpack from old configuration, can be removed when EE11.3 Sh1.3.7 is no longer on supported upgrade path
+		###### SUPPORT OLD TECHPACK CONFIG BEGIN #####
+		if [[ -f /eniq/mediation_inter/bin/mss_populate.sh ]] ; then
+			$ECHO "Copying old ${WFPKG} configurations to new location" | tee -a ${MAIN_LOGFILE}
+			mkdir -p /eniq/mediation_inter/M_E_MSS/etc
+			mkdir -p /eniq/mediation_inter/M_E_MSS/bin
+			cp /eniq/mediation_inter/etc/configuration_MSS.prop /eniq/mediation_inter/M_E_MSS/etc/configuration.prop
+			# TODO: install.xml in techpack should be responsible for removing old configurations
+
+			# Intermediate directories
+			INTERMEDIATE_DIRECTORIES="INTER_FOLDER_"
+			# Sybase binary directories
+			PRE_PROCESSING_WG="MSS.WG01*"
+			PRE_PROCESSING_WF="MSS.WF01*"
+			PROCESSING_WG="MSS.WG02*"
+			PROCESSING_WF="MSS.WF02*"
+			LOG_PARSING_WG="MSS.WF00*"
+			LOG_PARSING_WF="MSS.WF00*"
+
+			###### SUPPORT OLD TECHPACK CONFIG END #####
+		else
+			# new configurations for MZ techpacks
+			$ECHO "Getting ${WFPKG} configuration info" | tee -a ${MAIN_LOGFILE}
+			source /eniq/mediation_inter/${WFPKG}/etc/tp.prop
+		fi
+	fi
+	
+	if [[ "${WFPKG}" == "M_E_GPEH" ]];
+	then
+		$ECHO "Getting ${WFPKG} configuration info" | tee -a ${MAIN_LOGFILE}
+		source /eniq/mediation_inter/${WFPKG}/etc/tp.prop
+	fi
+	
+	if [[ "${WFPKG}" == "M_E_LTEEFA" ]];
+	then
+		$ECHO "Getting ${WFPKG} configuration info" | tee -a ${MAIN_LOGFILE}
+		source /eniq/mediation_inter/${WFPKG}/etc/tp.prop
+	fi
+	
+	if [[ "${WFPKG}" == "M_E_GSMEFA" ]]; 
+	then
+		$ECHO "Getting ${WFPKG} configuration info" | tee -a ${MAIN_LOGFILE}
+		source /eniq/mediation_inter/${WFPKG}/etc/tp.prop
+	fi	
+
+}
+
+# ${1} workflow match pattern e.g. SGEH.WF02*
+stop_workflows() {
+    wfMatchPattern=${1}
+    #_check_arg_defined_ $LINENO 'wf pattern match' ${wfMatchPattern} 'stop_workflows'
+
+	# filter out error message that tells us we have 5.0 workflows while mediation zone is 5.1 (mz issue/bug), as they may not be upgraded yet.
+    wfCountToDisable=`${MZSH} "${MZADMIN}" "wflist" "${wfMatchPattern}" | grep -v "Sever error: Unable to retrive workflows from the configuration" | wc -l | $NAWK '{print $1}'`
+    $ECHO "Disabling [${wfCountToDisable}] workflow(s)" | tee -a ${MAIN_LOGFILE}
+    ##Disable and stop them all
+    ${MZSH} "${MZADMIN}" "${WFDISABLE}" "${wfMatchPattern}" > /dev/null
+    ${MZSH} "${MZADMIN}" "${WFSTOP}" "-immediate" "${wfMatchPattern}" > /dev/null
+
+    #Do it again to check they're disabled....
+    disabled=${TMP_PRE}dis.txt
+    ${MZSH} ${MZADMIN} ${WFDISABLE} ${wfMatchPattern} > ${disabled}
+	sleep 2
+
+    lookText=": Already disabled "
+    disCount=`grep -c "${lookText}" ${disabled}`
+    while [ "${disCount}" -ne "${wfCountToDisable}" ] ; do
+        ${MZSH} "${MZADMIN}" "${WFDISABLE}" "${wfMatchPattern}" > ${disabled}
+        disCount=`grep -c "${lookText}" ${disabled}`
+        if [ "${disCount}" != "${wfCountToDisable}" ] ; then
+            aaaaaaai=`expr ${wfCountToDisable} - ${disCount}`
+            $ECHO -e "\tWaiting on [${aaaaaaai}] workflows to stop" | tee -a ${MAIN_LOGFILE}
+            cat ${disabled} >> ${MAIN_LOGFILE}
+            sleep 5
+        fi
+    done
+    rm ${disabled}
+    $ECHO -e "\tDisabled workflows matching ${wfMatchPattern}" | tee -a ${MAIN_LOGFILE}
+
+    $ECHO -e "\tDisabled all workflow(s)" | tee -a ${MAIN_LOGFILE}
+    return 0
+}
+
+# ${1} workflow group match pattern e.g. SGEH.WG02*
+stop_workflow_group() {
+    wfgroupMatchPattern=${1}
+    #_check_arg_defined_ $LINENO 'wg pattern match' ${wfgroupMatchPattern} 'stop_workflow_group'
+
+    wfgroupCountToDisable=0
+
+    if [ "${wfgroupMatchPattern}" != "" ] ; then
+    wfgroupCountToDisable=`${MZSH} "${MZADMIN}" "wfgrouplist" "${wfgroupMatchPattern}" | grep "${wfgroupMatchPattern}" | wc -l | $NAWK '{print $1}'`
+    fi
+
+    $ECHO "Disabling [${wfgroupCountToDisable}] workflow group(s)" | tee -a ${MAIN_LOGFILE}
+    ##Disable
+
+    if [ "${wfgroupMatchPattern}" != "" ] ; then
+
+    ${MZSH} "${MZADMIN}" "${WFGROUPDISABLE}" "${wfgroupMatchPattern}" > /dev/null
+
+    $ECHO -e "\tDisabled workflow groups matching ${wfgroupMatchPattern}" | tee -a ${MAIN_LOGFILE}
+    fi
+
+    return 0
+}
+
+
+
+
+# $1 regex expression to use to get the list of directories to check
+# $2 The directory prefix
+# e.g. wait_for_dirs_to_empty '^INTER_FOLDER_[0-9]\{2\}' 'INTER_FOLDER_'
+wait_for_dirs_to_empty() {
+    match_string=${1}
+    source_prefix=${2}
+    #_check_arg_defined_ $LINENO 'match_string' ${match_string} 'wait_for_dirs_to_empty'
+    #_check_arg_defined_ $LINENO 'source_prefix' ${source_prefix} 'wait_for_dirs_to_empty'
+
+    $ECHO "Looking for ${match_string} using prefix ${source_prefix}" >> ${MAIN_LOGFILE}
+    tmpfile=${TMP_PRE}inter.$$
+    /usr/xpg4/bin/grep "^${match_string}" "/eniq/mediation_inter/${WFPKGNAME}/etc/configuration.prop" > ${tmpfile}
+
+    inter_dirs=`wc -l ${tmpfile} | $NAWK '{print $1}'`
+
+    $ECHO "Need to check ${inter_dirs} directories" | tee -a ${MAIN_LOGFILE}
+    . ${tmpfile}
+    $RM -rf ${tmpfile}
+
+	#array to hold the files per inter_dirs
+    declare -a fileNumbers
+    
+    #file number not changed execution number count
+    noChangeCount=0
+	
+    i=0
+    while [ "${i}" -lt ${inter_dirs} ] ; do
+        padded=`_pad_zeros_ ${i}`
+        _dir=${source_prefix}${padded}
+        eval dir_to_check=\$$_dir
+        $ECHO "Checking Directory ${_dir} --> ${dir_to_check}" >> ${MAIN_LOGFILE}
+		fileNumbers[$i]=0
+        i=`expr ${i} + 1`
+    done
+      all_empty="false"
+    while [ "${all_empty}" != "true" ] ; do
+        all_empty="true"
+        i=0
+		#0 - changed, 1- no change
+        noChange=1
+        while [ "${i}" -lt ${inter_dirs} ] ; do
+            padded=`_pad_zeros_ ${i}`
+            _dir_var=${source_prefix}${padded}
+            eval dir_to_check=\$$_dir_var
+            filecount=`ls -l ${dir_to_check} | grep -v '^d' | grep -v "total" | wc -l | $NAWK '{print $1}'`
+            if [ "${filecount}" -ne "${fileNumbers[$i]}" ]; then
+                #assign the new value to the array
+                fileNumbers[$i]=${filecount}
+                
+                #set the no change flag to changed
+                noChange=0
+            
+            fi
+			if [ "${filecount}" -ne "0" ] ; then
+                $ECHO "Directory ${dir_to_check}/ is not empty, still contains ${filecount} file(s)." | tee -a ${MAIN_LOGFILE}
+                all_empty="false";
+                # Run old loaders in database to clear backlog
+                ${RT_DIR}/ant/bin/ant -f tasks_tp_installer.xml -lib ${CPATH} -Dcurrent_working_directory=${CURRENT_WORKING_DIRECTORY} -DtechpackName="MediationTechpack" run_old_Loaders >> ${MAIN_LOGFILE}
+            fi
+            i=`expr ${i} + 1`
+        done
+        if [ "${noChange}" -eq "1" ]; then
+            noChangeCount=$((noChangeCount+1))
+        else
+            noChangeCount=0
+        fi
+                
+        if [ "${noChangeCount}" -ge "20" ]; then
+            
+            $ECHO "inter file numbers haven't changed for a while, force to delete the files" | tee -a ${MAIN_LOGFILE}
+            
+            i=0
+            while [ "${i}" -lt ${inter_dirs} ] ; do
+            
+                if [ "${fileNumbers[$i]}" -gt "0" ]; then
+                    padded=`_pad_zeros_ ${i}`
+                    _dir=${source_prefix}${padded}
+                    eval dir_to_check=\$$_dir
+                    $ECHO "force deletion of directory ${dir_to_check}" >> ${MAIN_LOGFILE}
+                    `find ${dir_to_check} -type f | grep -v DR_TMP_DIR | xargs rm -rf`
+                    if [ "$?" -ne "0" ]; then
+                        all_empty="false"
+                    fi                        
+                        
+                fi
+                
+                i=`expr ${i} + 1`
+            done
+            
+            all_empty="true"
+        else 
+            sleep 5            
+        fi
+    done
+}
+
+stop_wf_preprocessing() {
+#By this time it is assumed that corresponding tp.prop and configuration.prop files are sourced
+    $ECHO "Stopping PreProcessing" | tee -a ${MAIN_LOGFILE}
+    $ECHO "${PRE_PROCESSING_WF}"
+    $ECHO "${PRE_PROCESSING_WG}"
+    stop_workflow_group "${PRE_PROCESSING_WG}"
+    stop_workflows "${PRE_PROCESSING_WF}"
+    disStatus=${?}
+    if [ ${disStatus} -ne 0 ] ; then
+        return ${disStatus}
+    fi
+
+	for interDirStringToCheck in $INTERMEDIATE_DIRECTORIES
+	do
+		interFolderPrefix="$interDirStringToCheck[0-9]\{2\}"
+		wait_for_dirs_to_empty $interFolderPrefix $interDirStringToCheck
+		if [  $? -ne 0 ] ; then
+			return 1
+		fi
+	done
+
+	#If it comes here then all the directories are empty. return 0.
+    $ECHO "All Preprocessing directories are empty" | tee -a ${MAIN_LOGFILE}
+    return 0
+}
+
+# Stop Processing 
+stop_wf_processing() {
+#By this time it is assumed that corresponding tp.prop file and configuration.prop files are sourced
+    $ECHO "Stopping Processing" | tee -a ${MAIN_LOGFILE}
+    $ECHO "Stopping Events Processing" | tee -a ${MAIN_LOGFILE}
+    stop_workflow_group "${LOG_PARSING_WG}"
+    stop_workflows "${LOG_PARSING_WF}"
+    stop_workflow_group "${PROCESSING_WG}"
+    stop_workflows "${PROCESSING_WF}"
+    disStatus=${?}
+    if [ ${disStatus} -ne 0 ] ; then
+		return ${disStatus}
+    fi
+
+    return 0
+}
+
+upgrade_wf_techpacks() {
+    wfListFile=${1}
+    $ECHO "Installing Workflow TechPacks" | tee -a ${MAIN_LOGFILE}
+    for name in `$CAT ${wfListFile}` ; do
+        $ECHO "Installing ${name}" | tee -a ${MAIN_LOGFILE}
+        install_tpi ${name} false
+        instStatus=${?}
+        if [ ${instStatus} -ne 0 ] ; then
+            return ${instStatus}
+        fi
+    done
+    $ECHO "Workflow TechPacks Installed" | tee -a ${MAIN_LOGFILE}
+    return 0
+}
+
+install_wf_techpack() {
+    WFTP=${1}
+	CheckForPreviousMzTPInstallation=${2}
+    $ECHO "Installing Workflow TechPack ${WFTP}" | tee -a ${MAIN_LOGFILE}
+
+    install_tpi ${WFTP} false ${CheckForPreviousMzTPInstallation}
+    instStatus=${?}
+    if [ ${instStatus} -ne 0 ] ; then
+        return ${instStatus}
+    fi
+
+    $ECHO "Workflow TechPack ${WFTP} Installed" | tee -a ${MAIN_LOGFILE}
+    return 0
+}
+
+
+failed_installation_exit(){
+
+        if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+          # Tech pack installation has failed. Restore the snapshot before the tech pack installation/upgrade.
+          rollback_snapshots
+          # Delete the snapshots.
+          delete_snapshots
+        fi
+        ${INSTALLER_DIR}/change_db_users_perm.bsh -a unlock -u ALL -l ${MAIN_LOGFILE}
+        #Remove the locking file
+        $RM ${LOCK_FILE}
+
+}
+
+install_tpi() {
+
+	name=${1}
+	checkRequired=${2}
+	CheckForPreviousMzTPInstall=${3}
+	$ECHO ""
+    $ECHO "Starting to install techpack ${name}" | tee -a ${MAIN_LOGFILE}
+
+    if [ -d $INSTALLER_DIR/tp_installer_temp ] ; then
+        $RM -r $INSTALLER_DIR/tp_installer_temp
+    fi
+
+    mkdir $INSTALLER_DIR/tp_installer_temp
+    mkdir $INSTALLER_DIR/tp_installer_temp/temp
+    mkdir $INSTALLER_DIR/tp_installer_temp/unzipped_tp
+
+    cp ${TP_DIR_PATH}/${name}*  $INSTALLER_DIR/tp_installer_temp/temp
+    TECH_PACK_FILE_PATH=""
+    TECH_PACK_FILENAME=""
+
+    TPI_FILE=`ls $INSTALLER_DIR/tp_installer_temp/temp`
+
+	if [ -z "${TPI_FILE}" ] ; then
+		$ECHO "File ${TP_DIR_PATH}/${name}* not found !! Exiting from script.." | tee -a ${MAIN_LOGFILE}
+		#call method to exit..
+		failed_installation_exit
+		exit 41
+	fi
+
+    for file in $TPI_FILE
+    do
+        TECH_PACK_FILENAME=$file
+    done
+
+    TP_TIMESTAMP=`date +%Y.%m.%d_%H:%M:%S`
+
+    TP_LOGFILE=${LOG_DIR}/tp_installer/${TP_TIMESTAMP}_${TECH_PACK_FILENAME}.log
+
+    touch ${TP_LOGFILE}
+
+    $ECHO "Installing ${TECH_PACK_FILENAME}" | tee -a ${MAIN_LOGFILE}
+
+    ${RT_DIR}/ant/bin/ant -f tasks_install_utils.xml -lib ${CPATH} -logfile /tmp/unzipresult -Ddc.installer.dir=${INSTALLER_DIR} -Dcurrent_working_directory=${CURRENT_WORKING_DIRECTORY} -Dtech_pack_file_name=${TECH_PACK_FILENAME} unzip_tech_pack_file >> ${MAIN_LOGFILE}
+	_unzip_=$?
+	$CAT /tmp/unzipresult >> ${MAIN_LOGFILE}
+	if [ $_unzip_ -ne 0 ] ; then
+		$RM -rf /tmp/unzipresult
+		$ECHO "Unzipping ${TECH_PACK_FILENAME} failed. See log file ${MAIN_LOGFILE} for details." | tee -a ${MAIN_LOGFILE}
+		failed_installation_exit
+        exit 36
+	fi
+    if [ -f /tmp/unzipresult ] ; then
+      $CAT /tmp/unzipresult | grep "BUILD SUCCESSFUL" > /dev/null
+	  _success_=$?
+      $RM -rf /tmp/unzipresult
+      if [ ${_success_} -ne 0 ] ; then
+        $ECHO "Unzipping of ${TECH_PACK_FILENAME} failed. See log file ${MAIN_LOGFILE} for details." | tee -a ${MAIN_LOGFILE}
+		#call exit method..
+		failed_installation_exit
+        exit 37
+      fi
+    fi
+
+    $ECHO "Techpack extracted" | tee -a ${MAIN_LOGFILE}
+
+    # Start the actual tech pack installation/upgrade.
+    $ECHO "Executing install steps for ${TECH_PACK_FILENAME}" | tee -a ${MAIN_LOGFILE}
+    ${RT_DIR}/ant/bin/ant -f tasks_tp_installer.xml -lib ${CPATH} -logfile ${TP_LOGFILE} -Dcurrent_working_directory=${CURRENT_WORKING_DIRECTORY} -DcheckForRequiredTechPacks=${checkRequired} -DforceInstall=${FORCE_INSTALL} -Dtech_pack_filename=${TECH_PACK_FILENAME} -DconfigurationDirectory=${CONF_DIR} -Ddc.platform.dir=${PLATFORM_DIR} -Ddc.installer.dir=${INSTALLER_DIR} -DbinDirectory=${BIN_DIR} -Dmz.home=${MZ_HOME} -Dmediation.inter=${MEDIATION_INTER} -Dtpdir=${TP_DIR_PATH} -DCheckPrevMzTPInstall=${CheckForPreviousMzTPInstall}
+
+    if [ -f ${TP_LOGFILE} ] ; then
+      FAIL=`$CAT ${TP_LOGFILE} | grep "BUILD FAILED"`
+      if [ -n "${FAIL}" ] ; then
+		  if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+			# Tech pack installation has failed. Restore the snapshot before the tech pack installation/upgrade.
+			rollback_snapshots
+			# Delete the snapshots.
+			delete_snapshots
+		  fi
+		  # Unlock the dcbo and dcpublic user's from the dwh database after the installation or upgrade.
+		  ${INSTALLER_DIR}/change_db_users_perm.bsh -a unlock -u ALL -l ${MAIN_LOGFILE}
+      	  License=`$CAT ${TP_LOGFILE} | grep "This techpack will not be installed. Please check the validity of the license"`
+			if [ -n "${License}" ] ; then
+				$ECHO "This techpack ${TECH_PACK_FILENAME} will not be installed due to INVALID LICENSE. " | tee -a ${MAIN_LOGFILE}
+				return 10
+		    else
+				$ECHO " BUILD FAILED " | tee -a ${MAIN_LOGFILE}
+				return 38
+			fi 
+    fi
+    fi
+
+    $CAT ${TP_LOGFILE}
+    if [ -f ${TP_LOGFILE} ] ; then
+      SUC=`$CAT ${TP_LOGFILE} | grep "BUILD SUCCESSFUL"`
+	  if [ -n "${SUC}" ] ; then
+      	PrevInstall=`cat ${TP_LOGFILE} | grep "Checking for previous installed MZ techpack - Successfully completed. This techpack will not be installed."`
+      	if [ -n "${PrevInstall}" ] ; then
+	    	$ECHO "This MZ TechPack will not be installed. Please check the version of installing techpack with already installed." | tee -a ${MAIN_LOGFILE}
+			return 99
+		fi
+	  fi
+      if [ -z "${SUC}" ] ; then
+		$ECHO "Installation failed. See log file ${TP_LOGFILE} for details." | tee -a ${MAIN_LOGFILE}
+        if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+          # Tech pack installation has failed. Restore the snapshot before the tech pack installation/upgrade.
+          rollback_snapshots
+          # Delete the snapshots.
+          delete_snapshots
+        fi
+        return 39
+	fi
+    fi
+    $ECHO "${TECH_PACK_FILENAME} installed succesfully" | tee -a ${MAIN_LOGFILE}
+    return 0
+} #End of install_tpi
+
+get_tp_install_order() {
+    tpNameFile=${1}
+    outputFile=${2}
+	
+    ${RT_DIR}/ant/bin/ant -f tasks_install_utils.xml -lib ${CPATH} -Ddc.installer.dir=${INSTALLER_DIR} -DcheckForRequiredTechPacks=${CHECK_FOR_REQUIRED_TECH_PACKS} -Dlistfile=${tpNameFile} -Dtpdir=${TP_DIR_PATH} orderer > ${outputFile} 2>&1
+    $CAT ${orderFile}
+    if [ -f ${orderFile} ] ; then
+        SUC=`$CAT ${orderFile} | grep "BUILD SUCCESSFUL"`
+        if [ -z "${SUC}" ] ; then
+            $ECHO "Error in install orderer. Installation failed." | tee -a ${MAIN_LOGFILE}
+            #Remove the locking file
+            $RM ${LOCK_FILE}
+            exit 42
+        fi
+    fi
+}
+
+update_executioncontext () {
+	if [ -f ${EC_MEM_SCRIPT} ] ; then
+		$ECHO `date +%Y.%m.%d_%H:%M:%S` " : Calling the executioncontext update script to define ec memory" | tee -a ${MAIN_LOGFILE}
+		var=`perl $EC_MEM_SCRIPT 2>&1`
+		if [ $? -ne 0 ] ; then
+			$ECHO `date +%Y.%m.%d_%H:%M:%S` " : Failed to update the executioncontext.xml correctly. Please check the ec settings on the server." | tee -a ${MAIN_LOGFILE}
+		else
+			$ECHO `date +%Y.%m.%d_%H:%M:%S` " : executioncontext update complete" | tee -a ${MAIN_LOGFILE}
+		fi
+	else
+		$ECHO "ENIQ Stats box. No need to run the ec script"
+
+	fi
+}
+
+shutdown_mz(){
+	# MZ will not exist on ENIQ Stats/SON, this is why this check is necessary
+	if [ -f ${MZSH} ] ; then
+		EC_SMF_STATUS=`svcs -a | grep 'eniq/ec:default' | $NAWK '{print $1}'`
+		# If SMF status of EC is 'disabled',shutdown EC
+		if [ "${EC_SMF_STATUS}" == "disabled" ]; then
+			$ECHO "Shutting down EC1" | tee -a ${MAIN_LOGFILE}
+			${MZSH} "${MZADMIN}" "shutdown" "EC1" > /dev/null
+		fi
+		 # Shutting down Platform and EC to avoid the "cannot unmount '/eniq/mgdb': Device busy" message during install
+		if [[ "${DoingUpgrade}" -eq 0 ]] ; then
+			$ECHO "Shutting down Platform and EC1" | tee -a ${MAIN_LOGFILE}
+			${MZSH} "${MZADMIN}" "shutdown" "EC1" > /dev/null
+			${MZSH} "${MZADMIN}" "shutdown" "Platform" > /dev/null
+		fi
+	fi
+}
+
+install_upgrade_techpacks(){
+	tp_file_name=${1}
+	tpinstallResult=0
+    tp_name=`${ECHO} ${tp_file_name} | $NAWK -F"_R${tp_file_name##*_R}" '{print $1}'`
+	
+	if [[ ("${name}" =~ ^${monitorname}* && -n ${MONITORUPGRADED}) || ("${name}" =~ ^${basename}*) && (-n ${BASEUPGRADED}) || ("${name}" =~ ^${eventsbasename}*) && (-n ${EVENTSBASEUPGRADED}) ]] ; then
+		#It is a non-feature teck pack that is already upgrade, or skipped, by install_tpi. Skip it now and go to next tech pack
+		$ECHO "Skipping ${tp_file_name} as upgrade already attempted." > >(tee -a ${MAIN_LOGFILE})
+		tpinstallResult=1
+		return ${tpinstallResult};
+	fi
+	
+	# install_tpi will restore snapshots...
+	install_tpi ${tp_file_name} ${CHECK_FOR_REQUIRED_TECH_PACKS}
+	tpinstallResult=${?}
+	
+	
+	if [ ${tpinstallResult} -eq 10 ] ; then
+		tpinstallResult=0
+		$ECHO "This techpack ${tp_file_name} will not be installed due to INVALID LICENSE. " | tee -a ${MAIN_LOGFILE}	
+	else 
+		if [ ${tpinstallResult} -ne 0 ] ; then
+			$ECHO "This techpack ${tp_file_name} failed to install ." | tee -a ${MAIN_LOGFILE}
+			# Rolling back repdb
+			${BACKUP_SCRIPTS_DIR}/repdb_restore.bsh -a active
+
+			if [ ${?} -eq 0 ] ; then
+				$ECHO "repdb restored successfully" | tee -a ${MAIN_LOGFILE}
+			else
+				$ECHO "repdb could not be restored successfully" | tee -a ${MAIN_LOGFILE}
+			fi
+		fi
+	fi
+	
+	if [ -f ${INSTALLER_DIR}/installed_artifacts ] ; then 
+		if [ -s ${INSTALLER_DIR}/installed_artifacts ] ; then
+			last_upgraded=$(tail -1 ${INSTALLER_DIR}/installed_artifacts)
+			$ECHO  "The last tech pack upgraded was ${last_upgraded}." 
+		else
+			$ECHO "No tech packs upgraded so far for ${feature}."
+		fi
+	else
+		$ECHO "Could not find ${INSTALLER_DIR}/installed_artifacts"
+		if [[ ("${tp_name}" =~ ^${monitorname}* || "${tp_name}" =~ ^${basename}* || "${tp_name}" =~ ^${eventsbasename}*) ]] ; then
+			#It's a non-feature tech pack but we don't know if it was upgrade just now or skipped, so we don't know if we should run reloadProfiles bellow. So we need to fail the upgrade.
+			tpinstallResult=1
+		fi
+	fi
+	
+	
+	# If installing base teckpack (of either events or stats), start the execution profiler set. 
+	# The base techpacks already run the ExecutionProfiler task.
+	# Make sure basename is unset.
+	if [[ ("${tp_name}" =~ ^${basename}* || "${tp_name}" =~ ^${eventsbasename}*) && ("${tp_file_name}" == ${last_upgraded}) ]] ; then
+		$ECHO  "Getting engine to run execution profiler action..." | tee -a ${MAIN_LOGFILE}
+		$ECHO  "${BIN_DIR}/engine -e startAndWaitSet $tp_name ExecutionProfiler" > >(tee -a ${MAIN_LOGFILE})
+		${BIN_DIR}/engine -e startAndWaitSet $tp_name ExecutionProfiler > >(tee -a ${MAIN_LOGFILE})
+		if [ $? -ne 0 ] ; then
+			$ECHO "Failed to get engine to run execution profiler action..." | tee -a ${MAIN_LOGFILE}
+			tpinstallResult=1
+		fi
+	fi
+	#If it's a non-feature tech pack then reload profiles, reload config, and enable sets of the tech pack.
+	if [[ ("${tp_name}" =~ ^${monitorname}* || "${tp_name}" =~ ^${basename}* || "${tp_name}" =~ ^${eventsbasename}*) ]] ; then
+		#If tech pack has actually been upgraded (rather than skipped)
+		if [ "${tp_file_name}" == "${last_upgraded}" ] ; then
+			$ECHO "${BIN_DIR}/engine -e reloadProfiles"  > >(tee -a ${MAIN_LOGFILE})
+			${BIN_DIR}/engine -e reloadProfiles >> ${MAIN_LOGFILE}  > >(tee -a ${MAIN_LOGFILE})
+			if [ $? -ne 0 ] ; then
+				$ECHO "Failed to get engine to reload its profiles ..." | tee -a ${MAIN_LOGFILE}
+				tpinstallResult=1
+			fi
+			$ECHO "${BIN_DIR}/engine -e reloadConfig"  > >(tee -a ${MAIN_LOGFILE})
+			${BIN_DIR}/engine -e reloadConfig >> ${MAIN_LOGFILE}  > >(tee -a ${MAIN_LOGFILE})
+			if [ $? -ne 0 ] ; then
+				$ECHO "Failed to get engine to reload properties ..." | tee -a ${MAIN_LOGFILE}
+				tpinstallResult=1
+			fi
+		fi
+		$ECHO "${BIN_DIR}/engine -e enableSet ${tp_name} -d" | tee -a ${MAIN_LOGFILE}
+		${BIN_DIR}/engine -e enableSet "${tp_name}" -d | tee -a ${MAIN_LOGFILE}
+		$ECHO "${BIN_DIR}/scheduler activate" | tee -a ${MAIN_LOGFILE}
+		${BIN_DIR}/scheduler activate | tee -a ${MAIN_LOGFILE}
+	fi
+	
+	if [[ ("${tp_name}" =~ ^${monitorname}* && -z ${MONITORUPGRADED}) ]] ; then
+		MONITORUPGRADED="yes" #Indicates that upgrade of monitor tech pack was attempted (but not necessarily upgraded)
+	elif [[ ("${tp_name}" =~ ^${basename}* && -z ${BASEUPGRADED}) ]] ; then
+		BASEUPGRADED="yes" #Indicates that upgrade of base tech pack was attempted (but not necessarily upgraded)
+	elif [[ ("${tp_name}" =~ ^${eventsbasename}* && -z ${EVENTSBASEUPGRADED}) ]] ; then
+		EVENTSBASEUPGRADED="yes" #Indicates that upgrade of base tech pack was attempted (but not necessarily upgraded)
+	fi
+
+	return ${tpinstallResult};
+}
+
+upgradeWorkFlowTechPacks () {
+	$ECHO ${WF_TP_LIST}
+
+	if [`$CAT ${WF_TP_LIST} | wc -l` -eq 0 ] ; then
+	   $RM -rf ${WF_TP_LIST}
+	fi
+
+	#Dont stop engine or set it to NoLoads, let it keep on loading files
+	wfUpgradeStatus=0
+	if [ "${WF_TP_LIST}" != "" ] && [ -f ${WF_TP_LIST} ] ; then
+		#WF Installation.........
+		
+		# online controlzone, it may already be online
+		/eniq/sw/bin/controlzone start
+		
+		# online EC services if necessary
+		check_ecs
+		
+		for WFPKG in `$CAT ${WF_TP_LIST}`; do
+			WORKFLOWS_INSTALLED=1
+			WFPKGNAME=`$ECHO ${WFPKG} | $NAWK -F"_" '{print $1"_"$2"_"$3}'`
+			$ECHO "Installing Workflow Techpack: ${WFPKGNAME}" | tee -a ${MAIN_LOGFILE}
+
+			# check if workflow is already installed, if it is, then we are doing an upgrade
+			DoingUpgrade=0
+			FOUND=`/eniq/sw/installer/installed_techpacks | egrep "^${WFPKGNAME}"`
+			if [[ "${FOUND}" != "" ]] ; then
+				DoingUpgrade=1
+			fi
+			install_wf_techpack ${WFPKG} 1
+			wfPrevInstallCheck=${?}
+			if [ ${wfPrevInstallCheck} -eq 99 ]; then 
+				$ECHO "MZ Techpack ${WFPKG} will not be installed. Please check the version of installing techpack with already installed." | tee -a ${MAIN_LOGFILE}
+				# remove already exist version techpack from tp workflow list.
+				/usr/bin/perl -ni -e 'print unless /${WFPKG}/' ${WF_TP_LIST}
+			else 
+				if [[ "${DoingUpgrade}" -eq 1 ]] ; then
+
+					# We need to check if we are in a LUG. If we are MZ has been upgraded from 5.0 FR4 to 5.1 FR2 at this point, however the newer workflows aren't imported yet
+					# and the current ones are incompatible. Therefore some of the steps below will fail. They won't be needed in this case as they will have been performed by a new
+					# pre-upgrade script prior to the LUG upgrade.
+					isLUG=false
+					checkLUG=`${MZSH} "${MZADMIN}" "wflist"`
+					# look for error message that tells us we have 5.0 workflows while mediation zone is 5.1
+					if [[ "${checkLUG}" == *"Sever error: Unable to retrive workflows from the configuration"* ]] ; then
+						isLUG=true
+					fi
+
+					if [[ "${isLUG}" != "true" ]] ; then
+					
+						#getConfigurationsForMZTP not required for an initial install - no wf's to stop
+						getConfigurationsForMzTP "${WFPKGNAME}"   
+					
+						stop_wf_preprocessing
+						wfUpgradeStatus=${?}
+						if [ ${wfUpgradeStatus} -ne 0 ] ; then
+							$ECHO "Attempt to Stop ${WFPKGNAME} PreProcessing Workflows failed. Aborting Workflow TechPack Installation" | tee -a ${MAIN_LOGFILE}
+							$RM -rf ${TMP_PRE}*
+							$RM ${LOCK_FILE}
+							exit ${wfUpgradeStatus}
+						fi
+						stop_wf_processing
+						wfUpgradeStatus=${?}
+						if [ ${wfUpgradeStatus} -ne 0 ] ; then
+							$ECHO "Attempt to Stop ${WFPKGNAME} Processing Workflows failed. Aborting Workflow TechPack Installation" | tee -a ${MAIN_LOGFILE}
+							$RM -rf ${TMP_PRE}*
+							$RM ${LOCK_FILE}
+							exit ${wfUpgradeStatus}
+						fi
+					else
+						$ECHO "Handling LUG upgrade (MGW 5.1 with 5.0 compatible workflows" | tee -a ${MAIN_LOGFILE}
+					fi
+					
+				fi
+
+				install_wf_techpack ${WFPKG} 0
+				wfLicenceCheck=${?}
+				if [ ${wfLicenceCheck} -eq 10 ]; then 
+					$ECHO "MZ Techpack ${WFPKG} will not be installed. Please check the validity of the license " | tee -a ${MAIN_LOGFILE}
+					# remove non licensed techpack from tp workflow list.
+					/usr/bin/perl -ni -e 'print unless /${WFPKG}/' ${WF_TP_LIST}
+				else 
+
+					#source tp.prop file to start/stop workflows after tp is installed - TO DO: decide if tp's install.xml should start workflows instead of tp_installer
+					source /eniq/mediation_inter/${WFPKGNAME}/etc/tp.prop    
+					
+					wfUpgradeStatus=${?}
+					
+					if [ ${wfUpgradeStatus} -ne 0 ] ; then
+						$RM ${LOCK_FILE}
+						$RM -rf ${TMP_PRE}*
+						exit ${wfUpgradeStatus}
+					fi
+
+					if [[ "${DoingUpgrade}" -eq 1 ]] ; then
+						if [ "${numberOfTechpacks}" -gt 0 ] ; then
+							$ECHO "Event Techpacks being upgraded, stopping ${WFPKGNAME} processing until they're done." | tee -a ${MAIN_LOGFILE}
+							#make sure it's stopped, it will get started later.
+							stop_wf_processing
+							wfUpgradeStatus=${?}
+							if [ ${wfUpgradeStatus} -ne 0 ] ; then
+								$ECHO `date +%Y.%m.%d_%H:%M:%S` " : Attempt to Stop ${WFPKGNAME} PreProcessing Workflows failed. Aborting Workflow TechPack Installation" | tee -a ${MAIN_LOGFILE}
+								$RM ${LOCK_FILE}
+								$RM -rf ${TMP_PRE}*
+								exit ${wfUpgradeStatus}
+							fi
+						fi
+					fi
+
+				fi
+			fi 
+			$ECHO `date +%Y.%m.%d_%H:%M:%S` " : Workflow upgrade complete for ${WFPKG}" | tee -a ${MAIN_LOGFILE}
+
+		done
+	fi
+}
+
+if [ $# -eq 0 ] ; then
+	usage_msg
+	exit 2
+fi
+
+
+if [ -z "${CONF_DIR}" ] ; then
+  $ECHO "Environment variable CONF_DIR is not set or empty. Tech pack installation aborted."
+  exit 21
+fi
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  $ECHO "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 22
+fi
+
+. ${CONF_DIR}/niq.rc
+
+if [ -z "$INSTALLER_DIR" ] ; then
+    $ECHO "Environment variable INSTALLER_DIR is not set or empty. Tech pack installation aborted." | tee -a ${TP_INSTALLER_LOGFILE}
+    exit 24
+fi
+
+if [ ! -r "${INSTALLER_DIR}/snapshot_functions.bsh" ] ; then
+  $ECHO "ERROR: Snapshot functions file is not readable at ${INSTALLER_DIR}/snapshot_functions.bsh"
+  exit 49
+fi
+
+CONFIG_PROP="${MEDIATION_INTER}/etc/configuration.prop"
+MZADMIN="mzadmin/`${INSTALLER_DIR}/dbusers admin MG`"
+MZSH=${MZ_HOME}/bin/mzsh
+WFDISABLE=wfdisable
+WFGROUPDISABLE=wfgroupdisable
+WFSTOP=wfstop
+WFENABLE=wfenable
+WFGROUPENABLE=wfgroupenable
+WFSTART=wfstart
+WF_TPNAME_MATCH="^M_E_SGEH ^M_E_MSS ^M_E_GSN ^M_E_GPEH ^M_E_LTEEFA ^M_E_GSMEFA"
+COMMON_FUNCTIONS=/eniq/installation/core_install/lib/common_functions.lib
+SERVICE_NAMES=$CONF_DIR/service_names
+NIQ_INI=$CONF_DIR/niq.ini
+EC_MEM_SCRIPT="${MEDIATION_INTER}/bin/ec_mem.pl"
+
+if [ -f ${COMMON_FUNCTIONS} ] ; then
+	. ${COMMON_FUNCTIONS}
+else
+	$ECHO "Cant not find file ${COMMON_FUNCTIONS}"
+	exit 53
+fi
+
+TMP_PRE=.wfu.;
+
+# Include the snapshot functions.
+. ${INSTALLER_DIR}/snapshot_functions.bsh
+
+TIMESTAMP=`date +%Y.%m.%d_%H:%M:%S`
+
+if [ -z "$CONF_DIR" ] ; then
+    $ECHO "Environment variable CONF_DIR is not set or empty. Tech pack installation aborted."
+    exit 48
+fi
+
+if [ ! -d ${LOG_DIR}/tp_installer ] ; then
+  mkdir -p ${LOG_DIR}/tp_installer
+fi
+
+MAIN_LOGFILE=${LOG_DIR}/tp_installer/${TIMESTAMP}_tp_installer.log
+BACKUP_SCRIPTS_DIR=/eniq/bkup_sw/bin
+
+touch ${MAIN_LOGFILE}
+$ECHO "Execution Args:" >> ${MAIN_LOGFILE}
+$ECHO $* >> ${MAIN_LOGFILE}
+if [ -z "$PLATFORM_DIR" ] ; then
+    $ECHO "Environment variable PLATFORM_DIR is not set or empty. Tech pack installation aborted." | tee -a ${MAIN_LOGFILE}
+    exit 23
+fi
+
+if [ -z "$RT_DIR" ] ; then
+    $ECHO "Environment variable RT_DIR is not set or empty. Tech pack installation aborted." | tee -a ${MAIN_LOGFILE}
+    exit 25
+fi
+
+if [ -z "$ADMIN_BIN" ] ; then
+    $ECHO "Environment variable ADMIN_BIN is not set or empty. Tech pack installation aborted." | tee -a ${MAIN_LOGFILE}
+    exit 26
+fi
+
+if [ -z "$DATA_DIR" ] ; then
+    $ECHO "Environment variable DATA_DIR is not set or empty. Tech pack installation aborted." | tee -a ${MAIN_LOGFILE}
+    exit 47
+fi
+
+
+CPATH="${INSTALLER_DIR}/lib/installer.jar"
+INSTALLER_JARPATH="${CPATH}"
+
+if [ ! -r "${CPATH}" ] ; then
+  $ECHO "ERROR: Jar file "installer.jar" is not readable at ${CPATH}" | tee -a ${MAIN_LOGFILE}
+  exit 27
+fi
+
+for _jar_ in `find ${PLATFORM_DIR}/*/dclib/ -name "*.jar"` ; do
+	_flag_=1
+	CPATH="${CPATH}:${_jar_}"
+done
+
+
+# Check if the PLATFORM_DIR was correct and at least some jar-files are added to classpath.
+if [ ! "${_flag_}" ] ; then
+	$ECHO "Cannot find any jar-files within directories in ${PLATFORM_DIR}. Tech pack installation aborted." | tee -a ${MAIN_LOGFILE}
+	exit 28
+fi
+
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+CURRENT_WORKING_DIRECTORY=`pwd`
+
+while getopts ":p:c:nsdN" Option
+do
+  case $Option in
+    p) TP_DIR_PATH="$OPTARG"
+       ;;
+    c) FEATURE_LIST_FILE="$OPTARG" # a file with a list of cxc numbers
+       ;;
+    n) CHECK_FOR_REQUIRED_TECH_PACKS=false
+       ;;
+    s) CREATE_SNAPSHOTS=true
+       ;;
+    d) FORCE_INSTALL=true
+       ;;
+    N) NMI=1
+       ;;
+   \?) usage_msg
+       exit 29
+       ;;
+  esac
+done
+
+_mz_=`${INSTALLER_DIR}/dbusers admin MG 2>&1`
+if [ $? -ne 0 ] ; then
+	$ECHO "${_mz_}" >> ${MAIN_LOGFILE}
+	$ECHO "Installation failed, could not get MZ password" | tee -a ${MAIN_LOGFILE}
+	$ECHO "See ${MAIN_LOGFILE} for more information" | tee -a ${MAIN_LOGFILE}
+	exit 54
+fi
+MZADMIN="mzadmin/${_mz_}"
+
+# Must have tech pack directory path given as parameter.
+if [ -z "${TP_DIR_PATH}" ]; then
+    usage_msg
+    exit 30
+fi
+
+# Must have either list of tech packs or one tech pack name to install.
+if [ ! -z "${FEATURE_LIST_FILE}" ]; then
+  if [ ! -f "${FEATURE_LIST_FILE}" ] ; then
+    $ECHO "Can't read ${FEATURE_LIST_FILE}" | tee -a ${MAIN_LOGFILE}
+    exit 45
+  fi
+fi
+
+#Check if the eniq_core_inst_stage file exists. If it does not exists upgrade cannot be carried out as initial installation of eniq has not happened
+if [ -f /eniq/installation/core_install/etc/eniq_core_inst_stage ]; then
+ 	$ECHO "Eniq Core Status file found" | tee -a ${MAIN_LOGFILE}
+else
+	$ECHO "Eniq Core Status file not found. Exiting upgrade" | tee -a ${MAIN_LOGFILE}
+	exit 51
+fi
+
+#Check that no other tp_installer process is running. Simultaneous execution of tp_installer will cause trouble.
+LOCK_FILE=${CURRENT_WORKING_DIRECTORY}/install_lockfile
+if [ -f $LOCK_FILE ]; then
+  $ECHO "Another instance of tp_installer or activate_interface or deactivate_interface script is running. Please wait for it to finish first and then try again. If no other instance of tp_installer script  or activate_interface or deactivate_interface is running please check the log of the last installed tp/interface or the last activated/deactivated interface in the /eniq/log/sw_log/tp_installer dir, remove the file $LOCK_FILE and try again." | tee -a ${MAIN_LOGFILE}
+  exit 40
+fi
+touch ${LOCK_FILE}
+
+$ECHO "Starting to install tech packs." | tee -a ${MAIN_LOGFILE}
+
+#Update the executioncontext.xml with correct values
+update_executioncontext
+
+###Start- set the query plan option to 0. Needed for reducing the upgrade time.
+$ECHO "Setting the max_plans_cached option to 0"
+SYBASE_IQ_ISQL_PATH=${IQ_DIR}/${SYBASE_OCS}/bin/isql
+PASSWORD=`/eniq/sw/installer/dbusers dba dwh 2>&1`
+if [ $? -ne 0 ] ; then
+	$ECHO "Failed to get dwh password from repdb" | tee -a ${MAIN_LOGFILE}
+	$ECHO ${PASSWORD} >> ${MAIN_LOGFILE}
+	$ECHO "Installation failed. See log file ${MAIN_LOGFILE} for details." | tee -a ${MAIN_LOGFILE}
+	$RM ${LOCK_FILE}
+    exit 1
+fi
+_sqlf_=mpc.$$
+$ECHO "set option public.max_plans_cached=0" > ${_sqlf_}
+$ECHO "go" >> ${_sqlf_}
+_set_result_=`${SYBASE_IQ_ISQL_PATH} -Udba -P$PASSWORD -Sdwhdb -i ${_sqlf_} --retserverror 2>&1`
+_res_=$?
+$RM -rf ${_sqlf_}
+if [ ${_res_} -ne 0 ] ; then
+	$ECHO "Failed to set max_plans_cached" | tee -a ${MAIN_LOGFILE}
+	$ECHO "${_set_result_}" >> ${MAIN_LOGFILE}
+	$ECHO "Installation failed. See log file ${MAIN_LOGFILE} for details." | tee -a ${MAIN_LOGFILE}
+	$RM ${LOCK_FILE}
+    exit 3
+fi
+$ECHO "Changed the max_plans_cached option to 0"
+### End of db setting
+
+
+if [ -z "${CHECK_FOR_REQUIRED_TECH_PACKS}" ]; then
+    CHECK_FOR_REQUIRED_TECH_PACKS=true
+fi
+
+if [ -z "${CREATE_SNAPSHOTS}" ]; then
+    CREATE_SNAPSHOTS=false
+fi
+
+if [ ! -x "${RT_DIR}/ant/bin/ant" ] ; then
+	$ECHO "ANT was not found in ${RT_DIR}/ant/bin/ant. Tech pack installation aborted." | tee -a ${MAIN_LOGFILE}
+	#Remove the locking file
+    $RM ${LOCK_FILE}
+	exit 34
+fi
+
+if [ ! -d "${TP_DIR_PATH}" ] ; then
+	$ECHO "Cannot find the tech pack directory. Tech pack installation aborted." | tee -a ${MAIN_LOGFILE}
+	#Remove the locking file
+    $RM ${LOCK_FILE}
+	exit 35
+fi
+
+if [ ! -d ${LOG_DIR}/tp_installer ]; then
+  mkdir ${LOG_DIR}/tp_installer
+fi
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+
+# Lock the dcbo and dcpublic user's from the dwh database during the installation or upgrade.
+${INSTALLER_DIR}/change_db_users_perm.bsh -a lock -u ALL -l ${MAIN_LOGFILE}
+
+
+$ECHO "Features to be upgraded:"
+$CAT "${FEATURE_LIST_FILE}"
+
+monitorname="DWH_MONITOR"
+basename="DWH_BASE"
+eventsbasename="EVENTS_DWH_BASE"
+MONITORUPGRADED=""
+BASEUPGRADED=""
+EVENTSBASEUPGRADED=""
+
+failedFeatureFile="/tmp/last_feature"
+if [ -f "${failedFeatureFile}" ] ; then
+	$ECHO ""
+	$ECHO "Found file ${failedFeatureFile}. This indicates a prior run of script failed during upgrade of a feature. " > >(tee -a ${MAIN_LOGFILE})
+	$ECHO "$CAT ${failedFeatureFile}"  > >(tee -a ${MAIN_LOGFILE})
+	$CAT ${failedFeatureFile}  > >(tee -a ${MAIN_LOGFILE})
+	failedFeature=$(head -n 1 ${failedFeatureFile}) #reading first line of the file (this file should only contain 1 CXC number)
+	$ECHO "Will start upgrade from failed feature ${failedFeature}. Features listed ahead of it in feature list will be skipped."
+fi
+
+$ECHO "Getting Active interfaces with ${INSTALLER_DIR}/get_active_interfaces" | tee -a ${MAIN_LOGFILE}
+ACTIVE_INTERFACES=`${INSTALLER_DIR}/get_active_interfaces > >(tee /tmp/activeInterfaces)`
+$ECHO "${ACTIVE_INTERFACES}" | tee -a ${MAIN_LOGFILE}
+
+#Install the tech packs and interfaces one feature at a time.
+for feature in `$CAT ${FEATURE_LIST_FILE}` ; do
+	$ECHO $'\n'"Feature ${feature}" | tee -a ${MAIN_LOGFILE}
+	
+	$ECHO "${feature}" > ${failedFeatureFile}
+	
+	if [ -n "${failedFeature}" ] ; then
+		if [ "${feature}" != "${failedFeature}" ] ; then
+			$ECHO "Skipping upgrade of ${feature}" > >(tee -a ${MAIN_LOGFILE})
+			continue
+		else
+			unset failedFeature
+			$ECHO "This is the feature that previously failed. Upgrade will now be continued from it." > >(tee -a ${MAIN_LOGFILE})
+		fi
+	fi
+	
+	if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+		# Create the snapshots.
+		create_snapshots
+		$ECHO "All required snapshots created" | tee -a ${MAIN_LOGFILE}
+	fi
+	
+	$ECHO "Getting interfaces of feature..." | tee -a ${MAIN_LOGFILE}
+	$ECHO "${BIN_DIR}/licmgr -map interface ${feature}" 
+	INTERFACES_LIST=`${BIN_DIR}/licmgr -map interface ${feature}` #In standard UG this is done for all features at once, now only for 1 feature
+	_exit=$?
+	if [ -z "${INTERFACES_LIST}" ] ; then
+		$ECHO "Error mapping interfaces [${_exit}]" | tee -a ${MAIN_LOGFILE}
+		$RM ${LOCK_FILE}
+		exit 50
+	fi
+	$ECHO "List of interfaces:" | tee -a ${MAIN_LOGFILE}
+	$ECHO "${INTERFACES_LIST}" | tee -a ${MAIN_LOGFILE}
+
+	$RM -rf /tmp/tplist
+	$ECHO "${INTERFACES_LIST}" > /tmp/tplist
+	TP_LIST_FILE=/tmp/tplist
+
+	$ECHO "cat ${TP_LIST_FILE}"
+	cat ${TP_LIST_FILE}
+	
+	#Get all the dependency tech packs of the interfaces, recursively, and put them in an appropriate order for upgrade
+	orderFile=/tmp/orderresult
+	if [ -f ${orderFile} ] ; then
+		$RM -rf ${orderFile}
+		touch ${orderFile}
+	fi
+	get_tp_install_order ${TP_LIST_FILE} ${orderFile}
+
+	cat ${TP_LIST_FILE}
+	
+	#Make a copy of the file that has ordered list of tech packs
+	if [ -f "${TP_LIST_FILE}.full" ] ; then
+		$RM -rf "${TP_LIST_FILE}.full"
+		touch "${TP_LIST_FILE}.full"
+	fi
+	cp ${TP_LIST_FILE} ${TP_LIST_FILE}.full
+	
+	#Separate out specific workflow tech packs listed in WF_TPNAME_MATCH into there own file /tmp/wflist
+	#(only applicable to EVENTS or any other type of deployment that has Mediation Gateway)
+	WF_TP_LIST=/tmp/wflist
+	$RM -rf ${TP_LIST_FILE}
+	if [ -f ${WF_TP_LIST} ] ; then
+		$RM -rf ${WF_TP_LIST}
+		touch ${WF_TP_LIST}
+	fi
+	for x in $WF_TPNAME_MATCH
+	do
+		$CAT ${TP_LIST_FILE}.full | egrep -v "$x" > "${TP_LIST_FILE}"
+		
+		$CAT ${TP_LIST_FILE}.full | egrep "$x" >> "${WF_TP_LIST}"
+		cp ${TP_LIST_FILE} ${TP_LIST_FILE}.full
+	done
+	
+	numberOfTechpacks=`$CAT ${TP_LIST_FILE} | wc -l | $NAWK '{print $1}'` #Formally eventTpNumber
+	
+	if [ -d /eniq/mediation_inter ]; then #If it's an events server
+		#Get the time the controlzone service last started
+		controlzoneStatusInfo=`svcs -a | grep controlzone`
+		$ECHO "Current controlzone status: ${controlzoneStatusInfo}"
+	fi
+	
+	#Workflow techpacks are done first, once they're upgraded the preprocessing
+	#can start again (when the preprocessors are stopped the files are backing up
+	#on the node)
+	WORKFLOWS_INSTALLED=0
+	upgradeWorkFlowTechPacks
+	
+	installResult=0
+	# Install eniq techpacks, if any....
+	if [ "${numberOfTechpacks}" -gt 0 ] ; then
+		$ECHO "Order of tech packs to be installed:" | tee -a ${MAIN_LOGFILE}
+		TP_INSTALL_ORDER=`$CAT ${TP_LIST_FILE}`
+		$ECHO "${TP_INSTALL_ORDER}" | tee -a ${MAIN_LOGFILE}
+
+		if [ "$NMI" ] ; then
+			$ECHO "Upgrade in progress. Will not do an svcs status check." | tee -a ${MAIN_LOGFILE}
+		else
+			$ECHO "SMF is running." 
+			$ECHO "Will do an svcs status check."
+			ENGINE_SMF_STATUS=`svcs_status engine`
+			RETRY_COUNT=0
+			until [ "${ENGINE_SMF_STATUS}" = "online" ]
+			do
+				if [ $RETRY_COUNT -gt 30 ]; then
+					break
+				fi
+				sleep 10
+				ENGINE_SMF_STATUS=`svcs_status engine`
+				RETRY_COUNT=`expr $RETRY_COUNT + 1`
+				$ECHO "Waiting for engine to go online" | tee -a ${MAIN_LOGFILE}
+			done
+		fi
+		
+		ENGINE_INIT_STATUS=`engine status 2>&1 | egrep "Priority Queue disabled|Connection to engine refused" | wc -m | $NAWK '{print $1}'`
+		RETRY_COUNT=0
+		until [ "${ENGINE_INIT_STATUS}" = "0" ]
+		do
+			if [ $RETRY_COUNT -gt 30 ]; then
+						break
+			fi
+			sleep 10
+			ENGINE_INIT_STATUS=`engine status 2>&1 | egrep "Priority Queue disabled|Connection to engine refused" | wc -m | $NAWK '{print $1}'`
+			RETRY_COUNT=`expr $RETRY_COUNT + 1`
+			$ECHO "Waiting for engine to initialize properly" | tee -a ${MAIN_LOGFILE}
+		done
+		$ECHO "Confirmed engine is running as of "`date +%Y.%m.%d_%H:%M:%S` | tee -a ${MAIN_LOGFILE}
+			
+
+		#DISABLE SETS OF TECH PACKS AND INTERFACES FOR ENTIRE FEATURE
+		$ECHO "" > >(tee -a ${MAIN_LOGFILE})
+		$ECHO "Going to disable sets of tech packs and interfaces of ${feature}" > >(tee -a ${MAIN_LOGFILE})
+		DISABLED_TECHPACKS="" #This variable will capture tech packs and interfaces. It will include oss Ids of interfaces
+		names=""
+		for name in `$CAT ${TP_LIST_FILE}` ; do
+			name=`${ECHO} ${name} | $NAWK -F"_R${name##*_R}" '{print $1}'`
+			$ECHO "" > >(tee -a ${MAIN_LOGFILE})
+			if [[ ("${name}" =~ ^${monitorname}* && -n ${MONITORUPGRADED}) || ("${name}" =~ ^${basename}*) && (-n ${BASEUPGRADED}) || ("${name}" =~ ^${eventsbasename}*) && (-n ${EVENTSBASEUPGRADED}) ]] ; then
+				#It is a non-feature teck pack that is already upgraded. Skip it and go to next tech pack
+				$ECHO "Skipping ${name}" > >(tee -a ${MAIN_LOGFILE})
+				continue
+			fi
+			MATCH=`${ECHO} "${ACTIVE_INTERFACES}" | grep -w "${name}"`
+			if [ -z "${MATCH}" ] ; then 
+				$ECHO "${BIN_DIR}/engine -e disableSet ${name} -d" > >(tee -a ${MAIN_LOGFILE})
+				${BIN_DIR}/engine -e disableSet ${name} -d > >(tee -a ${MAIN_LOGFILE})
+				DISABLED_TECHPACKS="${DISABLED_TECHPACKS}"$'\n'"${name}"
+			else
+				$ECHO "Found these active interfaces for ${name}:" > >(tee -a ${MAIN_LOGFILE})
+				$ECHO "${MATCH}" > >(tee -a ${MAIN_LOGFILE})
+				while read line ; do
+					alias=`${ECHO} ${line} | $NAWK -F" " '{print $2}'`
+					$ECHO "engine -e disableSet ${name}-${alias} -d" > >(tee -a ${MAIN_LOGFILE})
+					${BIN_DIR}/engine -e disableSet ${name}-${alias} -d > >(tee -a ${MAIN_LOGFILE})
+					DISABLED_TECHPACKS="${DISABLED_TECHPACKS}"$'\n'"${name}-${alias}"
+				done <<< "${MATCH}"
+			fi
+			names="${names} ${name}" #This will be names of techpacks and interfaces. The interface names it will not include oss Ids
+		done
+		$ECHO "" > >(tee -a ${MAIN_LOGFILE})
+		$ECHO "Reactivating scheduler to cache disableSet changes." > >(tee -a ${MAIN_LOGFILE})
+		${BIN_DIR}/scheduler activate > >(tee -a ${MAIN_LOGFILE})
+		$ECHO "" > >(tee -a ${MAIN_LOGFILE})
+		$ECHO "Summary of disabled tech packs and interfaces:" > >(tee -a ${MAIN_LOGFILE})
+		$ECHO "${DISABLED_TECHPACKS}" > >(tee -a ${MAIN_LOGFILE})
+		
+		#REMOVE SETS OF FEATURE FROM PRIORITY QUEUE
+		$ECHO "" > >(tee -a ${MAIN_LOGFILE})
+		$ECHO "Removing sets from priority queue for each tech pack of ${feature}:" > >(tee -a ${MAIN_LOGFILE})
+		for name in ${names} ; do	
+			if [[ ("${name}" =~ ^${monitorname}* && -n ${MONITORUPGRADED}) || ("${name}" =~ ^${basename}*) && (-n ${BASEUPGRADED}) || ("${name}" =~ ^${eventsbasename}*) && (-n ${EVENTSBASEUPGRADED}) ]] ; then
+				#It is a non-feature teck pack that is already upgraded. Skip it and go to next tech pack
+				$ECHO "Skipping ${name}" > >(tee -a ${MAIN_LOGFILE})
+				continue
+			fi
+			$ECHO "${BIN_DIR}/engine -e removeTechPacksInPriorityQueue ${name}" > >(tee -a ${MAIN_LOGFILE})
+			${BIN_DIR}/engine -e removeTechPacksInPriorityQueue ${name}  > >(tee -a ${MAIN_LOGFILE})
+		done
+		
+		#WAIT FOR LOADER SETS TO FINISH
+		$ECHO "" > >(tee -a ${MAIN_LOGFILE})
+		currentTime=`$NAWK 'BEGIN { print srand() }'` #Current time in epoch time
+		endTime=$[currentTime+600] #This sets 10 min limit for wait.
+		loaderSets="setting this just to go into while loop"
+		while [ -n "${loaderSets}" -a $currentTime -lt $endTime ] ; do 
+			$ECHO "Checking if there are loader sets executing for ${feature}" > >(tee -a ${MAIN_LOGFILE})
+			for name in ${names} ; do #Check for each tech pack
+				if [[ ("${name}" =~ ^${monitorname}* && -n ${MONITORUPGRADED}) || ("${name}" =~ ^${basename}*) && (-n ${BASEUPGRADED}) || ("${name}" =~ ^${eventsbasename}*) && (-n ${EVENTSBASEUPGRADED}) ]] ; then
+					#It is a non-feature teck pack that is already upgraded. Skip it and go to next tech pack
+					$ECHO "Skipping ${name}" > >(tee -a ${MAIN_LOGFILE})
+					continue
+				fi
+				$ECHO "${BIN_DIR}/engine -e showSetsInExecutionSlots ${name}" > >(tee -a ${MAIN_LOGFILE})
+				setsInExecution=`${BIN_DIR}/engine -e showSetsInExecutionSlots ${name}` > >(tee -a ${MAIN_LOGFILE})
+				$ECHO "${setsInExecution}" > >(tee -a ${MAIN_LOGFILE})
+				loaderSets=`$ECHO "${setsInExecution}" | grep "|Loader"`
+				if [ -n "${loaderSets}" ] ; then
+					$ECHO "There are loader sets in execution for ${feature}. Waiting for 3 sec to let them finish" > >(tee -a ${MAIN_LOGFILE})
+					sleep 3
+					break #We don't need to check for the rest of the tech packs. Let's start the check over again
+				fi
+			done
+			currentTime=`$NAWK 'BEGIN { print srand() }'`
+		done
+		if [ -z "${loaderSets}" ] ; then
+			$ECHO "There are no loader sets in execution for ${feature}" > >(tee -a ${MAIN_LOGFILE})
+		fi
+		$ECHO "Waiting for 10 sec..." > >(tee -a ${MAIN_LOGFILE})
+		sleep 10
+		
+		#REMOVE SETS OF FEATURE FROM EXECUTION
+		$ECHO "Removing any sets there may still be in execution for ${feature}" > >(tee -a ${MAIN_LOGFILE})
+		for name in ${names} ; do	
+			if [[ ("${name}" =~ ^${monitorname}* && -n ${MONITORUPGRADED}) || ("${name}" =~ ^${basename}*) && (-n ${BASEUPGRADED}) || ("${name}" =~ ^${eventsbasename}*) && (-n ${EVENTSBASEUPGRADED}) ]] ; then
+				#It is a non-feature teck pack that is already upgraded. Skip it and go to next tech pack
+				$ECHO "Skipping ${name}" > >(tee -a ${MAIN_LOGFILE})
+				continue
+			fi
+			$ECHO "${BIN_DIR}/engine -e killRunningSets ${name}" > >(tee -a ${MAIN_LOGFILE})
+			${BIN_DIR}/engine -e killRunningSets ${name}  > >(tee -a ${MAIN_LOGFILE})
+		done
+
+		#UPGRADE THE TECH PACKS
+		#Delete and create file for writing list of tech packs that actually get upgraded
+		if [ -f "${INSTALLER_DIR}/installed_artifacts" ] ; then
+			$ECHO $'\n'"Removing old list of upgraded/installed tech packs:" > >(tee -a ${MAIN_LOGFILE})
+			$ECHO "${RM} ${INSTALLER_DIR}/installed_artifacts" > >(tee -a ${MAIN_LOGFILE})
+			$RM "${INSTALLER_DIR}/installed_artifacts"
+		fi
+		touch ${INSTALLER_DIR}/installed_artifacts
+		
+		#Backing up repdb if needed to be restored later
+		${BACKUP_SCRIPTS_DIR}/repdb_backup.bsh
+		if [ ${?} -eq 0 ] ; then
+			$ECHO " repdb backed up successfully" | tee -a ${MAIN_LOGFILE}
+		else
+			$ECHO "repdb could not be backed up" | tee -a ${MAIN_LOGFILE}
+		fi
+		
+		#Upgrade the workflow tech packs first - consecutively
+		for name in `${CAT} ${TP_LIST_FILE} |${EGREP} -i "^M_E"` ; do
+			install_upgrade_techpacks ${name}
+			installResult=${?}
+			
+			if [ ${installResult} -ne 0 ] ; then
+				break;
+			fi
+		done
+		
+		# shutdown mz/ec if necessary after installation
+		shutdown_mz
+		
+		#And now upgrade the normal tech packs - consecutively
+		if [ ${installResult} -eq 0 ] ; then
+			for name in `${CAT} ${TP_LIST_FILE} |${EGREP} -v "^M_E"` ; do
+				install_upgrade_techpacks ${name}
+				installResult=${?}
+			
+				if [ ${installResult} -ne 0 ] ; then
+					break;
+				fi
+			done
+		fi
+		
+		#POST UPGRADE FOR DEPLOYMENT WITH MEDIATION GATEWAY (EVENTS)
+		if [ -d /eniq/mediation_inter ]; then #Check Mediation Gateway is present
+			#Update the executioncontext.xml with correct values
+			update_executioncontext
+			
+			#This is for restart ec's on all blades
+			restart_on_all_blades()
+			{
+				ECLIST=`$CAT $CONF_DIR/service_names | $GEGREP ".*::.*::ec_[0-9]" | $NAWK -F"::" '{print $3}'`
+				for EC in $ECLIST; do
+					$ECHO "Restarting EC's on blade: " $EC  | tee -a ${MAIN_LOGFILE}
+					ssh $EC "$BASH -c 'source \$HOME/.profile; ec restart; ' "
+				done
+			}
+			
+			#If there is a status change for controlzone service since before upgrade of feature, then
+			#restart all EC's on all blades
+			controlzoneStatusInfo_new=`svcs -a | grep controlzone`
+			if [ "${controlzoneStatusInfo}" != "${controlzoneStatusInfo_new}" ] ; then
+				$ECHO "Current controlzone status: ${controlzoneStatusInfo_new}"
+				$ECHO "There was a control zone status change while tech packs of $feature were upgrading." | tee -a ${MAIN_LOGFILE}
+				$ECHO "Restarting EC's on all blades." | tee -a ${MAIN_LOGFILE}
+				restart_on_all_blades
+			fi
+			
+			#ENIQ_ROOT_DIR=/eniq
+			#ENIQ_BASE_DIR=${ENIQ_ROOT_DIR}
+			#MEDIATION_INTER_BIN=${ENIQ_BASE_DIR}/mediation_inter/bin
+			
+			workflow_techpacks=`${CAT} ${TP_LIST_FILE} ${WF_TP_LIST} |${EGREP} -i "^M_E"`
+			
+			# Attempt to provision workflows if there are workflow techpack, and the upgrade of the feature was successful
+			if [ -s /eniq/mediation_inter/bin/provision_mg_workflows.bsh -a ${installResult} -eq 0 ]; then 
+				if [ -n ${workflow_techpacks} ] ; then
+					
+					# if wf_tp_names file exists, remove it
+					if [ -f /tmp/wf_tp_names ]; then
+						$RM /tmp/wf_tp_names	
+					fi
+					
+					while read wf_tp_tpi ; do
+						wf_tp_name=`${ECHO} ${wf_tp_tpi} | $NAWK -F"_R${wf_tp_tpi##*_R}" '{print $1}'`
+						
+						if [ -n "${wf_tp_name}" ]; then
+								$ECHO "${wf_tp_name}" >> /tmp/wf_tp_names
+						fi
+					done <<< "${workflow_techpacks}"
+					
+					#Provision the workflows
+					if [ -s /tmp/wf_tp_names ] ; then
+						/eniq/mediation_inter/bin/provision_mg_workflows.bsh -a post -f /tmp/wf_tp_names -l ${MAIN_LOGFILE}
+						
+						if [ $? -ne 0 ]; then
+							$ECHO "ERROR: could not automatically provision MG workflows for ${feature}." | tee -a ${MAIN_LOGFILE}
+							installResult=1
+						fi
+						
+						else
+						$ECHO "There are no workflow tech packs to provision for ${feature}"
+					fi
+				else
+					$ECHO "There are no workflow tech packs to provision for ${feature}"
+				fi
+			else
+				$ECHO "/eniq/mediation_inter/bin/provision_mg_workflows.bsh connot be found."
+				installResult=1
+			fi
+		fi
+
+		if [ "${CREATE_SNAPSHOTS}" == "true" ]; then
+			$ECHO "Deleting the snapshots created before the upgrade of feature ${feature}." | tee -a ${MAIN_LOGFILE}
+			# Delete the snapshots.
+			delete_snapshots
+			$ECHO "Deleted snapshots succesfully. Tech packs installation finished." | tee -a ${MAIN_LOGFILE}
+		fi
+		
+		if [ ${installResult} -ne 0 ] ; then
+			#Something went wrong in upgrade of this feature. Let's not upgrading any more features, and leave feature ${feature} offline.
+			break
+		fi
+
+		#REACTIVATE INTERFACES
+		$ECHO "" > >(tee -a ${MAIN_LOGFILE})
+		$ECHO "Reactivating interfaces of feature ${feature}" > >(tee -a ${MAIN_LOGFILE})
+		if [ -s /eniq/sw/installer/installed_artifacts ] ; then
+			feature_mapping_file=`iniget FEATURE_INFO -f ${NIQ_INI} -v Feature_Mapping_File`
+			$RM ${LOCK_FILE}
+			$ECHO "reactivate_interfaces -f /eniq/sw/installer/installed_artifacts -m /tmp/activeInterfaces -r \"${TP_DIR_PATH}/${feature_mapping_file}\"" > >(tee -a ${MAIN_LOGFILE})
+			/eniq/sw/installer/reactivate_interfaces -f /eniq/sw/installer/installed_artifacts -m /tmp/activeInterfaces -r "${TP_DIR_PATH}/${feature_mapping_file}" | tee -a ${MAIN_LOGFILE}
+			touch ${LOCK_FILE}
+		else
+			$ECHO "There are no interfaces to reactivate." | tee -a ${MAIN_LOGFILE}
+		fi
+		
+		#ENABLE SETS OF TECH PACKS AND INTERFACES FOR ENTIRE FEATURE
+		$ECHO "" > >(tee -a ${MAIN_LOGFILE})
+		$ECHO "Going to enable sets of tech packs and interfaces of ${feature}" > >(tee -a ${MAIN_LOGFILE})
+		ENABLED_TECHPACKS=""
+		for name in ${DISABLED_TECHPACKS} ; do
+			if [ "${name}" == $monitorname -o "${name}" == $basename -o "${name}" == $eventsbasename ] ; then
+					$ECHO "Skipping ${name}" > >(tee -a ${MAIN_LOGFILE})
+					continue
+			fi
+			$ECHO "${BIN_DIR}/engine -e enableSet ${name} -d" > >(tee -a ${MAIN_LOGFILE})
+			${BIN_DIR}/engine -e enableSet ${name} -d > >(tee -a ${MAIN_LOGFILE})
+			ENABLED_TECHPACKS="${ENABLED_TECHPACKS}"$'\n'"${name}"
+		done
+		$ECHO "" > >(tee -a ${MAIN_LOGFILE})
+		$ECHO "Reactivating scheduler to cache enableSet changes." > >(tee -a ${MAIN_LOGFILE})
+		${BIN_DIR}/scheduler activate > >(tee -a ${MAIN_LOGFILE})
+	
+	
+	fi #End of: if [ "${numberOfTechpacks}" -gt 0 ]
+	
+done #End of new per feature loop
+	
+# Unlock the dcbo and dcpublic user's from the dwh database after the installation or upgrade.
+${INSTALLER_DIR}/change_db_users_perm.bsh -a unlock -u ALL -l ${MAIN_LOGFILE}
+if [ $? -ne 0 ] ; then
+	$ECHO "Failed to unlock users in dwhdb" | tee -a ${MAIN_LOGFILE}
+fi
+
+
+#Cleanup...
+$RM -rf ${TMP_PRE}*
+$RM -f /tmp/wf_tp.txt
+$RM -f /tmp/eniq_tp.txt
+if [ ${installResult} -ne 0 ] ; then
+    # techpack install failed.....
+	$ECHO "techpack install failed with error code:${installResult}. " | tee -a ${MAIN_LOGFILE}
+	$RM ${LOCK_FILE}
+    exit ${installResult};
+fi
+
+$RM /tmp/last_feature
+
+$ECHO "Techpack Installation Complete."  | tee -a ${MAIN_LOGFILE}
+
+#Remove the locking file
+$RM ${LOCK_FILE}
+
+exit 0
+

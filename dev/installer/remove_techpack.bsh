@@ -1,0 +1,710 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2016 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+#
+# ********************************************************************
+# Name    : remove_techpack.bsh
+# Date    : 06/09/2016
+# Purpose : Script to drop all the tables for a given techpack and to remove repdb data associated with the techpack
+#           
+# Usage   : remove_techpack.bsh [TECHPACK NAME]
+#
+# ********************************************************************
+#
+# Command Section
+#
+# ********************************************************************
+if [ ${LOGNAME} != "dcuser"  ] ; then
+  echo "\nThis script must be executed as dcuser\n"
+  exit 1
+fi
+
+INSTALLER_DIR=/eniq/sw/installer
+CONF_DIR=/eniq/sw/conf
+LOG_DIR=/eniq/log/sw_log
+VECTOR_FLAG_DIR=/eniq/sw/conf/vectorflags
+LS=/usr/bin/ls
+RM=/usr/bin/rm
+ECHO=/usr/bin/echo
+CP=/usr/bin/cp
+EGREP=/usr/bin/egrep
+SED=/usr/bin/sed
+TR=/usr/bin/tr
+TEE=/usr/bin/tee
+DATE=/usr/bin/date
+
+. ${CONF_DIR}/niq.rc
+
+_dir_=`/usr/bin/dirname $0`
+SCRIPTHOME=`cd $_dir_ 2>/dev/null && pwd || echo $_dir_`
+
+if [ -s $SCRIPTHOME/../../admin/lib/common_functions.lib ]; then
+    . $SCRIPTHOME/../../admin/lib/common_functions.lib
+else
+	$ECHO "Could not find $SCRIPTHOME/../../admin/lib/common_functions.lib"
+	exit 63
+fi
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $connection_string_dc ]; then
+  $RM -f $connection_string_dc
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string_dc"
+  fi
+fi
+
+if [ -f $connection_string_dwhrep ]; then
+  $RM -f $connection_string_dwhrep
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string_dwhrep"
+  fi
+fi
+
+if [ -f $connection_string_dcpublic ]; then
+  $RM -f $connection_string_dcpublic
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string_dcpublic"
+  fi
+fi
+
+if [ -f $connection_string_dwhrep_local ]; then
+  $RM -f $connection_string_dwhrep_local
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string_dwhrep_local"
+  fi
+fi
+
+if [ -f $connection_string_etlrep ]; then
+  $RM -f $connection_string_etlrep
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string_etlrep"
+  fi
+fi
+}
+
+trap remove_connection_string EXIT
+
+
+DWHDBPASSWORD=`inigetpassword DWH -v DCPassword -f ${CONF_DIR}/niq.ini`
+DCPUBLIC_PASSWORD=`inigetpassword DWH -v DCPUBLICPassword -f ${CONF_DIR}/niq.ini`
+DWHDB_PORT=`inigetpassword DWH -v PortNumber -f ${CONF_DIR}/niq.ini`
+DWH_SERVER_NAME=`inigetpassword DWH -v ServerName -f ${CONF_DIR}/niq.ini`
+ETLREPUser=`inigetpassword REP -v ETLREPUsername -f ${CONF_DIR}/niq.ini`
+ETLREPPASSWORD=`inigetpassword REP -v ETLREPPassword -f ${CONF_DIR}/niq.ini`
+DWHREPUSER=`inigetpassword REP -v DWHREPUsername -f ${CONF_DIR}/niq.ini`
+DWHREPPASSWORD=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+
+connection_string_dc=/var/tmp/encrypt_$$.txt
+connection_string_dwhrep=/var/tmp/encrypt2_$$.txt
+connection_string_dcpublic=/var/tmp/encrypt3_$$.txt
+connection_string_dwhrep_local=/var/tmp/encrypt4_$$.txt
+connection_string_etlrep=/var/tmp/encrypt5_$$.txt
+connection_string_decrypt_dc="-nogui -c \"eng=${DWH_SERVER_NAME};links=tcpip{host=${DWH_SERVER_NAME};port=${DWHDB_PORT}};uid=dc;pwd=${DWHDBPASSWORD}\" -onerror exit" 
+connection_string_decrypt_dwhrep="-nogui -c \"eng=${REP_SERVER_NAME};links=tcpip{host=${REP_SERVER_NAME};port=${REP_PORT}};uid=$DWHREPUSER;pwd=$DWHREPPASSWORD\" -onerror exit"
+connection_string_decrypt_dcpublic="-nogui -c \"eng=${DWH_SERVER_NAME};links=tcpip{host=${DWH_SERVER_NAME};port=${DWHDB_PORT}};uid=dcpublic;pwd=${DCPUBLIC_PASSWORD}\" -onerror exit"
+connection_string_decrypt_dwhrep_local="-c \"uid=${DWHREPUSER};pwd=${DWHREPPASSWORD};eng=${REP_SERVER_NAME}\" -host localhost -port $REP_PORT -nogui -onerror exit" 
+connection_string_decrypt_etlrep="-c \"uid=${ETLREPUser};pwd=${ETLREPPASSWORD};eng=${REP_SERVER_NAME}\" -host localhost -port $REP_PORT -nogui -onerror exit"
+  get_encrypt_file "${connection_string_decrypt_dc}" "${connection_string_dc}"
+  get_encrypt_file "${connection_string_decrypt_dwhrep}" "${connection_string_dwhrep}"
+  get_encrypt_file "${connection_string_decrypt_dcpublic}" "${connection_string_dcpublic}"
+  get_encrypt_file "${connection_string_decrypt_dwhrep_local}" "${connection_string_dwhrep_local}"
+  get_encrypt_file "${connection_string_decrypt_etlrep}" "${connection_string_etlrep}"
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+# ********************************************************************
+# Check if the given Techpack tables contain data
+# Exit if tables contain data, continue deletion otherwise
+#
+# ********************************************************************
+
+check_data()
+{
+	DC_TABLES_WITH_DATA="${INSTALLER_DIR}/${TECHPACK_NAME}_WITH_DATA.csv"
+	${CP} /dev/null ${DC_TABLES_WITH_DATA}
+	
+################------------------get all the tables with data------------------################
+
+	${DBISQL} @${connection_string_dc} "SELECT TYPENAME FROM LOG_LoadStatus WHERE TYPENAME LIKE '${TECHPACK_NAME}%' AND STATUS = 'LOADED';OUTPUT TO ${DC_TABLES_WITH_DATA} "
+
+	${DBISQL} @${connection_string_dc} "SELECT TYPENAME FROM LOG_AggregationStatus WHERE TYPENAME LIKE '${TECHPACK_NAME}%' AND STATUS = 'AGGREGATED';OUTPUT TO ${DC_TABLES_WITH_DATA} APPEND"
+
+################-----------------if tables have data, abort script-----############
+
+	if [[ -s ${DC_TABLES_WITH_DATA} ]] ; then
+		_err_msg_="${TECHPACK_NAME} contains data, script will exit..."
+		abort_script "$_err_msg_"
+		 
+	fi ;
+	$ECHO "No data in $TECHPACK_NAME Techpack, continuing removal of Techpack" | $TEE -a ${LOG_FILE}
+	 
+}
+
+# ********************************************************************
+# Check if the given Techpack is installed in server and is of type PM
+# Exit if either of the above not true, continue deletion otherwise
+#
+# ********************************************************************
+
+check_install_type()
+{
+	isInstalled="$(${DBISQL} @${connection_string_dwhrep} "select count(*) from TPActivation where TECHPACK_NAME = '${TECHPACK_NAME}' and TYPE = 'PM'" | $EGREP -v '(----|count|rows|Execution)' | $SED 's/[^0-9]*//g' | $SED '/^\s*$/d')"
+	if [[ $isInstalled -eq 0 ]] ; then
+		_err_msg_="${TECHPACK_NAME} not installed in the server OR not a PM type Techpack"
+		abort_script "$_err_msg_"
+		 
+	fi
+	$ECHO "${TECHPACK_NAME} is installed in the server and is a PM type Techpack" | $TEE -a ${LOG_FILE}
+	 
+}
+
+# ********************************************************************
+# Append hardcoded list of dependent TPs (if present)
+# 
+#
+# ********************************************************************
+
+append_hardcode_list()
+{
+	if [ "$TECHPACK_NAME" == "DC_E_ERBSG2" ] ; then
+		
+		${DBISQL} @${connection_string_dwhrep} "select VERSIONID from Versioning where TECHPACK_NAME IN ('DC_E_ERBS');OUTPUT TO ${DEPENDENT_TP_LIST} APPEND"
+	elif [ "$TECHPACK_NAME" == "DC_E_RBS" ] ; then
+		${DBISQL} @${connection_string_dwhrep} "select VERSIONID from Versioning where TECHPACK_NAME IN ('DC_E_RBSG2');OUTPUT TO ${DEPENDENT_TP_LIST} APPEND"
+	elif [ "$TECHPACK_NAME" == "DC_E_RBSG2" ] ; then
+		${DBISQL} @${connection_string_dwhrep} "select VERSIONID from Versioning where TECHPACK_NAME IN ('DC_E_RBS');OUTPUT TO ${DEPENDENT_TP_LIST} APPEND"
+	fi
+
+	case $TECHPACK_NAME in
+		DC_E_ERBS|DC_E_ERBSG2)
+			${DBISQL} @${connection_string_dwhrep} "select VERSIONID from Versioning where TECHPACK_NAME IN ('DC_E_VOLTE','DC_E_LTE_OPIMIZATION','DC_E_ENERGY');OUTPUT TO ${DEPENDENT_TP_LIST} APPEND"
+			;;
+		DC_E_SGSN|DC_E_MTAS|DC_E_IMSGW_SBG|DC_E_CNAXE)
+			${DBISQL} @${connection_string_dwhrep} "select VERSIONID from Versioning where TECHPACK_NAME = 'DC_E_VOLTE';OUTPUT TO ${DEPENDENT_TP_LIST} APPEND"
+			;;
+		DC_E_GGSN|DC_E_CSCF)
+			${DBISQL} @${connection_string_dwhrep} "select VERSIONID from Versioning where TECHPACK_NAME IN ('DC_E_VOLTE','DC_E_VOWIFI');OUTPUT TO ${DEPENDENT_TP_LIST} APPEND"
+			;;
+		DC_E_WMG)
+			${DBISQL} @${connection_string_dwhrep} "select VERSIONID from Versioning where TECHPACK_NAME = 'DC_E_VOWIFI';OUTPUT TO ${DEPENDENT_TP_LIST} APPEND"
+			;;
+		DC_E_RBS|DC_E_RBSG2|DC_E_BSS|DC_E_TCU|DC_E_CPP)
+			${DBISQL} @${connection_string_dwhrep} "select VERSIONID from Versioning where TECHPACK_NAME = 'DC_E_ENERGY';OUTPUT TO ${DEPENDENT_TP_LIST} APPEND"
+			;;
+		*)
+			;;
+	esac
+}
+	
+# ********************************************************************
+# Check dependent Techpacks on Techpack to be deleted
+# Ask for confirmation if dependent techpacks present
+#
+# ********************************************************************
+
+check_show_dependents()
+{
+	DEPENDENT_TP_LIST="${INSTALLER_DIR}/${TECHPACK_NAME}_DEP.csv"
+	${CP} /dev/null ${DEPENDENT_TP_LIST}
+
+	${DBISQL} @${connection_string_dwhrep} "select VERSIONID from TechPackDependency where TECHPACKNAME = '${TECHPACK_NAME}';OUTPUT TO ${DEPENDENT_TP_LIST}"
+	
+	append_hardcode_list
+	
+	if [[ -s ${DEPENDENT_TP_LIST} ]] ; then
+		$ECHO "Below Techpacks are dependent on ${TECHPACK_NAME} -" | $TEE -a ${LOG_FILE}
+		$ECHO "$(<$DEPENDENT_TP_LIST)" | $TEE -a ${LOG_FILE}
+		while true
+		do
+			$ECHO "\nAre you sure you want to continue? (Y/N)"	| $TEE -a ${LOG_FILE}
+			read option
+			case $option in
+			[Nn]*)
+				_err_msg_="Techpack $TECHPACK_NAME has dependent techpacks. Exiting TP deletion."
+				abort_script "$_err_msg_"
+				 
+				exit
+				;;
+			[Yy]*)
+				$ECHO "Continuing TP deletion..." | $TEE -a ${LOG_FILE}
+				break
+				;;
+			*)
+				$ECHO "Invalid choice made" | $TEE -a ${LOG_FILE}
+				;;
+			esac
+		done
+	fi
+}
+
+# ********************************************************************
+# Collect all tables/views data that are to be deleted
+# 
+#
+# ********************************************************************
+
+get_delete_data()
+{
+	$ECHO "Getting Techpack tables/views information from database" | $TEE -a ${LOG_FILE}
+	
+############----------get all the DIM tables to delete----------################
+
+	${DBISQL} @${connection_string_dwhrep} "select TYPENAME from ReferenceTable where VERSIONID like '%${TECHPACK_NAME}:((%))%';OUTPUT TO ${DIM_TABLES_TO_DELETE}"  
+
+############----------get all the Vector DIM tables to delete----------################
+
+	${DBISQL} @${connection_string_dc} "select TABLE_NAME from systable where table_name like '${DIM_TECHPACK_NAME}\_%\_V\_%' ESCAPE '\';OUTPUT TO ${DIM_VECTOR_TABLES_TO_DELETE} " 
+	$ECHO "'${DIM_VECTOR_REFERENCE}'" >> ${DIM_VECTOR_TABLES_TO_DELETE}
+	
+############----------get all the Vector DIM views to delete----------################
+
+	${DBISQL} @${connection_string_dc} "select VIEWNAME from SYSVIEWS where viewname like '${DIM_TECHPACK_NAME}\_%\_V\_%' ESCAPE '\';OUTPUT TO ${DIM_VECTOR_VIEWS_TO_DELETE} " 
+	$ECHO "'${DIM_VECTOR_REFERENCE}'" >> ${DIM_VECTOR_VIEWS_TO_DELETE}
+
+############----------get all the DC tables to delete----------################
+
+	${DBISQL} @${connection_string_dwhrep} "select BASETABLENAME from MeasurementTable where TYPEID like '${TECHPACK_NAME}:((%))%';OUTPUT TO ${DC_VIEWS_TO_DELETE}" 
+
+	$ECHO "\nGetting table information\n " | $TEE -a ${LOG_FILE}
+
+	$CP /dev/null $INSTALLER_DIR/get_dc_tables.sql 
+	while IFS='' read -r line || [[ -n "$line" ]]; 
+	do
+		VIEW_NAME="${line%\'}"
+		VIEW_NAME="${VIEW_NAME#\'}"
+		$ECHO "SELECT DISTINCT NAME, TYPE FROM SYSOBJECTS WHERE NAME LIKE '${VIEW_NAME}%' " >> $INSTALLER_DIR/get_dc_tables.sql 
+		$ECHO "UNION ALL" >> $INSTALLER_DIR/get_dc_tables.sql 
+	done < ${DC_VIEWS_TO_DELETE}
+	$CP $INSTALLER_DIR/get_dc_tables.sql $INSTALLER_DIR/get_dc_tables_temp.sql 
+	$SED '$d' $INSTALLER_DIR/get_dc_tables_temp.sql > $INSTALLER_DIR/get_dc_tables.sql 
+	$RM $INSTALLER_DIR/get_dc_tables_temp.sql 
+	if [[ -s "${INSTALLER_DIR}/get_dc_tables.sql" ]] ; then
+		$ECHO ";OUTPUT TO ${DC_TABLES_TO_DELETE} APPEND" >> $INSTALLER_DIR/get_dc_tables.sql 
+		${DBISQL} @${connection_string_dc} $INSTALLER_DIR/get_dc_tables.sql
+	else
+		$ECHO "No DC tables found for Techpack $TECHPACK_NAME" | $TEE -a ${LOG_FILE}
+	fi
+
+############----------get all the views created by External Statements to delete----------################
+
+	EXT_STMT_LIST="${INSTALLER_DIR}/${TECHPACK_NAME}_LIST_EXT.csv"
+	${CP} /dev/null ${EXT_STMT_LIST}
+
+	${DBISQL} @${connection_string_dwhrep} "select STATEMENT from ExternalStatement where VERSIONID like '${TECHPACK_NAME}:((%))' and STATEMENT like '%cReaTe vIEw%';OUTPUT TO ${EXT_STMT_LIST}"
+	
+	if [[ -s ${EXT_STMT_LIST} ]] ; then
+		while read statement
+		do
+			statement="$($ECHO $statement | $TR "[:lower:]" "[:upper:]")"
+			statement=${statement//\X0A/}
+			EXT_VIEW_NAME=${statement#*CREATE VIEW }
+			EXT_VIEW_NAME=${EXT_VIEW_NAME%%(*}
+			EXT_VIEW_NAME=${EXT_VIEW_NAME%% *}
+			EXT_VIEW_NAME=${EXT_VIEW_NAME#*.}
+			$ECHO "$EXT_VIEW_NAME" >> ${EXT_STMT_VIEWS_TO_DELETE}
+		done < ${EXT_STMT_LIST}
+	fi
+}
+
+
+# ********************************************************************
+# Delete Techpack data from dwhdb
+# 
+#
+# ********************************************************************
+
+drop_tables_dwhdb()
+{
+#################-------------Drop DIM TABLES--------------------#################
+
+	if [[ ! -s ${DIM_TABLES_TO_DELETE} ]] ; then
+		$ECHO "\nNo DIM tables to delete\n" | $TEE -a ${LOG_FILE}
+	else
+		$CP /dev/null ${INSTALLER_DIR}/drop_dim_tables.sql
+	
+		$ECHO "\nDIM tables to be dropped \n" | $TEE -a ${LOG_FILE}
+		while IFS='' read -r line || [[ -n "$line" ]]; 
+		do
+			TABLE_NAME="${line%\'}"
+			TABLE_NAME="${TABLE_NAME#\'}"
+			$ECHO "$TABLE_NAME" | $TEE -a ${LOG_FILE}
+			$ECHO "DROP TABLE IF EXISTS ${TABLE_NAME}" >> ${INSTALLER_DIR}/drop_dim_tables.sql
+		done < ${DIM_TABLES_TO_DELETE}
+		$ECHO "\nDropping DIM Tables \n" | $TEE -a ${LOG_FILE}
+		${DBISQL} @${connection_string_dc} ${INSTALLER_DIR}/drop_dim_tables.sql
+		if [[ $? -eq 0 ]];then
+			$ECHO "\nDIM tables dropped successfully\n" | $TEE -a ${LOG_FILE}
+		else
+			_err_msg_="DIM tables could not be dropped successfully"
+			abort_script "$_err_msg_"
+		fi
+	fi ;
+	
+#################-------------Drop VECTOR DIM VIEWS--------------------#################
+
+	if [[ ! -s ${DIM_VECTOR_VIEWS_TO_DELETE} ]] ; then
+		$ECHO "\nNo DIM VECTOR views to delete\n" | $TEE -a ${LOG_FILE}
+	else
+		$CP /dev/null ${INSTALLER_DIR}/drop_vector_dim_views_dc.sql
+		$CP /dev/null ${INSTALLER_DIR}/drop_vector_dim_views_dcpublic.sql
+		$ECHO "\nVector DIM views to be dropped\n " | $TEE -a ${LOG_FILE}
+		while IFS='' read -r line || [[ -n "$line" ]]; 
+		do
+			VIEWNAME="${line%\'}"
+			VIEWNAME="${VIEWNAME#\'}"
+			$ECHO "$VIEWNAME" | $TEE -a ${LOG_FILE}
+			$ECHO "DROP VIEW IF EXISTS dc.${VIEWNAME}" >> ${INSTALLER_DIR}/drop_vector_dim_views_dc.sql
+			$ECHO "DROP VIEW IF EXISTS dcpublic.${VIEWNAME}" >> ${INSTALLER_DIR}/drop_vector_dim_views_dcpublic.sql
+		done < ${DIM_VECTOR_VIEWS_TO_DELETE}
+		$ECHO "\nDropping Vector DIM views \n" | $TEE -a ${LOG_FILE}
+		${DBISQL} @${connection_string_dc} ${INSTALLER_DIR}/drop_vector_dim_views_dc.sql
+		${DBISQL} @${connection_string_dcpublic} ${INSTALLER_DIR}/drop_vector_dim_views_dcpublic.sql
+		if [[ $? -eq 0 ]];then
+			$ECHO "\nVector DIM views dropped successfully\n" | $TEE -a ${LOG_FILE}
+		else
+			_err_msg_="Vector DIM views could not be dropped successfully"
+			abort_script "$_err_msg_"
+		fi
+	fi ;
+
+#################-------------Drop VECTOR DIM TABLES--------------------#################
+
+	if [[ ! -s ${DIM_VECTOR_TABLES_TO_DELETE} ]] ; then
+		$ECHO "\nNo DIM VECTOR tables to delete\n" | $TEE -a ${LOG_FILE}
+	else
+		$CP /dev/null ${INSTALLER_DIR}/drop_vector_dim_tables.sql
+		$ECHO "\nVector DIM tables to be dropped\n " | $TEE -a ${LOG_FILE}
+		while IFS='' read -r line || [[ -n "$line" ]]; 
+		do
+			TABLE_NAME="${line%\'}"
+			TABLE_NAME="${TABLE_NAME#\'}"
+			$ECHO "$TABLE_NAME" | $TEE -a ${LOG_FILE}
+			$ECHO "DROP TABLE IF EXISTS ${TABLE_NAME}" >> ${INSTALLER_DIR}/drop_vector_dim_tables.sql
+		done < ${DIM_VECTOR_TABLES_TO_DELETE}
+		$ECHO "\nDropping Vector DIM Tables \n" | $TEE -a ${LOG_FILE}
+		${DBISQL} @${connection_string_dc} ${INSTALLER_DIR}/drop_vector_dim_tables.sql
+		if [[ $? -eq 0 ]];then
+			$ECHO "\nVector DIM tables dropped successfully\n" | $TEE -a ${LOG_FILE}
+		else
+			_err_msg_="Vector DIM tables could not be dropped successfully"
+			abort_script "$_err_msg_"
+		fi
+	fi ;
+
+##############------------------DROP DC TABLES-----------------------------#################
+
+	if [[ ! -s ${DC_TABLES_TO_DELETE} ]] ; then
+		$ECHO "\nNo DC tables to delete\n" |$TEE -a ${LOG_FILE}
+	else
+		$CP /dev/null ${INSTALLER_DIR}/drop_dc_tables.sql
+		$CP /dev/null ${INSTALLER_DIR}/drop_dcpublic_tables.sql
+		$ECHO "\nDC tables and views to be dropped\n " |$TEE -a ${LOG_FILE}
+		while IFS=',' read f1 f2; 
+		do
+			if [[ "$f2" == "'V'" ]];then
+				VIEW_TO_DROP="${f1%\'}"
+				VIEW_TO_DROP="${VIEW_TO_DROP#\'}"
+				$ECHO "view" $VIEW_TO_DROP |$TEE -a ${LOG_FILE}
+				$ECHO "DROP VIEW IF EXISTS dc.${VIEW_TO_DROP}" >> ${INSTALLER_DIR}/drop_dc_tables.sql
+				$ECHO "DROP VIEW IF EXISTS dcpublic.${VIEW_TO_DROP}" >> ${INSTALLER_DIR}/drop_dcpublic_tables.sql
+			else
+				TABLE_TO_DROP="${f1%\'}"
+				TABLE_TO_DROP="${TABLE_TO_DROP#\'}"
+				$ECHO "table" $TABLE_TO_DROP |$TEE -a ${LOG_FILE}
+				$ECHO "DROP TABLE IF EXISTS dc.${TABLE_TO_DROP}" >> ${INSTALLER_DIR}/drop_dc_tables.sql
+				$ECHO "DROP TABLE IF EXISTS dcpublic.${TABLE_TO_DROP}" >> ${INSTALLER_DIR}/drop_dcpublic_tables.sql
+			fi
+		done < ${DC_TABLES_TO_DELETE}
+		$ECHO "\nDropping DC Tables and views for dc\n" |$TEE -a ${LOG_FILE}
+		${DBISQL} @${connection_string_dc} ${INSTALLER_DIR}/drop_dc_tables.sql
+		if [[ $? -eq 0 ]];then
+			$ECHO "\nDC Tables and views for dc dropped successfully\n" | $TEE -a ${LOG_FILE}
+		else
+			_err_msg_="DC Tables and views for dc could not be dropped successfully"
+			abort_script "$_err_msg_"
+		fi
+		$ECHO "\nDropping DC Tables and views for dcpublic \n" |$TEE -a ${LOG_FILE}
+		${DBISQL} @${connection_string_dcpublic} ${INSTALLER_DIR}/drop_dcpublic_tables.sql
+		if [[ $? -eq 0 ]];then
+			$ECHO "\nDC Tables and views for dcpublic dropped successfully\n" | $TEE -a ${LOG_FILE}
+		else
+			_err_msg_="DC Tables and views for dcpublic could not be dropped successfully"
+			abort_script "$_err_msg_"
+			
+		fi
+	fi;
+	
+##############------------------DROP External Statement created views-----------------------------#################
+
+	if [[ ! -s ${EXT_STMT_VIEWS_TO_DELETE} ]] ; then
+		$ECHO "No views created by external statements to delete" | $TEE -a ${LOG_FILE}
+	else
+		$CP /dev/null ${INSTALLER_DIR}/drop_extstmt_views.sql
+		$ECHO "Views created by external statements to delete" | $TEE -a ${LOG_FILE}
+		while read view
+		do
+			$ECHO "View" $view | $TEE -a ${LOG_FILE}
+			$ECHO "DROP VIEW IF EXISTS dc.${view}" >> ${INSTALLER_DIR}/drop_extstmt_views.sql
+			$ECHO "DROP VIEW IF EXISTS dcpublic.${view}" >> ${INSTALLER_DIR}/drop_extstmt_views.sql
+		done < ${EXT_STMT_VIEWS_TO_DELETE}
+		$ECHO "Dropping views created by external statements" | $TEE -a ${LOG_FILE}
+		${DBISQL} @${connection_string_dc} ${INSTALLER_DIR}/drop_extstmt_views.sql
+		if [[ $? -eq 0 ]];then
+			$ECHO "Views created by external statements dropped successfully" | $TEE -a ${LOG_FILE}
+		else
+			_err_msg_="Views created by external statements could not be dropped successfully"
+			abort_script "$_err_msg_"
+		fi
+	fi
+}
+
+# ********************************************************************
+# Delete Techpack data from repdb
+# 
+#
+# ********************************************************************
+
+delete_from_repdb()
+{
+	$ECHO "Logging into database (dwhrep) to alter the tables." | $TEE -a ${LOG_FILE}
+	$ECHO "Creating stored procedure through remove_techpack_from_dwhrep.sql file" | $TEE -a ${LOG_FILE}
+	${DBISQL} @${connection_string_dwhrep_local} ${INSTALLER_DIR}/remove_techpack_from_dwhrep.sql
+	$ECHO "Passing parameters ${TECHPACK_NAME} to stored procedure dwhrep.DWHMONITOR_DWHREP" | $TEE -a ${LOG_FILE}
+	${DBISQL} @${connection_string_dwhrep_local} "EXECUTE dwhrep.DWHMONITOR_DWHREP ${TECHPACK_NAME};"
+	if [[ $? -eq 0 ]];then
+		$ECHO "Deleted techpack from dwhrep successfully" | $TEE -a ${LOG_FILE}
+	else
+		_err_msg_="Could not delete techpack from dwhrep"
+		abort_script "$_err_msg_"
+	fi
+
+	$ECHO "Logging into database (etlrep) to alter the tables." | $TEE -a ${LOG_FILE}
+	$ECHO "Creating stored procedure through remove_techpack_from_etlrep.sql file" | $TEE -a ${LOG_FILE}
+	${DBISQL} @${connection_string_etlrep} ${INSTALLER_DIR}/remove_techpack_from_etlrep.sql
+	$ECHO "Passing parameters ${TECHPACK_NAME} to stored procedure etlrep.DWHMONITOR_ETLREP" | $TEE -a ${LOG_FILE}
+	${DBISQL} @${connection_string_etlrep} "EXECUTE etlrep.DWHMONITOR_ETLREP ${TECHPACK_NAME};"
+	if [[ $? -eq 0 ]];then
+		$ECHO "Deleted techpack from etlrep successfully" | $TEE -a ${LOG_FILE}
+	else
+		_err_msg_="Could not delete techpack from etlrep"
+		abort_script "$_err_msg_"
+	fi
+}
+
+# ********************************************************************
+# Delete universe from ENIQ
+# 
+#
+# ********************************************************************
+
+delete_universe()
+{
+##############-----------------DELETE THE UNIVERSE-------------------####################
+	
+	UNIVERSE_FOLDER=$($LS ${INSTALLER_DIR}/bouniverses | $GREP ${BO_NAME})
+	if [[ ! -z "${UNIVERSE_FOLDER}" ]];then
+		$ECHO "Universe folder found: ${UNIVERSE_FOLDER}" | $TEE -a ${LOG_FILE}
+		$ECHO "Deleting universe" | $TEE -a ${LOG_FILE}
+		$RM -rf ${INSTALLER_DIR}/bouniverses/${UNIVERSE_FOLDER}
+		if [[ $? -eq 0 ]];then
+			$ECHO "Deleted universe successfully" | $TEE -a ${LOG_FILE}
+		else
+			_err_msg_="Could not delete universe folder"
+			abort_script "$_err_msg_"
+		fi
+	else
+		$ECHO "No universe folder found for this techpack.\n" | $TEE -a ${LOG_FILE}
+	fi
+}
+
+usage_msg()
+{
+	$ECHO "\nUsage:
+	./remove_techpack.sh <TechPack Name>
+	example:	#./remove_techpack.bsh DC_E_ERBS\n"
+	exit;
+}
+
+abort_script()
+{
+	if [ "$1" ]; then
+		_err_msg_=$1
+	else
+		_err_msg_="Script aborted.......\n"
+	fi
+	if [ "${LOG_FILE}" ]; then
+		$ECHO "\n$_err_msg_\n" | $TEE -a ${LOG_FILE}
+		cleanup
+		exit
+	else
+		$ECHO "\n$_err_msg_\n"
+		cleanup
+		exit
+	fi
+}
+
+cleanup()
+{
+	$ECHO "Cleaning up files before exit..." | $TEE -a ${LOG_FILE}
+	$RM ${DIM_TABLES_TO_DELETE} 2>/dev/null
+	$RM ${DIM_VECTOR_TABLES_TO_DELETE} 2>/dev/null
+	$RM ${DIM_VECTOR_VIEWS_TO_DELETE} 2>/dev/null
+	$RM ${DC_VIEWS_TO_DELETE} 2>/dev/null
+	$RM ${DC_TABLES_TO_DELETE} 2>/dev/null
+	$RM ${EXT_STMT_VIEWS_TO_DELETE} 2>/dev/null
+	$RM ${DC_TABLES_WITH_DATA} 2>/dev/null
+	$RM ${DEPENDENT_TP_LIST} 2>/dev/null
+	$RM ${EXT_STMT_LIST} 2>/dev/null
+	$RM ${INSTALLER_DIR}/get_dc_tables.sql 2>/dev/null
+	$RM ${INSTALLER_DIR}/drop_dim_tables.sql 2>/dev/null
+	$RM ${INSTALLER_DIR}/drop_vector_dim_tables.sql 2>/dev/null
+	$RM ${INSTALLER_DIR}/drop_vector_dim_views_dc.sql 2>/dev/null
+	$RM ${INSTALLER_DIR}/drop_vector_dim_views_dcpublic.sql 2>/dev/null
+	$RM ${INSTALLER_DIR}/drop_dc_tables.sql 2>/dev/null
+	$RM ${INSTALLER_DIR}/drop_dcpublic_tables.sql 2>/dev/null
+	$RM ${INSTALLER_DIR}/drop_extstmt_views.sql 2>/dev/null
+	
+}
+
+################-----------------MAIN PROGRAM-------------###############
+
+################-----------------if techpack name not specified then exit and print usage message-------------###############
+
+if [[ $# -eq 1 ]]; then
+	TECHPACK_NAME=$1
+	DIM_TECHPACK_NAME="DIM_E_${TECHPACK_NAME##*_}"
+	BO_NAME="BO_E_${TECHPACK_NAME##*_}_R"
+	DIM_VECTOR_REFERENCE="${DIM_TECHPACK_NAME}_VECTOR_REFERENCE"
+	VECTOR_FLAG_FILE="New_Vector_${TECHPACK_NAME}"
+	LOG_FILE=${LOG_DIR}/tp_installer/remove_techpack_${TECHPACK_NAME}.log
+	$DATE | $TEE -a $LOG_FILE
+	$ECHO "$TECHPACK_NAME\n" | $TEE -a $LOG_FILE
+else
+	usage_msg
+fi
+
+################----------------if sql files are not present, exit-----------------##################
+
+if [ ! -f ${INSTALLER_DIR}/remove_techpack_from_dwhrep.sql ] ; then
+	_err_msg_="${INSTALLER_DIR}/remove_techpack_from_dwhrep.sql does not exist"
+    abort_script "$_err_msg_"
+fi
+
+if [ ! -f ${INSTALLER_DIR}/remove_techpack_from_etlrep.sql ] ; then
+    _err_msg_="${INSTALLER_DIR}/remove_techpack_from_dwhrep.sql does not exist"
+    abort_script "$_err_msg_"
+fi
+
+check_install_type
+
+check_data
+
+check_show_dependents
+
+DIM_TABLES_TO_DELETE="${INSTALLER_DIR}/${DIM_TECHPACK_NAME}.csv"
+DIM_VECTOR_TABLES_TO_DELETE="${INSTALLER_DIR}/${DIM_TECHPACK_NAME}_V.csv"
+DIM_VECTOR_VIEWS_TO_DELETE="${INSTALLER_DIR}/${DIM_TECHPACK_NAME}_V_VIEW.csv"
+DC_VIEWS_TO_DELETE="${INSTALLER_DIR}/${TECHPACK_NAME}_VIEW.csv"
+DC_TABLES_TO_DELETE="${INSTALLER_DIR}/${TECHPACK_NAME}.csv"
+EXT_STMT_VIEWS_TO_DELETE="${INSTALLER_DIR}/${TECHPACK_NAME}_VIEW_EXT.csv"
+
+${CP} /dev/null ${DIM_TABLES_TO_DELETE}
+${CP} /dev/null ${DC_VIEWS_TO_DELETE}
+${CP} /dev/null ${DC_TABLES_TO_DELETE}
+${CP} /dev/null ${DIM_VECTOR_TABLES_TO_DELETE}
+${CP} /dev/null ${DIM_VECTOR_VIEWS_TO_DELETE}
+${CP} /dev/null ${EXT_STMT_VIEWS_TO_DELETE}
+
+get_delete_data
+
+##################----------------------user confirmation-----------------------###################
+
+$ECHO "\nThe following data will be deleted-
+1.	All DC/DIM/VECTOR tables and views created as part of Techpack
+2.	All the metadata from REPDB related to Techpack
+3.	Universe folder from the server
+
+For more details about which all tables will be dropped see the below files-
+
+${DIM_TABLES_TO_DELETE}
+${DC_VIEWS_TO_DELETE}
+${DC_TABLES_TO_DELETE}
+${DIM_VECTOR_TABLES_TO_DELETE}
+${DIM_VECTOR_VIEWS_TO_DELETE}
+${EXT_STMT_VIEWS_TO_DELETE}
+
+Changes are permanent and cannot be undone." | $TEE -a ${LOG_FILE}
+while true
+do
+	$ECHO "Please confirm removal of Techpack ${TECHPACK_NAME} from ENIQ" | $TEE -a ${LOG_FILE}
+	$ECHO "Are you sure you want to continue? (Y/N)" | $TEE -a ${LOG_FILE}
+	read option
+	case $option in
+	[Nn]*)
+		_err_msg_="Exiting TP deletion..."
+		abort_script "$_err_msg_"
+		;;
+	[Yy]*)
+		$ECHO "Deleting Techpack ${TECHPACK_NAME}" | $TEE -a ${LOG_FILE}
+		break
+		;;
+	*)
+		$ECHO "Invalid choice made" | $TEE -a ${LOG_FILE}
+		;;
+	esac
+done
+
+#################-------------------set engine to noloads--------------------####################
+
+$ECHO "\nSetting engine profile to noloads\n" | $TEE -a  ${LOG_FILE}
+engine -e changeProfile NoLoads
+if [[ $? -eq 0 ]];then
+	$ECHO "\nEngine set to noloads successfully\n" | $TEE -a  ${LOG_FILE}
+else
+	_err_msg_="Could not change engine profile"
+	abort_script "$_err_msg_"
+fi
+
+drop_tables_dwhdb
+
+delete_from_repdb
+
+delete_universe
+
+$RM ${VECTOR_FLAG_DIR}/${VECTOR_FLAG_FILE} 2>/dev/null
+
+cleanup
+#################-------------------set engine to normal--------------------####################
+$ECHO "\nSetting engine profile to normal\n " | $TEE -a ${LOG_FILE}
+engine -e changeProfile Normal
+$ECHO "\nEngine profile set to normal successfully\n " | $TEE -a ${LOG_FILE}
+$ECHO "\nTechpack $TECHPACK_NAME deleted successfully\n " | $TEE -a ${LOG_FILE}
+$DATE | $TEE -a ${LOG_FILE}
+$ECHO "\n*********************************************************************************\n" | $TEE -a ${LOG_FILE}

@@ -1,0 +1,2044 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ****************************************************************************************
+# Name    : tp_installer
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Revision: \at_eniq\eniq_stats_18a_consolidation\1
+# Purpose : Ericsson Network IQ Rolling Tech pack installer script
+# Usage   : tp_installer -p <path_to_tech_packs> -f <tech_pack_list_file> | -t <tech_pack_name> | -c <feature_name_list_file> [-n] [-s] [-d]
+#
+# Author  : Mairtin Deady
+# ****************************************************************************************
+
+AWK=/usr/bin/awk
+BASH=/usr/bin/bash
+CAT=/usr/bin/cat
+ECHO=/usr/bin/echo
+GEGREP=/usr/bin/egrep
+EGREP=/usr/bin/egrep
+HOSTNAME=/usr/bin/hostname
+NAWK=/usr/bin/awk
+RM=/usr/bin/rm
+SSH=/usr/bin/ssh
+SED=/usr/bin/sed
+GREP=/usr/bin/grep
+RED='\033[0;31m'
+NC='\033[0m' 
+GREEN='\033[0;32m'
+
+
+### Function: usage_msg ###
+#
+#   Print out the usage message
+#
+# Arguments:
+#	none
+# Return Values:
+#	none
+usage_msg()
+{
+  $ECHO ""
+  $ECHO "Usage: `basename $0` -p <path_to_tech_packs> -t [-n] [-s] [-d] [-N]"
+  $ECHO "Usage: `basename $0` -p <path_to_tech_packs> -f <tech_pack_name_list_file> [-n] [-s] [-d] [-N]"
+  $ECHO "Usage: `basename $0` -p <path_to_tech_packs> -c <feature_name_list_file> [-n] [-s] [-d] [-N] [-R]"
+  $ECHO "options:"
+  $ECHO "-f  : Path to a file containing list of tech packs to be installed."
+  $ECHO "-p  : Path to the directory containing tech pack installation files."
+  $ECHO "-t  : Name of the tech pack to install. Note that this parameter cannot be used with the -R parameter."
+  $ECHO "-n  : Skip required tech pack's checking during tech pack installation."
+  $ECHO "-s  : Create snapshots before installing any tech packs."
+  $ECHO "-d  : Skip R-state check during installation."
+  $ECHO "-c  : Path to a file containing list of feature names to be installed (list of cxc numbers)."
+  $ECHO "-R  : Install features on a rolling basis: ENIQ ETL is online, and each feature is deactivated before"
+  $ECHO "      its installation and activated again after its installation."
+  $ECHO "      This flag should only be set if your ENIQ system supports rolling upgrade."
+  $ECHO "-N  : Do not use the service_names file to lookup where engine is running"
+  $ECHO "      presume it's running on the same host as the $0 script is running on."
+  $ECHO "      This flag should only be set if called from eniq_core_[install|upgrade].sh scripts."
+
+   
+	# If -N flag is set, it is presumed the service is running locally and not
+	# under SMFs control, otherwise the /eniq/sw/conf/service_names file is used to 
+	# determine whether to call the service locally or remotely via SMF.
+	# The NMI flag should only be set when this script is called from the eniq_core_install
+	# or eniq_core_upgrade scripts.
+}
+
+cleanup(){
+	$ECHO "Cleaning up tp_installer.."
+	$RM -f ${TP_INSTALLER_FEATURE_FILE}
+	$RM -rf ${TMP_PRE}*
+	$RM -f ${TMP_DIR}/eniq_tp.txt
+	$RM -f ${FILTERED_TP_LIST}
+	$RM -f ${STAGE_FILE}
+	$RM -f ${INSTALL_TP_FILE}
+	$RM -f ${INSTALL_FEAT_FILE}
+	$RM -rf /tmp/RSTATE/
+	$RM -rf ${newTPListFile}
+	$RM -rf ${newTPDisableListFile}
+	
+	#Remove the locking file
+	$RM ${LOCK_FILE}
+	if [ ${installResult} -ne 0 ] ; then
+		# techpack install failed.....
+		$ECHO -e ${RED}"TECHPACK INSTALLATION FAILED WITH ERROR CODE :${installResult}. "${NC} | tee -a ${MAIN_LOGFILE}
+
+		exit ${installResult};
+	fi
+	if [ -f ${TMP_DIR}/_upgrade_last_feature ]; then
+		$RM ${TMP_DIR}/_upgrade_last_feature
+	fi
+	
+	if [ -f $dba_connection_string ]; then 
+		$RM -rf $dba_connection_string
+		if [ $? != 0 ]; then
+			$ECHO "Unable to delete " $dba_connection_string | $TEE -a ${MAIN_LOGFILE}
+		fi
+	fi
+	if [ -f $connection_string_dwhrep ]; then 
+		$RM -rf $connection_string_dwhrep
+		if [ $? != 0 ]; then
+			$ECHO "Unable to delete " $connection_string_dwhrep | $TEE -a ${MAIN_LOGFILE}
+		fi
+	fi
+}
+
+failed_installation_exit()
+{
+	#Remove the locking file
+	$RM -rf ${LOCK_FILE}
+	$RM -f ${STAGE_FILE}
+	$RM -f ${INSTALL_TP_FILE}
+	$RM -f ${INSTALL_FEAT_FILE}
+	
+	if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+		#Tech pack installation has failed. Restore the snapshot before the tech pack installation/upgrade.
+		rollback_snapshots
+		#Delete the snapshots.
+		delete_snapshots
+	fi
+	if [ "${ROLLING}" != "true" ]; then
+		${BIN_DIR}/engine -e changeProfile Normal >> ${MAIN_LOGFILE} 2>&1
+		if [ $? -ne 0 ] ; then
+			$ECHO "Failed to set engine's profile to Normal" | tee -a ${MAIN_LOGFILE}
+		fi
+	fi
+	# Unlock the dcbo and dcpublic user's from the dwh database after the installation or upgrade.
+	#${INSTALLER_DIR}/change_db_users_perm.bsh -a unlock -u ALL -l ${MAIN_LOGFILE} 2>&1
+	#if [ $? -ne 0 ] ; then
+	#	$ECHO "Failed to unlock database users.." | tee -a ${MAIN_LOGFILE}
+	#	exit 102
+	#fi
+	installResult=${1}
+
+	cleanup
+}
+
+### Function: run_command ###
+#
+# Function to figure out what host a command should be run on
+# Stuff like svcs/smf command need to be executed on the host the service
+# is defined on, so get the host from the service_names file and ssh to that
+# host and execute the command.
+#
+# If $3 is set to 'force_local' the command get execute locally regardless of what
+# the service_names file says
+#
+# Arguments:
+#   $1 : The service to call the action on
+#	$2 : The action to call on the service
+#	$3 : Determine if the command get called locally or use the service_name 
+#		 file to see if the command need to get executed remotely
+# Return Values:
+#   none
+run_command()
+{
+	if [ $# -ne 3 ] ; then
+		$ECHO "Usage $0 <service_name> <command> [force_local|lookup]"
+		$RM ${LOCK_FILE}
+		exit 61
+	fi
+	local _service_name_filter_=$1 #engine
+	local _command_="$2" #ActiveState=active
+	local _local_remote_=$3 #lookup
+	local _line_=`$CAT ${SERVICE_NAMES} | /usr/bin/egrep -v "^[[:blank:]]*#" | $EGREP ".*::.*::${_service_name_filter_}$"` #192.168.0.219::linux1::engine
+	if [ $? -ne 0 ] ; then
+		$ECHO "No service called '${_service_name_filter_}' found in ${SERVICE_NAMES}!" | tee -a ${MAIN_LOGFILE}
+		$RM ${LOCK_FILE}
+		exit 62
+	fi
+
+	local _service_name_validation_=`cat /eniq/sw/conf/service_names  | grep "engine" | awk -F"::" '{print $4}'` 
+	
+	if [ "$_service_name_filter_" == "$_service_name_validation_" ] ; then
+		#compressed ipv6
+		local _service_host_=`$ECHO $_line_ | /usr/bin/awk -F:: '{print $3}'` #linux1
+		local _service_name_=`$ECHO $_line_ | /usr/bin/awk -F:: '{print $4}'` #engine
+	else
+		#ipv4 and regular ipv6
+		local _service_host_=`$ECHO $_line_ | /usr/bin/awk -F:: '{print $2}'` #linux1
+		local _service_name_=`$ECHO $_line_ | /usr/bin/awk -F:: '{print $3}'` #engine
+	fi
+
+	local _mapped_service_=`map_servicename_to_servicecommand "$_service_name_"`
+	local _local_hostname_=`hostname`
+	local _cmd_log_=/var/tmp/ssr.log
+	$RM -rf ${_cmd_log_}
+	local _error_=0
+	# ${_local_remote_} should only be set to 'force_local' is the tp_installer script
+	# is being called from the eniq_core_install/eniq_core_upgrade scripts.
+	if [ "$_local_remote_" == "force_local" -o "$_local_hostname_" == "$_service_host_" ] ; then
+		$ECHO "Getting status for local service $_service_name_filter_ ..." >> ${MAIN_LOGFILE}
+		$ECHO "Executing command [${_command_}] on local host ${_service_host_}" >> ${MAIN_LOGFILE}
+		${_command_} > ${_cmd_log_} 2>&1
+		local _error_=$?
+		$ECHO "Return code from local command execution was ${_error_}" >> ${MAIN_LOGFILE}
+	else
+		$ECHO "Getting status for service $_service_name_filter_ on $_service_host_ ..." >> ${MAIN_LOGFILE}
+		local _etlc_user_=`iniget ETLC -f ${NIQ_INI} -v UserName`
+		local _full_command_="source ${CONF_DIR}/niq.rc ; ${_command_}"
+		$ECHO "Executing command [${_full_command_}] on remote host ${_service_host_}" >> ${MAIN_LOGFILE}
+		${SSH} ${_etlc_user_}@$_service_name_ "${_full_command_}" > ${_cmd_log_} 2>&1
+		local _error_=$?
+		$ECHO "Return code from remote command execution was ${_error_}" >> ${MAIN_LOGFILE}
+	fi
+	if [ $_error_ -ne 0 ] ; then
+		$ECHO "Failed to execute status command for service '${_service_name_filter_}'" | tee -a ${MAIN_LOGFILE}
+		$CAT ${_cmd_log_} | tee -a ${MAIN_LOGFILE}
+	else
+		$CAT ${_cmd_log_}
+	fi
+	$RM -rf ${_cmd_log_} > /dev/null
+	return $_error_
+}
+
+svcs_status()
+{
+	if [ $# -ne 1 ] ; then
+		 $ECHO "Usage $0 <service_name>"
+		 $RM ${LOCK_FILE}
+		 exit 63
+	 fi
+	 local _service_name_=$1
+	 local _mapped_service_=`map_servicename_to_servicecommand "$_service_name_"`
+	 local _status_command_="systemctl show eniq-$_service_name_ -p ActiveState"
+	 local _output_=`run_command $_service_name_ "${_status_command_}" lookup`
+	 if [ $? -ne 0 ] ; then
+		$ECHO $_output_ | tee -a ${MAIN_LOGFILE}
+		 return 1
+	 fi
+	 $ECHO "Result of status command: $_output_ " >> ${MAIN_LOGFILE}
+	 local _status_=`$ECHO "$_output_" | tail -1 | awk -F= '{print $2}'`
+	 $ECHO "$_service_name_ status is [$_status_]" >> ${MAIN_LOGFILE}
+	 $ECHO $_status_
+	 return $?
+}
+
+### Function: svcs_clear ###
+#
+# Clear a service in SMF
+#
+# Arguments:
+#   $1 : The service to call the action on
+# Return Values:
+#   0 : Cleared OK
+#	>=1 : Errors
+svcs_clear()
+{
+	if [ $# -ne 1 ] ; then
+		$ECHO "Usage $0 <service_name>"
+		$RM ${LOCK_FILE}
+		exit 64
+	fi
+	local _service_name_=$1
+	local _mapped_service_=`map_servicename_to_servicecommand "$_service_name_"`
+	local _clear_command_="${SMF_BIN_DIR}/eniq_service_start_stop.bsh -s $_mapped_service_ -a clear"
+	run_command "$_service_name_" "${_clear_command_}" "lookup"
+	return $?
+}
+
+### Function: ssr ###
+#
+# Start Stop Restart Function
+# e.g. ssr 'engine' 'stop'
+# e.g. ssr 'engine' 'start'
+#
+# If flag $NMI is set, it is presumed the service is running locally and not
+# under SMFs control, otherwise the /eniq/sw/conf/service_names file is used to 
+# determine whether to call the service locally or remotely via SMF.
+#
+# Arguments:
+#   $1 : The service to call the action on
+#	$2 : The action to call on the service
+# Return Values:
+#   none
+ssr()
+{
+	if [ $# -ne 2 ] ; then
+		$ECHO "Usage $0 <service_name> <start|stop>"
+		$RM ${LOCK_FILE}
+		exit 65
+	fi
+	local _service_name_filter_=$1
+	local _action_=$2
+	local _line_=`$CAT ${SERVICE_NAMES} | /usr/bin/egrep -v "^[[:blank:]]*#" | $EGREP ".*::.*::${_service_name_filter_}$"`
+	if [ $? -ne 0 ] ; then
+		$ECHO "No service called '${_service_name_filter_}' found in ${SERVICE_NAMES}!" | tee -a ${MAIN_LOGFILE}
+		exit 66
+	fi
+
+
+	local _service_name_validation_=`cat /eniq/sw/conf/service_names  | grep "engine" | awk -F"::" '{print $4}'` 
+	
+	if [ "$_service_name_filter_" == "$_service_name_validation_" ] ; then
+		#compressed ipv6
+		local _service_host_=`$ECHO $_line_ | /usr/bin/awk -F:: '{print $3}'` #linux1
+		local _service_name_=`$ECHO $_line_ | /usr/bin/awk -F:: '{print $4}'` #engine
+	else
+		#ipv4 and regular ipv6
+		local _service_host_=`$ECHO $_line_ | /usr/bin/awk -F:: '{print $2}'` #linux1
+		local _service_name_=`$ECHO $_line_ | /usr/bin/awk -F:: '{print $3}'` #engine
+	fi	
+
+	local _mapped_service_=`map_servicename_to_servicecommand "$_service_name_"`
+	local _local_hostname_=`$HOSTNAME`
+	
+	local _lr_="lookup"
+	if [ "$NMI" ] ; then
+		local _lr_="force_local"
+	fi
+	
+	#The NMI flag is only set when called from the eniq_core_install/eniq_core_upgrade scripts
+	#Engine is running on the coordinator for installs & small upgrades so we need to ignore
+	#what the service_names file says and just assume engine is running in localhost.
+	if [ "$_local_hostname_" == "$_service_host_" ] ; then
+		_cmd_dir_=${BIN_DIR}
+		if [ "$NMI" ] ; then
+			# Called from eniq_core_install/upgrade therefore SMF is not used so use direct start/stop script
+			_cmd_dir_=${ADMIN_DIR}
+		fi
+		local _command_="${_cmd_dir_}/$_mapped_service_ $_action_"
+	else
+		local _command_="${BIN_DIR}/$_mapped_service_ $_action_"
+	fi
+	run_command $_service_name_ "${_command_}" "${_lr_}"
+	return $?
+}
+
+map_servicename_to_servicecommand()
+{
+	local _mapped_service_=$1
+	if [[ $_mapped_service_ == dwh_reader_* ]] ; then
+		_mapped_service_="dwh_reader"
+	elif [[ $_mapped_service_ == licenceservice ]] ; then
+		_mapped_service_="licmgr"
+	fi
+	$ECHO $_mapped_service_
+}
+
+install_tpi() {
+	CURRENT_TP=${1}
+	$ECHO "1 ${CURRENT_TP} ${CURRENT_FEATURE} ${FEAT_FILE_PATH}" > ${STAGE_FILE}
+	name=${1}
+	checkRequired=${2}
+	CheckForPreviousMzTPInstall=${3}
+	$ECHO ""
+	$ECHO "Starting to install techpack ${name}" | tee -a ${MAIN_LOGFILE}
+	if [ -d $INSTALLER_DIR/tp_installer_temp ] ; then
+		$RM -r $INSTALLER_DIR/tp_installer_temp
+	fi
+	mkdir $INSTALLER_DIR/tp_installer_temp
+	mkdir $INSTALLER_DIR/tp_installer_temp/temp
+	mkdir $INSTALLER_DIR/tp_installer_temp/unzipped_tp
+	cp ${TP_DIR_PATH}/${name}*  $INSTALLER_DIR/tp_installer_temp/temp
+	chmod -Rf 750 $INSTALLER_DIR/tp_installer_temp/temp
+	TECH_PACK_FILE_PATH=""
+	TECH_PACK_FILENAME=""
+	TPI_FILE=`ls $INSTALLER_DIR/tp_installer_temp/temp`
+	if [ -z "${TPI_FILE}" ] ; then
+		$ECHO "File ${TP_DIR_PATH}/${name}* not found !! Exiting from script.." | tee -a ${MAIN_LOGFILE}
+		#call method to exit..
+		failed_installation_exit 41
+	fi
+	for file in $TPI_FILE
+	do
+		TECH_PACK_FILENAME=$file
+	done
+	TP_TIMESTAMP=`date +%Y.%m.%d_%H:%M:%S`
+	TP_LOGFILE=${LOG_DIR}/tp_installer/${TP_TIMESTAMP}_${TECH_PACK_FILENAME}.log
+	touch ${TP_LOGFILE}
+	$ECHO "Installing ${TECH_PACK_FILENAME}" | tee -a ${MAIN_LOGFILE}
+	${RT_DIR}/ant/bin/ant -f tasks_install_utils.xml -lib ${CPATH} -logfile ${TMP_DIR}/unzipresult -Ddc.installer.dir=${INSTALLER_DIR} -Dcurrent_working_directory=${CURRENT_WORKING_DIRECTORY} -Dtech_pack_file_name=${TECH_PACK_FILENAME} unzip_tech_pack_file >> ${MAIN_LOGFILE}
+	_unzip_=$?
+	$CAT ${TMP_DIR}/unzipresult >> ${MAIN_LOGFILE}
+	if [ $_unzip_ -ne 0 ] ; then
+		$RM -rf ${TMP_DIR}/unzipresult
+		$ECHO "Unzipping ${TECH_PACK_FILENAME} failed. See log file ${MAIN_LOGFILE} for details." | tee -a ${MAIN_LOGFILE}
+		failed_installation_exit 36
+	fi
+	if [ -f ${TMP_DIR}/unzipresult ] ; then
+	  $CAT ${TMP_DIR}/unzipresult | grep "BUILD SUCCESSFUL" > /dev/null
+	  _success_=$?
+	  $RM -rf ${TMP_DIR}/unzipresult
+	  if [ ${_success_} -ne 0 ] ; then
+		$ECHO "Unzipping of ${TECH_PACK_FILENAME} failed. See log file ${MAIN_LOGFILE} for details." | tee -a ${MAIN_LOGFILE}
+		#call exit method..
+		failed_installation_exit 37
+	  fi
+	fi
+	$ECHO "Techpack extracted" | tee -a ${MAIN_LOGFILE}
+	$ECHO "2 ${CURRENT_TP} ${CURRENT_FEATURE} ${FEAT_FILE_PATH}" > ${STAGE_FILE}
+	# below function added to handle shelfId. Refer EQEV-18767
+	$ECHO ${TECH_PACK_FILENAME} | /usr/bin/egrep DIM_E_IPTNMS > /dev/null 2>&1
+	if [ ! -f /eniq/sw/bin/IPTNMS_Installed ]; then
+		$ECHO ${TECH_PACK_FILENAME} | /usr/bin/egrep DIM_E_IPTNMS > /dev/null 2>&1
+		Is_Installing=$?
+		bash /eniq/sw/installer/installed_techpacks | /usr/bin/egrep DIM_E_IPTNMS > /dev/null 2>&1
+		Is_Installed=$?
+		if [ $Is_Installing -eq 0 ]; then
+			$ECHO "DIM_E_IPTNMS TP is installing. Creating local file for SO-EM parser. " | tee -a ${MAIN_LOGFILE}
+			/usr/bin/touch /eniq/sw/bin/IPTNMS_Installed
+			STATUS=$?
+			if [ ${STATUS} != 0 ]; then
+				echo "Could not able to create /eniq/sw/bin/IPTNMS_Installed file." | tee -a ${MAIN_LOGFILE}
+			fi
+		elif [ $Is_Installed -eq 0 ]; then
+			$ECHO "DIM_E_IPTNMS is already installed. Creating local file for SO-EM parser. " | tee -a ${MAIN_LOGFILE}
+			/usr/bin/touch /eniq/sw/bin/IPTNMS_Installed
+			STATUS=$?
+			if [ ${STATUS} != 0 ]; then
+				echo "Could not able to create /eniq/sw/bin/IPTNMS_Installed file." | tee -a ${MAIN_LOGFILE}
+			fi
+		fi
+	fi
+	# Start the actual tech pack installation/upgrade.
+	$ECHO "Executing install steps for ${TECH_PACK_FILENAME}" | tee -a ${MAIN_LOGFILE}
+	${RT_DIR}/ant/bin/ant -f tasks_tp_installer.xml -lib ${CPATH} -logfile ${TP_LOGFILE} -Dcurrent_working_directory=${CURRENT_WORKING_DIRECTORY} -DcheckForRequiredTechPacks=${checkRequired} -DforceInstall=${FORCE_INSTALL} -Dtech_pack_filename=${TECH_PACK_FILENAME} -DconfigurationDirectory=${CONF_DIR} -Ddc.platform.dir=${PLATFORM_DIR} -Ddc.installer.dir=${INSTALLER_DIR} -DbinDirectory=${BIN_DIR} -Dmz.home=${MZ_HOME} -Dmediation.inter=${MEDIATION_INTER} -Dtpdir=${TP_DIR_PATH} -DCheckPrevMzTPInstall=${CheckForPreviousMzTPInstall}
+	if [ -f ${TP_LOGFILE} ] ; then
+	  FAIL=`$CAT ${TP_LOGFILE} | grep "BUILD FAILED"`
+	  if [ -n "${FAIL}" ] ; then
+			if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+				# Tech pack installation has failed. Restore the snapshot before the tech pack installation/upgrade.
+				rollback_snapshots
+				# Delete the snapshots.
+				delete_snapshots
+			fi
+		  _TP_NAME_=`$ECHO ${TECH_PACK_FILENAME} | /usr/bin/awk -F"_" '{print $1"_"$2"_"$3}'`
+		  # Remove above created IPTNMS file
+		  if [ "${_TP_NAME_}" == "DIM_E_IPTNMS" ]; then
+			$RM -f /eniq/sw/bin/IPTNMS_Installed > /dev/null 2>&1
+		  fi
+		  # Unlock the dcbo and dcpublic user's from the dwh database after the installation or upgrade.
+		  #${INSTALLER_DIR}/change_db_users_perm.bsh -a unlock -u ALL -l ${MAIN_LOGFILE}
+		  
+		  License=`$CAT ${TP_LOGFILE} | grep "This techpack will not be installed. Please check the validity of the license"`
+			if [ -n "${License}" ] ; then
+				$ECHO "This techpack ${TECH_PACK_FILENAME} will not be installed due to INVALID LICENSE. " | tee -a ${MAIN_LOGFILE}
+				return 10
+			else
+				$ECHO " BUILD FAILED " | tee -a ${MAIN_LOGFILE}
+				return 38
+			fi
+	  fi
+	fi
+	$CAT ${TP_LOGFILE}
+	if [ -f ${TP_LOGFILE} ] ; then
+	  SUC=`$CAT ${TP_LOGFILE} | grep "BUILD SUCCESSFUL"`
+	  if [ -n "${SUC}" ] ; then
+		PrevInstall=`cat ${TP_LOGFILE} | grep "Checking for previous installed MZ techpack - Successfully completed. This techpack will not be installed."`
+		if [ -n "${PrevInstall}" ] ; then
+			$ECHO "This MZ TechPack will not be installed. Please check the version of installing techpack with already installed." | tee -a ${MAIN_LOGFILE}
+			return 99
+		fi
+		fi
+	  if [ -z "${SUC}" ] ; then
+		$ECHO "Installation failed. See log file ${TP_LOGFILE} for details." | tee -a ${MAIN_LOGFILE}
+			if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+				# Tech pack installation has failed. Restore the snapshot before the tech pack installation/upgrade.
+				rollback_snapshots
+				# Delete the snapshots.
+				delete_snapshots
+			fi
+		return 39
+	  fi
+	fi
+	$ECHO "${TECH_PACK_FILENAME} installed succesfully" | tee -a ${MAIN_LOGFILE}
+	 if [  "${CURR_SERVER_TYPE}" == "stats_coordinator"  -o "${CURR_SERVER_TYPE}" == "eniq_stats" ]; then
+		if [ -f /eniq/sw/installer/${TECH_PACK_FILENAME} ] ; then 
+			rm -rf ${TECH_PACK_FILENAME}
+		fi
+	fi
+	$ECHO "10 ${CURRENT_TP} ${CURRENT_FEATURE} ${FEAT_FILE_PATH}" > ${STAGE_FILE}
+	return 0
+} #End of install_tpi
+
+get_tp_install_order() {
+	tpNameFile=${1}
+	outputFile=${2}
+	newTPListFile=${3}
+	newTPDisableListFile=${4}
+	${RT_DIR}/ant/bin/ant -f tasks_install_utils.xml -lib ${CPATH} -Ddc.installer.dir=${INSTALLER_DIR} -DcheckForRequiredTechPacks=${CHECK_FOR_REQUIRED_TECH_PACKS} -Dlistfile=${tpNameFile} -Dtpdir=${TP_DIR_PATH} -DnewListFile=${newTPListFile} -DnewDisableListFile=${newTPDisableListFile} orderer > ${outputFile} 2>&1
+	$CAT ${orderFile}
+	if [ -f ${orderFile} ] ; then
+		SUC=`$CAT ${orderFile} | grep "BUILD SUCCESSFUL"`
+		if [ -z "${SUC}" ] ; then
+			$ECHO "Error in install orderer. Installation failed." | tee -a ${MAIN_LOGFILE}
+			failed_installation_exit 42
+		fi
+	fi
+}
+install_upgrade_techpacks(){
+	name=${1}
+	installResult=0
+	# install_tpi will restore snapshots...
+	install_tpi ${name} ${CHECK_FOR_REQUIRED_TECH_PACKS} 2
+	installResult=${?}
+	 if [ ${installResult} -eq 10 ] ; then
+		 installResult=0
+		 $ECHO "This techpack ${name} will not be installed due to INVALID LICENSE. " | tee -a ${MAIN_LOGFILE}	
+	elif [ ${installResult} -ne 0 ] ; then
+		$ECHO "This techpack ${name} failed to install ." | tee -a ${MAIN_LOGFILE}
+		# Rolling back repdb
+		${BACKUP_SCRIPTS_DIR}/repdb_restore.bsh -a active
+		 if [ ${?} -eq 0 ] ; then
+			$ECHO "repdb restored successfully" | tee -a ${MAIN_LOGFILE}
+		 else
+			 $ECHO "repdb could not be restored successfully" | tee -a ${MAIN_LOGFILE}
+		 fi
+		failed_installation_exit ${installResult}		
+	else
+		# If installing either of the base teckpacks, get engine to reload its 
+		# profiles, the base techpacks already run the ExecutionProfiler task.
+		# Make sure _basename_ is unset.
+		unset _basename_
+		if [[ $name =~ ^DWH_BASE_* ]] ; then
+			_basename_=DWH_BASE
+		fi
+		if [ ! -z "$_basename_" ] ; then
+			$ECHO "Getting engine to reload its profiles ..." | tee -a ${MAIN_LOGFILE}
+			engine -e startAndWaitSet $_basename_ ExecutionProfiler >> ${MAIN_LOGFILE} 2>&1
+			if [ $? -ne 0 ] ; then
+				$ECHO "Failed to get engine to regenerate its profiles ..." | tee -a ${MAIN_LOGFILE}
+				failed_installation_exit 101
+			fi
+			engine -e reloadProfiles >> ${MAIN_LOGFILE} 2>&1
+			if [ $? -ne 0 ] ; then
+				$ECHO "Failed to get engine to reload its profiles ..." | tee -a ${MAIN_LOGFILE}
+				failed_installation_exit 102
+			fi
+			# Make sure engine is in NoLoads after reloadProfiles
+			engine -e changeProfile NoLoads >> ${MAIN_LOGFILE} 2>&1
+			if [ $? -ne 0 ] ; then
+				$ECHO "Engine could not be set to NoLoads. Aborting techpack installation." | tee -a ${MAIN_LOGFILE}
+				failed_installation_exit 103
+			fi
+			$ECHO "Engine profiles reloaded successfully" | tee -a ${MAIN_LOGFILE}
+		fi
+	fi
+	return ${installResult};
+}
+
+install_rolling_upgrade_techpacks(){
+	tp_file_name=${1}
+	tpinstallResult=0
+	tp_name=`${ECHO} ${tp_file_name} | /usr/bin/awk -F"_R${tp_file_name##*_R}" '{print $1}'`
+	if [[ ("${tp_name}" =~ ^${monitorname}* && -n ${MONITORUPGRADED}) || ("${tp_name}" =~ ^${basename}*) && (-n ${BASEUPGRADED}) ]] ; then
+		#It is a non-feature teck pack that is already upgrade, or skipped, by install_tpi. Skip it now and go to next tech pack
+		$ECHO "Skipping ${tp_file_name} as upgrade already attempted." | tee -a ${MAIN_LOGFILE}
+		tpinstallResult=0
+		return ${tpinstallResult};
+	fi
+	deactivate_dependent_features $tp_name
+	if [ ${?} -ne 0 ] ; then
+		return 1
+	fi
+	# install_tpi will restore snapshots...
+	install_tpi ${tp_file_name} ${CHECK_FOR_REQUIRED_TECH_PACKS}
+	tpinstallResult=${?}
+	activate_dependent_features $tp_name
+	if [ ${tpinstallResult} -eq 10 ] ; then
+		tpinstallResult=0
+		$ECHO "This techpack ${tp_file_name} will not be installed due to INVALID LICENSE. " | tee -a ${MAIN_LOGFILE}	
+	else 
+		if [ ${tpinstallResult} -ne 0 ] ; then
+			$ECHO "This techpack ${tp_file_name} failed to install ." | tee -a ${MAIN_LOGFILE}
+			# Rolling back repdb
+			${BACKUP_SCRIPTS_DIR}/repdb_restore.bsh -a active
+			 if [ ${?} -eq 0 ] ; then
+				 $ECHO "repdb restored successfully" | tee -a ${MAIN_LOGFILE}
+			 else
+				 $ECHO "repdb could not be restored successfully" | tee -a ${MAIN_LOGFILE}
+			 fi
+			failed_installation_exit ${tpinstallResult}
+		fi
+	fi
+	if [ -f ${INSTALLER_DIR}/installed_artifacts ] ; then 
+		if [ -s ${INSTALLER_DIR}/installed_artifacts ] ; then
+			last_upgraded=$(tail -1 ${INSTALLER_DIR}/installed_artifacts)
+			$ECHO  "The last tech pack upgraded was ${last_upgraded}." 
+		else
+			$ECHO "No tech packs upgraded so far for ${feature}."
+		fi
+	else
+		$ECHO "Could not find ${INSTALLER_DIR}/installed_artifacts"
+		if [[ ("${tp_name}" =~ ^${monitorname}*) || ("${tp_name}" =~ ^${basename}*) ]] ; then
+			#It's a non-feature tech pack but we don't know if it was upgrade just now or skipped, so we don't know if we should run reloadProfiles bellow. So we need to fail the upgrade.
+			tpinstallResult=2
+		fi
+	fi
+	# If installing Stats base teckpack, start the execution profiler set. 
+	# The base techpacks already run the ExecutionProfiler task.
+	# Make sure basename is unset.
+	if [[ ("${tp_name}" =~ ^${basename}*) && ("${tp_file_name}" == ${last_upgraded}) ]] ; then
+		$ECHO  "Getting engine to run execution profiler action..." | tee -a ${MAIN_LOGFILE}
+		$ECHO  "${BIN_DIR}/engine -e startAndWaitSet $tp_name ExecutionProfiler" | tee -a ${MAIN_LOGFILE}
+		${BIN_DIR}/engine -e startAndWaitSet $tp_name ExecutionProfiler | tee -a ${MAIN_LOGFILE}
+		if [ $? -ne 0 ] ; then
+			$ECHO "Failed to get engine to run execution profiler action..." | tee -a ${MAIN_LOGFILE}
+			tpinstallResult=3
+		fi
+	fi
+	#If it's a non-feature tech pack then reload profiles, reload config, and enable sets of the tech pack.
+	if [[ ("${tp_name}" =~ ^${monitorname}*) || ("${tp_name}" =~ ^${basename}*) ]] ; then
+		#If tech pack has actually been upgraded (rather than skipped)
+		if [ "${tp_file_name}" == "${last_upgraded}" ] ; then
+			$ECHO "${BIN_DIR}/engine -e reloadProfiles"  | tee -a ${MAIN_LOGFILE}
+			${BIN_DIR}/engine -e reloadProfiles >> ${MAIN_LOGFILE}  | tee -a ${MAIN_LOGFILE}
+			if [ $? -ne 0 ] ; then
+				$ECHO "Failed to get engine to reload its profiles ..." | tee -a ${MAIN_LOGFILE}
+				tpinstallResult=4
+			fi
+			$ECHO "${BIN_DIR}/engine -e reloadConfig"  | tee -a ${MAIN_LOGFILE}
+			${BIN_DIR}/engine -e reloadConfig >> ${MAIN_LOGFILE}  | tee -a ${MAIN_LOGFILE}
+			if [ $? -ne 0 ] ; then
+				$ECHO "Failed to get engine to reload properties ..." | tee -a ${MAIN_LOGFILE}
+				tpinstallResult=5
+			fi
+		fi
+		$ECHO "${BIN_DIR}/engine -e enableSet ${tp_name} -d" | tee -a ${MAIN_LOGFILE}
+		${BIN_DIR}/engine -e enableSet "${tp_name}" -d | tee -a ${MAIN_LOGFILE}
+		$ECHO "${BIN_DIR}/scheduler activate" | tee -a ${MAIN_LOGFILE}
+		${BIN_DIR}/scheduler activate | tee -a ${MAIN_LOGFILE}
+	fi
+	if [[ ("${tp_name}" =~ ^${monitorname}* && -z ${MONITORUPGRADED}) ]] ; then
+		MONITORUPGRADED="yes" #Indicates that upgrade of monitor tech pack was attempted (but not necessarily upgraded)
+	elif [[ ("${tp_name}" =~ ^${basename}* && -z ${BASEUPGRADED}) ]] ; then
+		BASEUPGRADED="yes" #Indicates that upgrade of base tech pack was attempted (but not necessarily upgraded)
+	fi
+	return ${tpinstallResult};
+}
+
+deactivate_dependent_features () {
+	local tp_name=$1
+	return_value=0
+	if [[ $tp_name =~ ^${CPP_TECHPACK_NAME} && -z ${CPP_UPGRADED} ]] ; then
+		#Get the active interfaces that are dependent on CPP tech pack, find out if any do not belong to
+		#current feature being upgraded, and deactivate them.
+		$ECHO "Going to deactivate interfaces dependent on $tp_name that do not belong to the feature currently being upgraded.." | tee -a ${MAIN_LOGFILE}
+		local get_dependents_command="${INSTALLER_DIR}/get_active_interfaces -t $tp_name"
+		$ECHO "Getting active interfaces dependent on ${tp_name}" | tee -a ${MAIN_LOGFILE}	
+		$ECHO $get_dependents_command | tee -a ${MAIN_LOGFILE}	
+		local cpp_dependent_interfaces=`$get_dependents_command | tee -a ${MAIN_LOGFILE}`
+		$ECHO "${cpp_dependent_interfaces}"
+		if [ -n "${cpp_dependent_interfaces}" ] ; then
+			while read interface_with_alias ; do
+				#Iterate for each interface dependent on cpp.
+				#interface_with_alias will be something like "INTF_DC_E_ERBS eniq_oss_1" 
+				local interface_name=`$ECHO $interface_with_alias | /usr/bin/awk '{print $1}'` #Parse the 1st part of it to get name, e.g. INTF_DC_E_ERBS
+				#Check if belongs to current feature that is being upgraded:
+				$ECHO "${INTERFACES_LIST}" | $GREP -iw $interface_name >> /dev/null
+				if [ ${?} -ne 0 ] ; then
+					#Not found in grep. It is an interface that is NOT part of current feature being upgrade, so deactivate it.
+					local alias=`$ECHO $interface_with_alias | /usr/bin/awk '{print $2}'` #Get the alias of the interface
+					local deactivate_command="${INSTALLER_DIR}/deactivate_interface -i $interface_name -o $alias"
+					$ECHO $deactivate_command | tee -a ${MAIN_LOGFILE}	
+					$RM ${LOCK_FILE}
+					$deactivate_command | tee -a ${MAIN_LOGFILE}	
+					if [ ${PIPESTATUS} -ne 0 ] ; then
+						touch ${LOCK_FILE}
+						$ECHO "ERROR: deactivate of interface ${interface_with_alias} prior to upgrade of ${CPP_TECHPACK_NAME} tech pack failed" | tee -a ${MAIN_LOGFILE}	
+						return_value=1
+						break
+					fi
+					touch ${LOCK_FILE}
+					#Add the interface to list of dependent interfaces of other features
+					if [ -z "${dependent_intf_list}" ] ; then
+						#Add it this way when it's the first one, to avoid emptly line at top of list
+						dependent_intf_list=$interface_with_alias 
+					else
+						#..otherwise do it this way
+						dependent_intf_list="${dependent_intf_list}
+${interface_with_alias}"
+					fi
+				fi
+			done <<< "${cpp_dependent_interfaces}"
+			if [ -z "${dependent_intf_list}" ] ; then
+				if [ $return_value -eq 0 ] ; then
+					$ECHO "None found to be of another feature" | tee -a ${MAIN_LOGFILE}
+				fi
+				$ECHO "No interface deactivations done."  | tee -a ${MAIN_LOGFILE}	
+			else
+				$ECHO "Summary of deactivated interfaces:
+${dependent_intf_list}"   | tee -a ${MAIN_LOGFILE}	#This list will be used later for activation
+			fi
+		else
+			$ECHO "There are no active interfaces dependent on $tp_name. No interfaces will be deactivated." | tee -a ${MAIN_LOGFILE}
+		fi
+	fi
+	return $return_value
+}
+
+activate_dependent_features () {
+	local tp_name=$1
+	return_value=0
+	if [[ $tp_name =~ ^${CPP_TECHPACK_NAME} && -z ${CPP_UPGRADED} ]] ; then
+		CPP_UPGRADED=true
+		if [ -z "${dependent_intf_list}" ] ; then
+			$ECHO "No CPP dependent interfaces of other features to activate"
+		else
+			$ECHO "Going to activate interfaces dependent on $tp_name that do not belong to feature currently being upgraded."
+			touch /tmp/interfacelockfile
+			while read interface_with_alias ; do
+				#Iterate for each interface to be activated.
+				#It will be something like e.g. "INTF_DC_E_ERBS eniq_oss_1". 
+				local interface_name=`$ECHO $interface_with_alias | /usr/bin/awk '{print $1}'` #Parse the 1st part of it to get name, e.g. INTF_DC_E_ERBS
+				local alias=`$ECHO $interface_with_alias | /usr/bin/awk '{print $2}'` #Get the alias of the interface
+				local activate_command="${INSTALLER_DIR}/activate_interface -i $interface_name -o $alias"
+				$ECHO $activate_command | tee -a ${MAIN_LOGFILE}
+				$RM ${LOCK_FILE}
+				$activate_command | tee -a ${MAIN_LOGFILE}
+				if [ ${PIPESTATUS} -ne 0 ] ; then
+					$ECHO "ERROR: could not activate interface ${interface_with_alias} after upgrade of ${tp_name} tech pack" | tee -a ${MAIN_LOGFILE}
+					return_value=1
+					touch ${LOCK_FILE}
+					break
+				else
+					touch ${LOCK_FILE}
+					#Add interfaces to list of activated interfaces
+					if [ -z "${activated_interfaces}" ] ; then
+						#Add it this way when it's the first one, to avoid emptly line at top of list
+						activated_interfaces=$interface_with_alias 
+					else
+						#..otherwise do it this way
+						activated_interfaces="${activated_interfaces}
+${interface_with_alias}"
+						fi
+					fi
+			done <<< "${dependent_intf_list}"
+			rm -rf /tmp/interfacelockfile
+			$ECHO "${BIN_DIR}/engine -e reloadConfig"  | (tee -a ${MAIN_LOGFILE})
+			${BIN_DIR}/engine -e reloadConfig | (tee -a ${MAIN_LOGFILE})
+			$ECHO "Activating Scheduler. Using ${BIN_DIR}/scheduler activate" | (tee -a ${MAIN_LOGFILE})
+			${BIN_DIR}/scheduler activate | (tee -a ${MAIN_LOGFILE})
+			$ECHO "Summary of activated interfaces:
+${activated_interfaces}"  | tee -a ${MAIN_LOGFILE}	
+			unset dependent_intf_list
+		fi
+	fi
+	return $return_value
+}
+#### - SHARED FUNCTIONS - #####
+#
+# Functions extracted out of both standard and rolling tp install procedure
+#
+#### - SHARED FUNCTIONS - #####
+
+setup_tp_list_files(){
+	
+	orderFile=${TMP_DIR}/orderresult
+	newTPListFile=${TMP_DIR}/newListFile
+	newTPDisableListFile=${TMP_DIR}/newDependencyTPListFile
+	if [ -f ${orderFile} ] ; then
+		$RM -rf ${orderFile}
+		touch ${orderFile}
+	fi
+
+	if [ -f ${newTPListFile} ] ; then
+		$RM -rf ${newTPListFile}
+		touch ${newTPListFile}
+	fi
+	
+	if [ -f ${newTPDisableListFile} ] ; then
+		$RM -rf ${newTPDisableListFile}
+		touch ${newTPDisableListFile}
+	fi
+	
+	get_tp_install_order ${TP_LIST_FILE} ${orderFile} ${newTPListFile} ${newTPDisableListFile}
+	if [ -s ${newTPListFile} ] ; then
+		$ECHO "List of TP to be installed " | tee -a ${MAIN_LOGFILE}
+	else
+		$ECHO "All dependent tech packs are already up-to-date" | tee -a ${MAIN_LOGFILE}
+	fi
+	$CAT ${newTPListFile}
+	if [ -f "${newTPListFile}.full" ] ; then
+		$RM -rf "${newTPListFile}.full"
+		touch "${newTPListFile}.full"
+	fi
+	
+	cp ${newTPListFile} ${newTPListFile}.full
+	WF_TP_LIST=${TMP_DIR}/wflist
+	$RM -rf ${newTPListFile}
+	if [ -f ${WF_TP_LIST} ] ; then
+		$RM -rf ${WF_TP_LIST}
+		touch ${WF_TP_LIST}
+	fi
+	
+	for x in $WF_TPNAME_MATCH
+	do
+		$CAT ${newTPListFile}.full | egrep -v "$x" > "${newTPListFile}"
+		
+		$CAT ${newTPListFile}.full | egrep "$x" >> "${WF_TP_LIST}"
+		$CP ${newTPListFile} ${newTPListFile}.full
+	done
+	if [ "${CREATE_SNAPSHOTS}" = "true" -a "${ROLLING}" != "true" ]; then
+		# Create the snapshots.
+		create_snapshots
+		$ECHO "All required snapshots created" | tee -a ${MAIN_LOGFILE}
+	fi
+	numberOfTechpacks=`$CAT ${newTPListFile} | wc -l | /usr/bin/awk '{print $1}'`
+}
+
+wait_for_engine_to_online(){
+	ENGINE_SMF_STATUS=`svcs_status engine`
+	RETRY_COUNT=0
+	until [ "${ENGINE_SMF_STATUS}" = "active" ]
+	do
+		if [ $RETRY_COUNT -gt 30 ]; then
+			break
+		fi
+		sleep 10
+		ENGINE_SMF_STATUS=`svcs_status engine`
+		if [ $? -ne 0 ] ; then
+			$ECHO "Error getting engines status: $ENGINE_SMF_STATUS" | tee -a ${MAIN_LOGFILE}
+		fi
+		RETRY_COUNT=`expr $RETRY_COUNT + 1`
+		$ECHO "Waiting for engine to go online" | tee -a ${MAIN_LOGFILE}
+	done
+}
+
+wait_for_engine_to_initialize(){
+	ENGINE_INIT_STATUS=`engine status 2>&1 | egrep "Priority Queue disabled|Connection to engine refused.|engine is not running" | wc -m | /usr/bin/awk '{print $1}'`
+
+	RETRY_COUNT=0
+	
+	until [ "${ENGINE_INIT_STATUS}" = "0" ]
+	do
+		if [ $RETRY_COUNT -gt 30 ]; then
+			break
+		fi
+		sleep 10
+		ENGINE_INIT_STATUS=`engine status 2>&1 | egrep "Priority Queue disabled|Connection to engine refused.|engine is not running" | wc -m | /usr/bin/awk '{print $1}'`
+		RETRY_COUNT=`expr $RETRY_COUNT + 1`
+		$ECHO "Waiting for engine to initialize properly" | tee -a ${MAIN_LOGFILE}
+	done
+}
+
+backup_repdb(){
+	#Backing up repdb if needed to be restored later
+	${BACKUP_SCRIPTS_DIR}/repdb_backup.bsh
+	if [ ${?} -eq 0 ] ; then
+		$ECHO " repdb backed up successfully" | tee -a ${MAIN_LOGFILE}
+	else
+		$ECHO "Error: repdb backup failed. Aborting tech pack installation" | tee -a ${MAIN_LOGFILE}
+		installResult=57
+		failed_installation_exit 57
+	fi
+}
+
+install_normal_tps(){
+	for name in `${CAT} ${newTPListFile} |${EGREP} -v "^M_E"` ; do
+		if [ "${ROLLING}" == "true" ]; then
+			install_rolling_upgrade_techpacks ${name}
+		else
+			install_upgrade_techpacks ${name}
+		fi
+		installResult=${?}
+		$ECHO "${name}" >> ${INSTALL_TP_FILE}
+			
+		if [ ${installResult} -ne 0 ] ; then
+			break;
+		else
+			$DBISQL @${dba_connection_string} "select getdate() ,* from sa_eng_properties(); output to '/eniq/backup/before.txt' append;call sa_flush_cache();select getdate() ,* from sa_eng_properties(); output to '/eniq/backup/after.txt' append" > /dev/null 2>&1
+		fi
+	done
+}
+
+upgrade_tps_for_feature(){
+	#Delete and create file for writing list of tech packs that actually get upgraded
+	if [ -f "${INSTALLER_DIR}/installed_artifacts" ] ; then
+		$ECHO $'\n'"Removing old list of upgraded/installed tech packs:" | tee -a ${MAIN_LOGFILE}
+		$ECHO "${RM} ${INSTALLER_DIR}/installed_artifacts" | tee -a ${MAIN_LOGFILE}
+		$RM "${INSTALLER_DIR}/installed_artifacts"
+	fi
+	touch ${INSTALLER_DIR}/installed_artifacts
+	
+	if [ "${ROLLING}" != "true" ]; then
+		backup_repdb
+	fi			
+	#And now upgrade the normal tech packs - consecutively
+	if [ ${installResult} -eq 0 ] ; then
+		install_normal_tps
+	fi
+}
+list_active_interfaces(){
+	$ECHO "" | tee -a ${MAIN_LOGFILE}
+	$ECHO "Getting Active interfaces with ${INSTALLER_DIR}/get_active_interfaces" | tee -a ${MAIN_LOGFILE}
+	ACTIVE_INTERFACES=`${INSTALLER_DIR}/get_active_interfaces | tee ${TMP_DIR}/activeInterfaces`
+	$ECHO "${ACTIVE_INTERFACES}" | tee -a ${MAIN_LOGFILE}
+}
+
+#### install_feature() #####
+#
+# Function to add all the installed feature to the  feature file /eniq/sw/installer/installed_feature
+# Arguments : Feature(CXC number) $1
+#
+############  
+install_feature() {
+feature=$1
+FEATURE_FILE=/eniq/sw/installer/installed_features
+if [ -f /tmp/RSTATE/.$feature ]; then
+	if [ -f $FEATURE_FILE ] ; then
+		_Feature_file_=1
+		feature_exist=`$CAT $FEATURE_FILE | $GREP $feature`
+	fi
+	if [[ ${_Feature_file_} ]] && [[ ! -z "$feature_exist" ]] ; then
+		$ECHO "$feature exist.. hence replacing the Rstate..." | tee -a ${MAIN_LOGFILE}
+		$SED  "/^$feature/d" $FEATURE_FILE > /tmp/temp_file
+		$MV /tmp/temp_file $FEATURE_FILE
+		RESULT=`$CAT /tmp/RSTATE/.$feature`	
+		$ECHO "$RESULT " >> $FEATURE_FILE | tee -a ${MAIN_LOGFILE}
+        $RM -rf /tmp/temp_file
+	else
+		$ECHO "add the $feature to the $FEATURE_FILE " | tee -a ${MAIN_LOGFILE}
+		RESULT=`$CAT /tmp/RSTATE/.$feature`	
+		$ECHO "$RESULT " >> $FEATURE_FILE | tee -a ${MAIN_LOGFILE}
+	fi		
+fi
+}
+
+if [ $# -eq 0 ] ; then
+	usage_msg
+	exit 2
+fi
+
+if [ -z "${CONF_DIR}" ] ; then
+  $ECHO "Environment variable CONF_DIR is not set or empty. Tech pack installation aborted."
+  exit 21
+fi
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  $ECHO "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 22
+fi
+
+. ${CONF_DIR}/niq.rc
+
+if [ -z "$INSTALLER_DIR" ] ; then
+	$ECHO "Environment variable INSTALLER_DIR is not set or empty. Tech pack installation aborted." | tee -a ${TP_INSTALLER_LOGFILE}
+	exit 24
+fi
+
+if [ ! -r "${INSTALLER_DIR}/snapshot_functions.bsh" ] ; then
+  $ECHO "ERROR: Snapshot functions file is not readable at ${INSTALLER_DIR}/snapshot_functions.bsh"
+  exit 49
+fi
+
+ENIQ_BASE_DIR="/eniq"
+TMP_DIR="/tmp"
+VAR_TMP_DIR="/var/tmp"
+CONFIG_PROP="${MEDIATION_INTER}/etc/configuration.prop"
+WF_TPNAME_MATCH="^M_E_SGEH ^M_E_MSS ^M_E_GSN ^M_E_GPEH ^M_E_LTEEFA ^M_E_GSMEFA ^M_E_DVTP ^M_E_CTRS ^M_E_LTEES"
+COMMON_FUNCTIONS=${ENIQ_BASE_DIR}/installation/core_install/lib/common_functions.lib
+SERVICE_NAMES=$CONF_DIR/service_names
+NIQ_INI=$CONF_DIR/niq.ini
+CPP_TECHPACK_NAME=DC_E_CPP
+CPP_UPGRADED=
+CURRENT_TP=""
+CURRENT_FEATURE=""
+CURRENT_FAJ_FILE=${TMP_DIR}/tpinstall_feat_file
+
+if [ -f ${COMMON_FUNCTIONS} ] ; then
+	. ${COMMON_FUNCTIONS}
+else
+	$ECHO "Cant not find file ${COMMON_FUNCTIONS}"
+	exit 53
+fi
+TMP_PRE=.wfu.;
+
+# Include the snapshot functions.
+. ${INSTALLER_DIR}/snapshot_functions.bsh
+
+TIMESTAMP=`date +%Y.%m.%d_%H:%M:%S`
+
+if [ -z "$CONF_DIR" ] ; then
+	$ECHO "Environment variable CONF_DIR is not set or empty. Tech pack installation aborted."
+	exit 48
+fi
+
+if [ ! -d ${LOG_DIR}/tp_installer ] ; then
+  mkdir -p ${LOG_DIR}/tp_installer
+fi
+
+MAIN_LOGFILE=${LOG_DIR}/tp_installer/${TIMESTAMP}_tp_installer.log
+FILTERED_TP_LIST=${TMP_DIR}/filtered_tplist
+BACKUP_SCRIPTS_DIR=${ENIQ_BASE_DIR}/bkup_sw/bin
+touch ${MAIN_LOGFILE}
+$ECHO "Execution Args:" >> ${MAIN_LOGFILE}
+$ECHO $* >> ${MAIN_LOGFILE}
+if [ -z "$PLATFORM_DIR" ] ; then
+	$ECHO "Environment variable PLATFORM_DIR is not set or empty. Tech pack installation aborted." | tee -a ${MAIN_LOGFILE}
+	exit 23
+fi
+
+if [ -z "$RT_DIR" ] ; then
+	$ECHO "Environment variable RT_DIR is not set or empty. Tech pack installation aborted." | tee -a ${MAIN_LOGFILE}
+	exit 25
+fi
+
+if [ -z "$ADMIN_BIN" ] ; then
+	$ECHO "Environment variable ADMIN_BIN is not set or empty. Tech pack installation aborted." | tee -a ${MAIN_LOGFILE}
+	exit 26
+fi
+
+if [ -z "$DATA_DIR" ] ; then
+	$ECHO "Environment variable DATA_DIR is not set or empty. Tech pack installation aborted." | tee -a ${MAIN_LOGFILE}
+	exit 47
+fi
+
+
+CPATH="${INSTALLER_DIR}/lib/installer.jar"
+INSTALLER_JARPATH="${CPATH}"
+if [ ! -r "${CPATH}" ] ; then
+  $ECHO "ERROR: Jar file "installer.jar" is not readable at ${CPATH}" | tee -a ${MAIN_LOGFILE}
+  exit 27
+fi
+for _jar_ in `find ${PLATFORM_DIR}/*/dclib/ -name "*.jar"` ; do
+	_flag_=1
+	CPATH="${CPATH}:${_jar_}"
+done
+# Check if the PLATFORM_DIR was correct and at least some jar-files are added to classpath.
+if [ ! "${_flag_}" ] ; then
+	$ECHO "Cannot find any jar-files within directories in ${PLATFORM_DIR}. Tech pack installation aborted." | tee -a ${MAIN_LOGFILE}
+	exit 28
+fi
+
+NASONLINE=`systemctl list-units|egrep 'NASd|NAS-online'|wc -l`
+if [ $NASONLINE -eq 0 ]; then
+ echo "NAS IS NOT PRESENT. INSTALLATION WILL CONTINUE"
+elif [ $NASONLINE -eq 2 ]; then
+ NASONLINE=`systemctl list-units|egrep 'NASd|NAS-online'|grep -wi active|wc -l`
+
+ if [ $NASONLINE -eq 2 ]; then
+   echo "NAS is online"
+ else
+   echo "NAS is not online"
+   exit 30
+ fi
+fi
+
+echo "TP Installation will start"
+
+if [ -z "$ENIQ_INI" ] ; then
+	ENIQ_INI="niq.ini"
+fi
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+ANT_HOME=${RT_DIR}/ant
+export ANT_HOME
+
+CURRENT_WORKING_DIRECTORY=`pwd`
+
+while getopts ":f:p:t:c:nsdRNX" Option
+do
+  case $Option in
+	f) TP_LIST_FILE="$OPTARG"
+	   ;;
+	p) TP_DIR_PATH="$OPTARG"
+	   ;;
+	t) TP_NAME="$OPTARG"
+	   ;;
+	c) FEATURE_LIST_FILE="$OPTARG" # a file with a list of cxc numbers
+	   ;;
+	n) CHECK_FOR_REQUIRED_TECH_PACKS=false
+	   ;;
+	s) CREATE_SNAPSHOTS=true
+	   ;;
+	d) FORCE_INSTALL=true
+	   ;;
+	R) ROLLING=true
+	   ;;
+	N) NMI=1
+	   ;;
+	X) DONT_PROVISION=YES
+	   ;;
+   \?) usage_msg
+	   exit 29
+	   ;;
+  esac
+done
+
+# Check for absolute or relative path
+if [[ $FEATURE_LIST_FILE =~ ^/ ]]; then
+	FEAT_FILE_PATH=${FEATURE_LIST_FILE}
+else
+	FEAT_FILE_PATH=${CURRENT_WORKING_DIRECTORY}/${FEATURE_LIST_FILE}
+fi
+
+# Must have tech pack directory path given as parameter.
+if [ -z "${TP_DIR_PATH}" ]; then
+	usage_msg
+	exit 30
+fi
+
+# Check that not both the optional parameters are given as parameter.
+if [ "${FEATURE_LIST_FILE}" -a "${TP_NAME}" ]; then
+	$ECHO "Use of -t and -c parameters detected...exiting.." | tee -a ${MAIN_LOGFILE}
+	usage_msg
+	exit 33
+fi
+
+# Check that not both the rolling and single TP option are given.
+if [ "${ROLLING}" == "true" -a "${TP_NAME}" ]; then
+	$ECHO "Use of -t and -R parameters detected...exiting.." | tee -a ${MAIN_LOGFILE}
+	usage_msg
+	exit 33
+fi
+
+# Check that not both the rolling and tech pack list file option are given.
+if [ "${ROLLING}" == "true" -a "${TP_LIST_FILE}" ]; then
+	$ECHO "Use of -t and -R parameters detected...exiting.." | tee -a ${MAIN_LOGFILE}
+	usage_msg
+	exit 33
+fi
+
+# Must have either list of tech packs, or or list of features or, one tech pack name to install.
+if [ ! -z "${TP_LIST_FILE}" ] ; then
+  if [ ! -f "${TP_LIST_FILE}" ] ; then
+	echo "Can't read ${TP_LIST_FILE}" | tee -a ${MAIN_LOGFILE}
+	exit 31
+  else
+	for tp_name in `$CAT ${TP_LIST_FILE}`; do		
+		count=`ls -lrt ${TP_DIR_PATH} | grep ${tp_name}|wc -l`
+		if [ $count -eq 0 ];then
+		 $ECHO "${tp_name}.tpi file is not present in the directory ${TP_DIR_PATH}.Aborting installation." | tee -a ${MAIN_LOGFILE}
+		exit 31
+		fi
+	done
+	echo "Copying ${TP_LIST_FILE} to /tmp/tplist" | tee -a ${MAIN_LOGFILE}
+	cat "${TP_LIST_FILE}" > /tmp/tplist 
+	TP_LIST_FILE=/tmp/tplist
+  fi
+elif [ ! -z "${FEATURE_LIST_FILE}" ]; then
+  if [ ! -f "${FEATURE_LIST_FILE}" ] ; then
+	$ECHO "Can't read ${FEATURE_LIST_FILE}" | tee -a ${MAIN_LOGFILE}
+	exit 45
+  fi
+elif [ -z "${TP_NAME}" ]; then
+	usage_msg
+	exit 32
+fi
+
+#Check if the eniq_core_inst_stage file exists. If it does not exists upgrade cannot be carried out as initial installation of eniq has not happened
+if [ -f ${ENIQ_BASE_DIR}/installation/core_install/etc/eniq_core_inst_stage ]; then
+	$ECHO "Eniq Core Status file found" | tee -a ${MAIN_LOGFILE}
+else
+	$ECHO "Eniq Core Status file not found. Exiting upgrade" | tee -a ${MAIN_LOGFILE}
+	exit 51
+fi
+
+#Check that no other tp_installer process is running. Simultaneous execution of tp_installer will cause trouble.
+LOCK_FILE=${CURRENT_WORKING_DIRECTORY}/install_lockfile
+if [ -f $LOCK_FILE ]; then
+	active_process=`ps -af | grep "tp_installer" | grep -v "grep" | wc -l`
+	if [ $active_process -ne 2 ]; then
+		 $ECHO "Another instance of tp_installer or activate_interface or deactivate_interface script is running. Please wait for it to finish first and then try again. If no other instance of tp_installer script  or activate_interface or deactivate_interface is running please check the log of the last installed tp/interface or the last activated/deactivated interface in the /eniq/log/sw_log/tp_installer dir, remove the file $LOCK_FILE and try again." | tee -a ${MAIN_LOGFILE}
+		 exit 40
+	else
+		 $ECHO "Deleting Stale LOCK FILE."
+		 $RM ${LOCK_FILE}
+	fi
+fi
+touch ${LOCK_FILE}
+
+# Create a stage file
+STAGE_FILE=/eniq/sw/installer/tp_stage_file
+if [ -f $STAGE_FILE ]; then
+	$ECHO "Already stage file available"
+	exit 55
+fi
+touch ${STAGE_FILE}
+
+# Create a tpInstall file
+INSTALL_TP_FILE=/tmp/tpInstall
+if [ -f $INSTALL_TP_FILE ]; then
+	$RM -f ${INSTALL_TP_FILE}
+fi
+
+# Create a featInstall file
+INSTALL_FEAT_FILE=/tmp/featInstall
+if [ -f $INSTALL_FEAT_FILE ]; then
+	$RM -f ${INSTALL_FEAT_FILE}
+fi
+
+# Create FVM_FeatProgress file
+FVM_FEAT_FILE=/var/tmp/FVM_FeatProgress
+if [ "${ROLLING}" != "true" ]; then
+	if [ "${FEATURE_LIST_FILE}" ] ; then
+		FEATURE_LIST=`cat ${FEATURE_LIST_FILE}`
+		FEATURES=""
+		for feature in `cat ${FEATURE_LIST_FILE}`
+		do
+			$ECHO "TP Feature ${feature}" | tee -a ${MAIN_LOGFILE}
+			FEATURES="${FEATURES} ${feature}"
+			# Checking if CXC4010777::Ericsson LTE RAN PM Tech Pack is one the features being installed.
+			if [ "${feature}" = "CXC4010777" ]; then
+				_flag_lte_=1
+			fi	
+
+			# Checking if CXC4010586::Ericsson WCDMA RAN PM Tech Pack is one the features being installed.
+			if [ "${feature}" = "CXC4010586" ]; then
+				_flag_wcdma_=1
+			fi
+			
+		done
+		$ECHO "Parsing list of features..." | tee -a ${MAIN_LOGFILE}
+		INTERFACES_LIST=`${BIN_DIR}/licmgr -map interface ${FEATURES}`
+		_exit=$?
+		if [ -z "${INTERFACES_LIST}" ] ; then
+			$ECHO "Error mapping interfaces [${_exit}]" | tee -a ${MAIN_LOGFILE}
+			exit 50
+		fi
+		$ECHO "List of features parsed successfully." | tee -a ${MAIN_LOGFILE}
+		$ECHO "======================================" | tee -a ${MAIN_LOGFILE}
+		$ECHO "${INTERFACES_LIST}" | tee -a ${MAIN_LOGFILE}
+		TP_NAME="${INTERFACES_LIST}"
+	fi
+
+	if [ "${TP_NAME}" ] ; then
+		$ECHO "${TP_NAME}" > ${TMP_DIR}/tplist
+		TP_LIST_FILE=${TMP_DIR}/tplist
+	fi
+fi
+
+
+# Extract universes and all reports if it's rolling upgrade or initial install
+$ECHO "Extracting  universes and  all report packages" | tee -a ${MAIN_LOGFILE}
+	if [[ "${ROLLING}" == "true" ]] || [[ $NMI ]]; then
+		if [[ -f ${FEATURE_LIST_FILE} ]] ; then
+			$BASH ./extract_BO.bsh  ${FEATURE_LIST_FILE}  ${TP_DIR_PATH}
+			_res_=$?
+			if [ ${_res_} -ne 0 ]; then
+				_err_msg_="Failure in extracting universes and reports (code: ${_res_})"
+			fi 
+		fi
+	fi
+
+# Loading TPNODEVERSION table
+if [[ -f ${FEATURE_LIST_FILE} ]] ; then
+$ECHO "Loading TPNODEVERSION table" | tee -a ${MAIN_LOGFILE}
+if [[ "${ROLLING}" == "true" ]] || [[ $NMI ]]; then
+	bash /eniq/sw/installer/load_tp_node_version.bsh -f ${TP_DIR_PATH}
+	_res_=$?
+	if [ ${_res_} -ne 0 ]; then
+		_err_msg_="Failure in loading tpnodeversion table (code: ${_res_})"
+	fi 
+fi
+fi
+
+$ECHO "Starting to install tech packs." | tee -a ${MAIN_LOGFILE}
+
+###Start- set the query plan option to 0. Needed for reducing the upgrade time.
+$ECHO "Setting the max_plans_cached option to 0"
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+    $ECHO "Unable to find Sybase environment variables"
+fi
+
+DBISQL=$(which dbisql)
+
+DWHDB_PORT=`inigetpassword DWH -v PortNumber -f ${CONF_DIR}/niq.ini`
+DWH_SERVER_NAME=`inigetpassword DWH -v ServerName -f ${CONF_DIR}/niq.ini`
+DBAPASSWORD=`inigetpassword DB -v DBAPassword -f ${CONF_DIR}/niq.ini`
+DWHREPUSER=`inigetpassword REP -v DWHREPUsername -f ${CONF_DIR}/niq.ini`
+DWHREPPASSWORD=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+
+dba_connection_string_decrypt="-nogui -onerror exit -c \"eng=${DWH_SERVER_NAME};links=tcpip{host=${DWH_SERVER_NAME};port=${DWHDB_PORT}};uid=dba;pwd=${DBAPASSWORD}\""
+connection_string_decrypt_dwhrep="-nogui -c \"eng=${REP_SERVER_NAME};links=tcpip{host=${REP_SERVER_NAME};port=${REP_PORT}};uid=$DWHREPUSER;pwd=$DWHREPPASSWORD\""
+dba_connection_string=/var/tmp/dba_encrypt_$$.file
+connection_string_dwhrep=/var/tmp/encrypt3_$$.txt
+get_encrypt_file "${dba_connection_string_decrypt}" "${dba_connection_string}"
+get_encrypt_file "${connection_string_decrypt_dwhrep}" "${connection_string_dwhrep}"
+
+if [ $? -ne 0 ] ; then
+	$ECHO "Failed to get dwh password from repdb" | tee -a ${MAIN_LOGFILE}
+	$ECHO ${DBAPASSWORD} >> ${MAIN_LOGFILE}
+	$ECHO "Installation failed. See log file ${MAIN_LOGFILE} for details." | tee -a ${MAIN_LOGFILE}
+	$RM ${LOCK_FILE}
+	exit 1
+fi
+_sqlf_=mpc.$$
+$ECHO "set option public.max_plans_cached=0" > ${_sqlf_}
+_set_result_=`$DBISQL @${dba_connection_string} ${_sqlf_} 2>&1`
+
+_res_=$?
+$RM -rf ${_sqlf_}
+if [ ${_res_} -ne 0 ] ; then
+	$ECHO "Failed to set max_plans_cached" | tee -a ${MAIN_LOGFILE}
+	$ECHO "${_set_result_}" >> ${MAIN_LOGFILE}
+	$ECHO "Installation failed. See log file ${MAIN_LOGFILE} for details." | tee -a ${MAIN_LOGFILE}
+	$RM ${LOCK_FILE}
+	exit 3
+fi
+$ECHO "Changed the max_plans_cached option to 0"
+### End of db setting
+
+if [ "${ROLLING}" != "true" ]; then
+	$ECHO "Total list of tech packs to install :" | tee -a ${MAIN_LOGFILE}
+	TECH_PACKS_TO_INSTALL=`cat ${TP_LIST_FILE}`
+	$ECHO "${TECH_PACKS_TO_INSTALL}" | tee -a ${MAIN_LOGFILE}
+	$ECHO ""  | tee -a ${MAIN_LOGFILE}
+fi
+
+if [ -z "${CHECK_FOR_REQUIRED_TECH_PACKS}" ]; then
+	CHECK_FOR_REQUIRED_TECH_PACKS=true
+fi
+
+if [ -z "${CREATE_SNAPSHOTS}" ]; then
+	CREATE_SNAPSHOTS=false
+fi
+
+if [ ! -x "${RT_DIR}/ant/bin/ant" ] ; then
+	$ECHO "ANT was not found in ${RT_DIR}/ant/bin/ant. Tech pack installation aborted." | tee -a ${MAIN_LOGFILE}
+	exit 34
+fi
+
+if [ ! -d "${TP_DIR_PATH}" ] ; then
+	$ECHO "Cannot find the tech pack directory. Tech pack installation aborted." | tee -a ${MAIN_LOGFILE}
+	exit 35
+fi
+
+if [ ! -d ${LOG_DIR}/tp_installer ]; then
+  mkdir ${LOG_DIR}/tp_installer
+fi
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+if [ ! "${TP_INSTALLER_FEATURE_FILE}" ]; then
+	TP_INSTALLER_FEATURE_FILE=${VAR_TMP_DIR}/additional_features_to_install
+fi
+# Lock the dcbo and dcpublic user's from the dwh database during the installation or upgrade.
+#${INSTALLER_DIR}/change_db_users_perm.bsh -a lock -u ALL -l ${MAIN_LOGFILE}
+
+if [ "${ROLLING}" == "true" ]; then
+
+	$ECHO "Features to be upgraded:"
+	$CAT "${FEATURE_LIST_FILE}"
+
+	monitorname="DWH_MONITOR"
+	basename="DWH_BASE"
+
+	failedFeatureFile="${TMP_DIR}/_upgrade_last_feature"
+	if [ -f "${failedFeatureFile}" ] ; then
+		$ECHO ""
+		$ECHO "Found file ${failedFeatureFile}. This indicates a prior run of script failed during upgrade of a feature. " |tee -a ${MAIN_LOGFILE}
+		$ECHO "$CAT ${failedFeatureFile}" | tee -a ${MAIN_LOGFILE}
+		$CAT ${failedFeatureFile} | tee -a ${MAIN_LOGFILE}
+		failedFeature=$(head -n 1 ${failedFeatureFile}) #reading first line of the file (this file should only contain 1 CXC number)
+		$ECHO "Will start upgrade from failed feature ${failedFeature}. Features listed ahead of it in feature list will be skipped."
+	fi
+fi
+
+list_active_interfaces
+
+#### - ROLLING PROCEDURE FUNCTIONS - ####
+#
+# Functions used in the rolling tp installer procedure
+#
+#### - ROLLING PROCEDURE FUNCTIONS - ####
+
+
+### Function: disable_tps_and_interfaces_for_feature ###
+#
+# Disable the TPs and interfaces of the feature we are upgrading
+#
+# Arguments:
+#   $1 : The feature whose tps and interfaces we need to disable
+disable_tps_and_interfaces_for_feature(){
+	$ECHO "" | tee -a ${MAIN_LOGFILE}
+	$ECHO "Going to disable sets of tech packs and interfaces of ${1}" | tee -a ${MAIN_LOGFILE}
+	unset DISABLED_TECHPACKS #This variable will capture tech packs and interfaces. It will include oss Ids of interfaces
+	tp_list=`$CAT ${FILTERED_TP_LIST} |grep -v "DWH_MONITOR" |grep -v "DWH_BASE"`
+	names=""
+	for name in ${tp_list}; do
+		#name=`${ECHO} ${name} | /usr/bin/awk -F"_R${name##*_R}" '{print $1}'`
+		$ECHO "" |tee -a ${MAIN_LOGFILE}
+		if [[ ("${name}" =~ ^${monitorname}* && -n ${MONITORUPGRADED}) || ("${name}" =~ ^${basename}* && (-n ${BASEUPGRADED})) ]] ; then
+			#It is a non-feature teck pack that is already upgraded. Skip it and go to next tech pack
+			$ECHO "Skipping ${name}.." | tee -a ${MAIN_LOGFILE}
+			continue
+		fi
+		MATCH=`${ECHO} "${ACTIVE_INTERFACES}" | grep -w "${name}"`
+		if [ -z "${MATCH}" ] ; then 
+			$ECHO "${BIN_DIR}/engine -e disableSet ${name} -d" | tee -a ${MAIN_LOGFILE}
+			${BIN_DIR}/engine -e disableSet ${name} -d | tee -a ${MAIN_LOGFILE}
+			DISABLED_TECHPACKS="${DISABLED_TECHPACKS}"$'\n'"${name}"
+		else
+			$ECHO "Found these active interfaces for ${name}:" | tee -a ${MAIN_LOGFILE}
+			$ECHO "${MATCH}" |tee -a ${MAIN_LOGFILE}
+			while read line ; do
+				alias=`${ECHO} ${line} | /usr/bin/awk -F" " '{print $2}'`
+				$ECHO "engine -e disableSet ${name}-${alias} -d" | tee -a ${MAIN_LOGFILE}
+				${BIN_DIR}/engine -e disableSet ${name}-${alias} -d | tee -a ${MAIN_LOGFILE}
+				DISABLED_TECHPACKS="${DISABLED_TECHPACKS}"$'\n'"${name}-${alias}"
+			done <<< "${MATCH}"
+		fi
+		names="${names} ${name}" #This will be names of techpacks and interfaces. The interface names it will not include oss Ids
+	done
+	$ECHO "" |tee -a ${MAIN_LOGFILE}
+	$ECHO "Reactivating scheduler to cache disableSet changes." | tee -a ${MAIN_LOGFILE}
+	${BIN_DIR}/scheduler activate |tee -a ${MAIN_LOGFILE}
+	$ECHO "" |tee -a ${MAIN_LOGFILE}
+	$ECHO "Summary of disabled tech packs and interfaces:" | tee -a ${MAIN_LOGFILE}
+	$ECHO "${DISABLED_TECHPACKS}" | tee -a ${MAIN_LOGFILE}
+}
+
+### Function: remove_sets_of_feature_from_priority_queue ###
+#
+# Remove the sets of the feature we are upgrading from the priority queue
+#
+# Arguments:
+#   $1 : The feature we are upgrading
+remove_sets_of_feature_from_priority_queue(){
+	$ECHO "" |tee -a ${MAIN_LOGFILE}
+	$ECHO "Removing sets from priority queue for each tech pack of ${1}:" | tee -a ${MAIN_LOGFILE}
+	for name in ${names} ; do
+		if [[ ("${name}" =~ ^${monitorname}* && -n ${MONITORUPGRADED}) || ("${name}" =~ ^${basename}*  && (-n ${BASEUPGRADED})) ]] ; then
+			#It is a non-feature teck pack that is already upgraded. Skip it and go to next tech pack
+			$ECHO "Skipping ${name}.." | tee -a ${MAIN_LOGFILE}
+			continue
+		fi
+		$ECHO "${BIN_DIR}/engine -e removeTechPacksInPriorityQueue ${name}" | tee -a ${MAIN_LOGFILE}
+		${BIN_DIR}/engine -e removeTechPacksInPriorityQueue ${name}  | tee -a ${MAIN_LOGFILE}
+	done
+}
+
+### Function: wait_for_loader_sets_to_finish ###
+#
+# Wait for the loader sets of the feature we are upgrading to finish
+#
+# Arguments:
+#   $1 : The feature we are upgrading
+wait_for_loader_sets_to_finish(){
+	$ECHO "" | tee -a ${MAIN_LOGFILE}
+	currentTime=`$NAWK 'BEGIN { print srand() }'` #Current time in epoch time
+	endTime=$[currentTime+600] #This sets 10 min limit for wait.
+	loaderSets="setting this just to go into while loop"
+	while [ -n "${loaderSets}" -a $currentTime -lt $endTime ] ; do 
+		$ECHO "Checking if there are loader sets executing for ${1}" | tee -a ${MAIN_LOGFILE}
+		for name in ${names} ; do #Check for each tech pack
+			if [[ ("${name}" =~ ^${monitorname}* && -n ${MONITORUPGRADED}) || ("${name}" =~ ^${basename}* && (-n ${BASEUPGRADED})) ]] ; then
+				#It is a non-feature teck pack that is already upgraded. Skip it and go to next tech pack
+				$ECHO "Skipping ${name}.." | tee -a ${MAIN_LOGFILE}
+				continue
+			fi
+			$ECHO "${BIN_DIR}/engine -e showSetsInExecutionSlots ${name}" | tee -a ${MAIN_LOGFILE}
+			setsInExecution=`${BIN_DIR}/engine -e showSetsInExecutionSlots ${name}` | tee -a ${MAIN_LOGFILE}
+	
+			$ECHO "${setsInExecution}" | tee -a ${MAIN_LOGFILE}
+			loaderSets=`$ECHO "${setsInExecution}" | grep "|Loader"`
+			if [ -n "${loaderSets}" ] ; then
+				$ECHO "There are loader sets in execution for ${1}. Waiting for 3 sec to let them finish" | tee -a ${MAIN_LOGFILE}
+				sleep 3
+				break #We don't need to check for the rest of the tech packs. Let's start the check over again
+			fi
+		done
+		currentTime=`$NAWK 'BEGIN { print srand() }'`
+	done
+	if [ -z "${loaderSets}" ] ; then
+		$ECHO "There are no loader sets in execution for ${1}" | tee -a ${MAIN_LOGFILE}
+		_loader_set_=1
+	fi
+	$ECHO "Waiting for 10 sec..." |tee -a ${MAIN_LOGFILE}
+	sleep 10
+}
+
+### Function: remove_sets_of_feature_from_execution ###
+#
+# Remove the sets of the feature we are upgrading to finishfrom execution
+# Arguments:
+#   $1 : The feature we are upgrading
+remove_sets_of_feature_from_execution(){
+	$ECHO "Removing any sets there may still be in execution for ${1}" |tee -a ${MAIN_LOGFILE}
+	for name in ${names} ; do
+		if [[ ("${name}" =~ ^${monitorname}* && -n ${MONITORUPGRADED}) || ("${name}" =~ ^${basename}* && (-n ${BASEUPGRADED})) ]] ; then
+			#It is a non-feature teck pack that is already upgraded. Skip it and go to next tech pack
+			$ECHO "Skipping ${name}.." | tee -a ${MAIN_LOGFILE}
+			continue
+		fi
+		$ECHO "${BIN_DIR}/engine -e killRunningSets ${name}" |tee -a ${MAIN_LOGFILE}
+		${BIN_DIR}/engine -e killRunningSets ${name}  |tee -a ${MAIN_LOGFILE}
+
+	done
+}
+### Function: reactivate_interfaces_for_feature ###
+#
+# Reactivate interfaces for the feature we have just upgraded
+#
+# Arguments:
+#   $1 : The feature we are upgrading
+reactivate_interfaces_for_feature(){
+	cd ${INSTALLER_DIR}
+	$ECHO "" |tee -a ${MAIN_LOGFILE}
+	$ECHO "Reactivating interfaces of feature ${1}" |tee -a ${MAIN_LOGFILE}
+	if [ -s ${ENIQ_BASE_DIR}/sw/installer/installed_artifacts ] ; then
+		feature_mapping_file=`iniget FEATURE_INFO -f ${NIQ_INI} -v Feature_Mapping_File`
+		$RM ${LOCK_FILE}
+		touch /tmp/interfacelockfile
+		$ECHO "${INSTALLER_DIR}/reactivate_interfaces -f ${ENIQ_BASE_DIR}/sw/installer/installed_artifacts -m ${TMP_DIR}/activeInterfaces -r \"${TP_DIR_PATH}/${feature_mapping_file}\"" |tee -a ${MAIN_LOGFILE}
+		${INSTALLER_DIR}/reactivate_interfaces -f ${ENIQ_BASE_DIR}/sw/installer/installed_artifacts -m ${TMP_DIR}/activeInterfaces -r "${TP_DIR_PATH}/${feature_mapping_file}"
+		touch ${LOCK_FILE}
+		rm -rf /tmp/interfacelockfile
+		$ECHO "${BIN_DIR}/engine -e reloadConfig" | tee -a ${MAIN_LOGFILE}
+		${BIN_DIR}/engine -e reloadConfig | tee -a ${MAIN_LOGFILE}
+	else
+		$ECHO "There are no interfaces to reactivate." |tee -a ${MAIN_LOGFILE}
+	fi
+}
+
+### Function: enable_sets_for_entire_feature ###
+#
+# Enable sets for the feature we have just upgraded
+#
+# Arguments:
+#   $1 : The feature we are upgrading
+enable_sets_for_entire_feature(){
+	$ECHO "" |tee -a ${MAIN_LOGFILE}
+	$ECHO "Going to enable sets of tech packs and interfaces of ${1}" |tee -a ${MAIN_LOGFILE}
+	ENABLED_TECHPACKS=""
+	for name in ${DISABLED_TECHPACKS} ; do
+		if [ "${name}" == $monitorname -o "${name}" == $basename ] ; then
+			$ECHO "Skipping ${name}" |tee -a ${MAIN_LOGFILE}
+			continue
+		fi
+		$ECHO "${BIN_DIR}/engine -e enableSet ${name} -d" |tee -a ${MAIN_LOGFILE}
+		${BIN_DIR}/engine -e enableSet ${name} -d |tee -a ${MAIN_LOGFILE}
+		ENABLED_TECHPACKS="${ENABLED_TECHPACKS}"$'\n'"${name}"
+	done
+	$ECHO "" |tee -a ${MAIN_LOGFILE}
+	$ECHO "Reactivating scheduler to cache enableSet changes." |tee -a ${MAIN_LOGFILE}
+	${BIN_DIR}/scheduler activate |tee -a ${MAIN_LOGFILE}
+}
+
+disable_feature(){
+	_loader_set_=0
+	# We do not want mediation techpacks to be disabled, remove them from the list
+	if [ -f ${FILTERED_TP_LIST} ]; then
+		$RM ${FILTERED_TP_LIST}
+	fi
+	$TOUCH ${FILTERED_TP_LIST}
+	for tp_name in `$CAT ${newTPDisableListFile} | grep -v "DWH_MONITOR" |grep -v "DWH_BASE"`; do
+		if [[ "${tp_name}" =~ ^${mediationname}* ]]; then
+			#It is a mediation tech pack, skip it and go to the next tech pack.
+			$ECHO "Skipping ${tp_name} as it is a mediation techpack.." | tee -a ${MAIN_LOGFILE}
+			continue
+		fi
+		#Write the tech pack to our temporary list file
+		$ECHO ${tp_name} >> ${FILTERED_TP_LIST}
+	done
+	$ECHO "Final list of techpacks to disable..." | tee -a ${MAIN_LOGFILE}
+	$CAT ${FILTERED_TP_LIST} | tee -a ${MAIN_LOGFILE}
+	if [ -s ${FILTERED_TP_LIST} ]; then
+		disable_tps_and_interfaces_for_feature ${1}
+		remove_sets_of_feature_from_priority_queue ${1}
+		wait_for_loader_sets_to_finish ${1}
+		if [ ${_loader_set_} -ne 1 ]; then
+		remove_sets_of_feature_from_execution ${1}
+		fi
+	else
+		$ECHO "Nothing to do to disable ${1}" | tee -a ${MAIN_LOGFILE}
+	fi
+}
+
+### Function check_feature_installed_already ###
+#
+# Checks if the feature we are upgrading has been installed before
+# 
+# Arguments:
+#   $1 : The feature we are upgrading
+#
+check_feature_installed_already() {
+	feature=$1
+	unset INSTALLED_FEATURE
+	INSTALLED_FEATURE_LIST=`iniget FEATURE_INFO -f ${ENIQ_CONF_DIR}/${ENIQ_INI} -v Feature_Output_File`
+	if [ "${INSTALLED_FEATURE_LIST}" ]; then
+		INSTALLED_FEATURE=`$GREP ${feature} ${INSTALLED_FEATURE_LIST}`
+	else
+		$ECHO "Could not read Feature_Output_File from ${ENIQ_CONF_DIR}/${ENIQ_INI} ini file" | tee -a ${MAIN_LOGFILE}
+	fi
+}
+### Function: add_to_installed_feature_list ###
+#
+# Adds feature number, description and alias to /eniq/admin/managed_oss/total_feature_install_list
+# if not already there
+# Arguments:
+#   $1 : The feature we are upgrading
+#
+add_to_installed_feature_list(){
+local _feature_=$1
+if [ -s ${TP_INSTALLER_FEATURE_FILE} ]; then
+	if [ ! "${INSTALLED_FEATURE}" ]; then
+		$GREP ${_feature_} ${TP_INSTALLER_FEATURE_FILE} > ${TMP_DIR}/new_feature
+		store_feature_det ${TMP_DIR}/new_feature "${ENIQ_CONF_DIR}/${ENIQ_INI}" ${TMP_DIR} ${MAIN_LOGFILE}
+		$RM -f ${TMP_DIR}/new_feature
+	else
+		$ECHO "Feature already installed.....will not update ${INSTALLED_FEATURE_LIST}" | tee -a ${MAIN_LOGFILE}
+	fi
+else
+	$ECHO "No content found in ${TP_INSTALLER_FEATURE_FILE} or not a file, unable to update ${INSTALLED_FEATURE_LIST}" | tee -a ${MAIN_LOGFILE}
+fi
+}
+
+rolling_tp_install_procedure(){
+$ECHO "Upgrade type will be rolling.." | tee -a ${MAIN_LOGFILE}
+#Install the tech packs and interfaces one feature at a time.
+for feature in `$CAT ${FEATURE_LIST_FILE}` ; do
+	CURRENT_FEATURE=$feature
+	$ECHO $'\n'"Feature ${feature}" | tee -a ${MAIN_LOGFILE}
+	$ECHO "${feature}" > ${failedFeatureFile}
+	if [ -n "${failedFeature}" ] ; then
+		if [ "${feature}" != "${failedFeature}" ] ; then
+			$ECHO "Skipping upgrade of ${feature}" |tee -a ${MAIN_LOGFILE}
+			continue
+		else
+			unset failedFeature
+			$ECHO "This is the feature that previously failed. Upgrade will now be continued from it." |tee -a ${MAIN_LOGFILE}
+		fi
+	fi
+	
+	if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+		# Create the snapshots.
+		create_snapshots
+		$ECHO "All required snapshots created" | tee -a ${MAIN_LOGFILE}
+	fi
+	
+	$ECHO "Getting interfaces of feature..." | tee -a ${MAIN_LOGFILE}
+	$ECHO "${BIN_DIR}/licmgr -map interface ${feature}" 
+	INTERFACES_LIST=`${BIN_DIR}/licmgr -map interface ${feature}` #In standard UG this is done for all features at once, now only for 1 feature
+	_exit=$?
+	if [ -z "${INTERFACES_LIST}" ] ; then
+		$ECHO "Error mapping interfaces [${_exit}]" | tee -a ${MAIN_LOGFILE}
+		failed_installation_exit 50
+	fi
+	$ECHO "List of interfaces:" | tee -a ${MAIN_LOGFILE}
+	$ECHO "${INTERFACES_LIST}" | tee -a ${MAIN_LOGFILE}
+	$RM -rf ${TMP_DIR}/tplist
+	$ECHO "${INTERFACES_LIST}" > ${TMP_DIR}/tplist
+	TP_LIST_FILE=${TMP_DIR}/tplist
+	$ECHO "cat ${TP_LIST_FILE}"
+	cat ${TP_LIST_FILE}
+	setup_tp_list_files
+	installResult=0
+	# Install eniq techpacks, if any....
+	 if [ "${numberOfTechpacks}" -gt 0 ]; then 
+		$ECHO "Order of tech packs to be installed:" | tee -a ${MAIN_LOGFILE}
+		TP_INSTALL_ORDER=`$CAT ${newTPListFile}`
+		$ECHO "${TP_INSTALL_ORDER}" | tee -a ${MAIN_LOGFILE}
+		if [ -f /eniq/home/dcuser/tmp.txt ]; then
+			$RM -rf /eniq/home/dcuser/tmp.txt
+		fi
+		$ECHO "${TP_INSTALL_ORDER}" | $GREP -i 'INTF' | $AWK -F"_R[0-9]" '{print $1}' | tee -a /eniq/home/dcuser/upgraded_interfaces_list.txt
+		$ECHO "${TP_INSTALL_ORDER}" | $GREP -i '^D' | $AWK -F"_R[0-9]" '{print $1}' | tee -a /eniq/home/dcuser/tmp.txt
+		for _techpack_ in `$CAT /eniq/home/dcuser/tmp.txt`; do
+			$DBISQL @${connection_string_dwhrep} "select interfacename from InterfaceTechpacks where techpackname='${_techpack_}'; output to '/eniq/home/dcuser/upgraded_interfaces_list.txt' append"
+		done
+		$SED -i "s/'//g" /eniq/home/dcuser/upgraded_interfaces_list.txt
+		if [ "$NMI" ] ; then
+			$ECHO "Upgrade in progress. Will not do an service status check." | tee -a ${MAIN_LOGFILE}
+		else
+			$ECHO "SMF is running." 
+			$ECHO "Will do an service status check."
+			wait_for_engine_to_online
+		fi
+		wait_for_engine_to_initialize
+		$ECHO "Confirmed engine is running as of "`date +%Y.%m.%d_%H:%M:%S` | tee -a ${MAIN_LOGFILE}
+		check_feature_installed_already ${feature}
+		#DISABLE FEATURE PRIOR TO UPGRADE
+		disable_feature ${feature}
+		backup_repdb
+		#UPGRADE THE TECH PACKS
+		upgrade_tps_for_feature
+		if [ ${installResult} -ne 0 ] ; then
+			#Something went wrong in upgrade of this feature. Let's not upgrading any more features, and leave feature ${feature} offline.
+			break
+		else
+			$ECHO "Since upgrade of the feature is successful, Adding $feature to the /eniq/sw/installer/installed_features " | tee -a ${MAIN_LOGFILE}
+			install_feature $feature
+			#Since upgrade is successful trigger the tpnodeversion updation script
+			if [[ -f ${FEATURE_LIST_FILE} ]] ; then
+			$ECHO "Since upgrade is successful trigger the tpnodeversion updation script for the feature $feature" | tee -a ${MAIN_LOGFILE}
+			bash /eniq/sw/installer/load_tp_node_version.bsh -u ${TP_DIR_PATH} $feature
+			_res_=$?
+				if [ ${_res_} -ne 0 ]; then
+					$ECHO "Failure in execution of /eniq/sw/installer/load_tp_node_version.bsh script." | tee -a ${MAIN_LOGFILE}
+				else
+					$ECHO "Successfully updated the tpnodeversion table" | tee -a ${MAIN_LOGFILE}
+				fi
+			fi
+		fi
+			# Checking if CXC4010777::Ericsson LTE RAN PM Tech Pack is one the features upgraded.
+			${GREP} "^DC_E_ERBS_" ${newTPListFile}
+				erbs=$?
+			${GREP} "^DC_E_ERBSG2_" ${newTPListFile}
+				erbsg2=$?
+			if [ ${erbs} == 0 -o ${erbsg2} == 0 ]; then
+				$ECHO "Generating ERBS combined views....please wait..." | tee -a ${MAIN_LOGFILE}
+				`dos2unix /eniq/sw/installer/erbscombinedview.bsh /eniq/sw/installer/erbscombinedview.bsh`
+				bash /eniq/sw/installer/erbscombinedview.bsh
+				_res_=$?
+				if [ ${_res_} -ne 0 ]; then
+					$ECHO "Failure in execution of /eniq/sw/installer/erbscombinedview.bsh script." | tee -a ${MAIN_LOGFILE}
+					failed_installation_exit 59
+				else
+					$ECHO "ERBS combined views are created successfully." | tee -a ${MAIN_LOGFILE}
+				fi 
+			fi	
+			# Checking if CXC4010586::Ericsson WCDMA RAN PM Tech Pack is one the features upgraded.
+			${GREP} "^DC_E_RBS_" ${newTPListFile}
+				rbs=$?
+			${GREP} "^DC_E_RBSG2_" ${newTPListFile}
+				rbsg2=$?
+			if [ ${rbs} == 0 -o ${rbsg2} == 0 ]; then
+				$ECHO "Generating WCDMA combined views....please wait..." | tee -a ${MAIN_LOGFILE}
+				`dos2unix /eniq/sw/installer/WCDMACombinedViewCreation.bsh /eniq/sw/installer/WCDMACombinedViewCreation.bsh`
+				bash /eniq/sw/installer/WCDMACombinedViewCreation.bsh
+				_res_=$?
+				if [ ${_res_} -ne 0 ]; then
+					$ECHO "Failure in execution of /eniq/sw/installer/WCDMACombinedViewCreation.bsh script." | tee -a ${MAIN_LOGFILE}
+					failed_installation_exit 59
+				else
+					$ECHO "WCDMA combined views are created successfully." | tee -a ${MAIN_LOGFILE}
+				fi 
+			fi
+		
+		#ENABLE FEATURE AFTER UPGRADE
+		reactivate_interfaces_for_feature ${feature}
+		add_to_installed_feature_list ${feature}
+		enable_sets_for_entire_feature ${feature}
+	fi #End of: if [ "${numberOfTechpacks}" -gt 0 ]
+	$ECHO "${CURRENT_FEATURE}" >> ${INSTALL_FEAT_FILE}
+	$ECHO "${CURRENT_FEATURE}" >> ${FVM_FEAT_FILE}
+	$RM -f ${INSTALL_TP_FILE}
+done #End of new per feature loop
+
+#EQEV-64308 support for FLS multi rop functionality
+$ECHO "Triggering node_type_granularity.bsh script to update NodeTypeGranularity table." | tee -a ${MAIN_LOGFILE}
+bash ${INSTALLER_DIR}/node_type_granularity.bsh -p ${TP_DIR_PATH}
+_res_=$?
+if [ ${_res_} -ne 0 ]; then
+	$ECHO "Failure in execution of ${INSTALLER_DIR}/node_type_granularity.bsh script." | tee -a ${MAIN_LOGFILE}
+else
+	$ECHO "Successfully updated the NodeTypeGranularity table" | tee -a ${MAIN_LOGFILE}
+fi
+
+}
+
+#### - STANDARD PROCEDURE FUNCTIONS - ####
+#
+# Functions used only by the standard tp installation procedure
+#
+set_engine_profile_no_loads(){
+
+	$ECHO "Changing engine profile to NoLoads" | tee -a ${MAIN_LOGFILE}
+	${BIN_DIR}/engine -e changeProfile NoLoads >> ${MAIN_LOGFILE} 2>&1
+	if [ $? -ne 0 ] ; then
+	  $ECHO "Engine status NoLoads could not be changed. Aborting techpack installation." | tee -a ${MAIN_LOGFILE}
+	  failed_installation_exit 52
+	else
+	  $ECHO "Engine status changed to NoLoads" | tee -a ${MAIN_LOGFILE}
+	fi
+
+	$ECHO "Engine profile NoLoads changed successfully at "`date +%Y.%m.%d_%H:%M:%S` | tee -a ${MAIN_LOGFILE}
+}
+force_engine_shutdown(){
+	$ECHO "Engine had running sets. Force shutdown initiated." | tee -a ${MAIN_LOGFILE}
+	svcs_clear 'engine'
+	$ECHO "Engine status cleared" | tee -a ${MAIN_LOGFILE}
+	sleep 10
+	${BIN_DIR}/engine -e shutdown_forceful > /dev/null 2>&1
+	$ECHO "Engine forced to shutdown" | tee -a ${MAIN_LOGFILE}
+	sleep 10
+}
+
+# ${1} : Tech Pack Name
+# ${2} : SCHEDULE_NAME
+disable_schedule(){
+	# scheduler exit 0 : OK or already disabled
+	# scheduler exit 6 : Techpack not found
+	# scheduler exit 7 : Schedule not found
+	TECHPACK=${1}
+	SCHEDULE_NAME=${2}
+	_disable_cmd="scheduler -e disable_schedule ${TECHPACK} ${SCHEDULE_NAME}"
+	$ECHO "Using disable_schedule command [${_disable_cmd}]" >> ${MAIN_LOGFILE}
+	${_disable_cmd} >> ${MAIN_LOGFILE}
+	STATUS=$?
+	until [ ${STATUS} -eq 0 -o ${STATUS} -eq 6 -o ${STATUS} -eq 7 ]
+	  do
+		sleep 10
+		$ECHO "Disabling ${SCHEDULE_NAME}" | tee -a ${MAIN_LOGFILE}
+		${_disable_cmd} >> ${MAIN_LOGFILE}
+		STATUS=$?
+	  done
+	$ECHO "Disabled ${SCHEDULE_NAME} successfully at "`date +%Y.%m.%d_%H:%M:%S` | tee -a ${MAIN_LOGFILE}
+}
+
+# ${1} : Tech Pack Name
+# ${2} : SCHEDULE_NAME
+enable_schedule(){
+	# scheduler exit 0 : OK or already enabled
+	# scheduler exit 7 : Schedule not found
+	TECHPACK=${1}
+	SCHEDULE_NAME=${2}
+	_enable_cmd="scheduler -e enable_schedule ${TECHPACK} ${SCHEDULE_NAME}"
+	$ECHO "Using enable_schedule command [${_enable_cmd}]" >> ${MAIN_LOGFILE}
+	${_enable_cmd} >> ${MAIN_LOGFILE}
+	STATUS=$?
+	until [ ${STATUS} -eq 0 -o ${STATUS} -eq 7 ]
+	  do
+		sleep 10
+		$ECHO "Enabling ${SCHEDULE_NAME}" | tee -a ${MAIN_LOGFILE}
+		${_enable_cmd} >> ${MAIN_LOGFILE}
+		STATUS=$?
+	  done
+	$ECHO "Enabled ${SCHEDULE_NAME} successfully at "`date +%Y.%m.%d_%H:%M:%S` | tee -a ${MAIN_LOGFILE}
+}
+
+stop_monitoring () {
+	for schedule_name in "${DWH_MONITOR_SETS[@]}" ; do
+		disable_schedule DWH_MONITOR ${schedule_name}
+	done
+}
+
+start_monitoring () {
+	for schedule_name in "${DWH_MONITOR_SETS[@]}" ; do
+		enable_schedule DWH_MONITOR ${schedule_name}
+	done
+}
+
+
+standard_tp_install_procedure(){
+
+	$ECHO "Upgrade type will be standard.." | tee -a ${MAIN_LOGFILE}
+	#if the mz wf tp's are listed, install those first, then install the eniq techpacks with processing offline
+	#Once the eniq techpacks are installed, start mz processing again...
+	setup_tp_list_files
+	installResult=0
+	# Install eniq techpacks, if any....
+	if [ "${numberOfTechpacks}" -gt 0 ] ; then
+		$ECHO "Order of tech packs to be installed:" | tee -a ${MAIN_LOGFILE}
+		TP_INSTALL_ORDER=`cat ${newTPListFile}`
+		$ECHO "${TP_INSTALL_ORDER}" | tee -a ${MAIN_LOGFILE}
+		if [ -f /eniq/home/dcuser/tmp.txt ]; then
+			$RM -rf /eniq/home/dcuser/tmp.txt
+		fi
+		$ECHO "${TP_INSTALL_ORDER}" | $GREP -i 'INTF' | $AWK -F"_R[0-9]" '{print $1}' | tee -a /eniq/home/dcuser/upgraded_interfaces_list.txt
+		$ECHO "${TP_INSTALL_ORDER}" | $GREP -i '^D' | $AWK -F"_R[0-9]" '{print $1}' | tee -a /eniq/home/dcuser/tmp.txt
+		for _techpack_ in `$CAT /eniq/home/dcuser/tmp.txt`; do
+			$DBISQL @${connection_string_dwhrep} "select interfacename from InterfaceTechpacks where techpackname='${_techpack_}'; output to '/eniq/home/dcuser/upgraded_interfaces_list.txt' append"
+		done
+		$SED -i "s/'//g" /eniq/home/dcuser/upgraded_interfaces_list.txt
+		set_engine_profile_no_loads
+		if [ "$NMI" ] ; then
+			$ECHO "Initial installation/Upgrade in progress. Not restarting engine." | tee -a ${MAIN_LOGFILE}
+		else
+			#SMF is running
+			$ECHO "SMF is running. Setting scheduler on hold and shutting it down with SMF scripts." | tee -a ${MAIN_LOGFILE}
+			${BIN_DIR}/scheduler hold >> ${MAIN_LOGFILE} 2>&1
+			if [ $? -ne 0 ] ; then
+				$ECHO "Scheduler could not be set on hold. Scheduler is not running." | tee -a ${MAIN_LOGFILE}
+			else
+				$ECHO "Scheduler set on hold at "`date +%Y.%m.%d_%H:%M:%S` | tee -a ${MAIN_LOGFILE}
+			fi
+			#stop_monitoring DWH_MONITOR ${DWH_MONITOR}
+			#Stop the sets in the DWH_MONITOR...
+			stop_monitoring
+			$ECHO "Restarting engine before techpack installation" | tee -a ${MAIN_LOGFILE}
+			#SMF is running
+			$ECHO "SMF is running. Restarting engine with SMF scripts." | tee -a ${MAIN_LOGFILE}
+			$ECHO "Stopping engine" | tee -a ${MAIN_LOGFILE}
+			ssr 'engine' 'stop' >> ${MAIN_LOGFILE} 2>&1
+			if [ $? -ne 0 ] ; then
+				force_engine_shutdown
+			fi
+			ENGINE_SMF_STATUS=`svcs_status engine`
+			if [ $? -ne 0 ] ; then
+				$ECHO "Error getting engines status: $ENGINE_SMF_STATUS" | tee -a ${MAIN_LOGFILE}
+			fi
+			if [ "${ENGINE_SMF_STATUS}" != "inactive" ]; then
+				force_engine_shutdown
+				ENGINE_SMF_STATUS=`svcs_status engine`
+					if [ "${ENGINE_SMF_STATUS}" != "inactive" ]; then
+						wait_for_engine_to_online
+						ssr 'engine' 'stop' >> ${MAIN_LOGFILE}
+					fi
+			fi
+			$ECHO "Engine stopped successfully at "`date +%Y.%m.%d_%H:%M:%S` | tee -a ${MAIN_LOGFILE}
+			ssr 'engine' 'start' >> ${MAIN_LOGFILE}
+			ENGINE_START_STATUS=$?
+			if [ ${ENGINE_START_STATUS} -ne 0 ] ; then
+				$ECHO "Engine could not be started. Aborting techpack installation." | tee -a ${MAIN_LOGFILE}
+				failed_installation_exit 44
+			else
+				$ECHO "Engine restarted successfully" | tee -a ${MAIN_LOGFILE}
+			fi
+			#20111205 EANGUAN :: To change engine profile to NoLoads after restarting engine
+			set_engine_profile_no_loads
+			${BIN_DIR}/scheduler start
+			wait_for_engine_to_online
+			wait_for_engine_to_initialize
+			$ECHO "Engine started and initialized at "`date +%Y.%m.%d_%H:%M:%S` | tee -a ${MAIN_LOGFILE}
+		fi # END OF #SMF is running
+		${BIN_DIR}/scheduler hold
+		if [ $? -ne 0 ]; then
+			$ECHO "An error was encountered while trying to put the scheduler on hold. Exit code: $?"
+			return $?
+		fi
+		#UPGRADE THE TECH PACKS
+		upgrade_tps_for_feature
+		${BIN_DIR}/engine -e changeProfile Normal >> ${MAIN_LOGFILE} 2>&1
+		if [ $? -ne 0 ] ; then
+			$ECHO "Failed to set engine's profile to Normal" | tee -a ${MAIN_LOGFILE}
+		fi
+		if [ ! "${NMI}" ]; then
+			#Re-enable the disabled DHW_MONITOR sets that where disabled.
+			start_monitoring
+		fi
+		#Activate the scheduler
+		SCHEDULER_ACTIVATE=`scheduler activate | grep "scheduler is running OK"`
+		until [ "${SCHEDULER_ACTIVATE}" = "scheduler is running OK" ]
+		do
+			sleep 10
+			SCHEDULER_ACTIVATE=`scheduler activate | grep "scheduler is running OK"`
+			$ECHO "Activating scheduler."
+		done
+		$ECHO "Activated scheduler successfully at `date +%Y.%m.%d_%H:%M:%S`" | tee -a ${MAIN_LOGFILE}
+	fi
+	
+	#EQEV-64308 support for FLS multi rop functionality
+	$ECHO "Triggering node_type_granularity.bsh script to update NodeTypeGranularity table." | tee -a ${MAIN_LOGFILE}
+	bash ${INSTALLER_DIR}/node_type_granularity.bsh -p ${TP_DIR_PATH}
+	_res_=$?
+	if [ ${_res_} -ne 0 ]; then
+		$ECHO "Failure in execution of ${INSTALLER_DIR}/node_type_granularity.bsh script." | tee -a ${MAIN_LOGFILE}
+	else
+		$ECHO "Successfully updated the NodeTypeGranularity table" | tee -a ${MAIN_LOGFILE}
+	fi
+	
+} # End of standard_tp_install_procedure 
+if [ ! -d "${TP_DIR_PATH}" ] ; then
+	$ECHO "Cannot find the tech pack directory  "${TP_DIR_PATH}"." | tee -a ${MAIN_LOGFILE}
+else
+	if [ -f /tmp/RSTATE ] ; then
+		rm -rf /tmp/RSTATE
+		mkdir /tmp/RSTATE
+	else 
+		mkdir /tmp/RSTATE
+	fi
+	chmod 777 /tmp/RSTATE
+	#Copying the CXC files from the MWS path.
+	ls -al $TP_DIR_PATH | grep -i '\.cxc'
+	if [ $? -eq 0 ]; then
+		cp $TP_DIR_PATH/.CXC* /tmp/RSTATE/
+		$ECHO "CXC Files have been copied to /tmp/RSTATE/" | tee -a ${MAIN_LOGFILE}
+	fi
+fi
+if [ -f /eniq/home/dcuser/upgraded_interfaces_list.txt ]; then
+	$RM -rf /eniq/home/dcuser/upgraded_interfaces_list.txt
+fi
+#Call the appropriate tp installation function
+if [ "${ROLLING}" == "true" ]; then
+	rolling_tp_install_procedure
+else
+	standard_tp_install_procedure
+fi
+if [ $? -ne 0 ]; then
+	$ECHO "An error occured during the techpack installation. Exit code $?"
+	failed_installation_exit $?
+else
+	if [[ -f ${FEATURE_LIST_FILE} ]] ; then 
+		$ECHO "Adding the Rstate of all the installed features to the install_feature file" | tee -a ${MAIN_LOGFILE}
+		for feature in `$CAT ${FEATURE_LIST_FILE}`
+		do	
+			install_feature $feature
+			if [[ $NMI ]] & [[ -f ${FEATURE_LIST_FILE} ]] ; then	
+				$ECHO "Since install is successful trigger the tpnodeversion updation script for the feature $feature" | tee -a ${MAIN_LOGFILE}
+				bash /eniq/sw/installer/load_tp_node_version.bsh -u ${TP_DIR_PATH} $feature
+				_res_=$?
+				if [ ${_res_} -ne 0 ]; then				
+					$ECHO "Failure in execution of /eniq/sw/installer/load_tp_node_version.bsh script." | tee -a ${MAIN_LOGFILE}
+				else
+					$ECHO "Successfully updated the tpnodeversion table" | tee -a ${MAIN_LOGFILE}
+				fi
+			fi
+		done
+	fi
+	
+fi
+
+# Unlock the dcbo and dcpublic user's from the dwh database after the installation or upgrade.
+#${INSTALLER_DIR}/change_db_users_perm.bsh -a unlock -u ALL -l ${MAIN_LOGFILE}
+
+#if [ $? -ne 0 ] ; then
+	#$ECHO "Failed to unlock users in dwhdb" | tee -a ${MAIN_LOGFILE}
+#fi
+
+if [ "${_flag_lte_}" ] ; then
+	$ECHO "Creating ERBS combined views....please wait..." | tee -a ${MAIN_LOGFILE}
+	`dos2unix /eniq/sw/installer/erbscombinedview.bsh /eniq/sw/installer/erbscombinedview.bsh`
+	bash /eniq/sw/installer/erbscombinedview.bsh
+	_res_=$?
+	if [ ${_res_} -ne 0 ]; then
+		$ECHO "Failure in execution of /eniq/sw/installer/erbscombinedview.bsh script." | tee -a ${MAIN_LOGFILE}
+		failed_installation_exit 79
+	else
+		$ECHO "ERBS combined views are created successfully..." | tee -a ${MAIN_LOGFILE}
+	fi 
+fi
+
+if [ "${_flag_wcdma_}" ] ; then
+	$ECHO "Creating WCDMA combined views....please wait..." | tee -a ${MAIN_LOGFILE}
+	`dos2unix /eniq/sw/installer/WCDMACombinedViewCreation.bsh /eniq/sw/installer/WCDMACombinedViewCreation.bsh`
+	bash /eniq/sw/installer/WCDMACombinedViewCreation.bsh
+	_res_=$?
+	if [ ${_res_} -ne 0 ]; then
+		$ECHO "Failure in execution of /eniq/sw/installer/WCDMACombinedViewCreation.bsh script." | tee -a ${MAIN_LOGFILE}
+		failed_installation_exit 79
+	else
+		$ECHO "WCDMA combined views are created successfully..." | tee -a ${MAIN_LOGFILE}
+	fi 
+fi
+
+cleanup
+
+$ECHO "Techpack Installation Complete."  | tee -a ${MAIN_LOGFILE}
+
+exit 0
+

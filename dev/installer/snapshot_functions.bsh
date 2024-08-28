@@ -1,0 +1,358 @@
+#!/usr/bin/sh
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : snapshot_functions
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : Ericsson Network IQ Snapshot functions
+# Usage   : Don't use functions directly. Include it to some other script and use it from there.
+# Author  : Janne Berggren
+# ********************************************************************
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 3
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+### Function: create_snapshot ###
+#
+#   Creates the snapshots of the whole ENIQ system.
+#
+# Arguments:
+#   none
+# Return Values:
+#	none
+create_snapshots()
+{
+  # Shutdown ENIQ and databases and create a snapshot before any tech packs are installed/upgraded or interfaces are activated.
+  stop_eniq
+  
+  $ECHO "Starting to create snapshots..." | $TEE -a ${MAIN_LOGFILE}
+
+  # Take a backup snapshots of the filesystem and databases before any real tech pack installation/upgrade or interface activation is done.
+  
+  create_dir_snapshot snapshot_DATA_DIR_${TIMESTAMP} ${DATA_DIR}
+  EXIT_STATUS=$?
+
+  if [ ${EXIT_STATUS} -ne 0 ] ; then
+    $ECHO "Creating snapshot of ${DATA_DIR} failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+    start_eniq
+    exit 1	  
+  fi
+	
+  create_dir_snapshot snapshot_DWH_DIR_${TIMESTAMP} ${DWH_DIR}
+  EXIT_STATUS=$?
+
+  if [ ${EXIT_STATUS} -ne 0 ] ; then
+    $ECHO "Creating snapshot of ${DWH_DIR} failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+    rollback_dir_snapshot snapshot_DATA_DIR_${TIMESTAMP} ${DATA_DIR}
+    delete_dir_snapshot snapshot_DATA_DIR_${TIMESTAMP} ${DATA_DIR}
+    
+    start_eniq
+    exit 5	  
+  fi
+
+  create_dir_snapshot snapshot_REP_DIR_${TIMESTAMP} ${REP_DIR}
+  EXIT_STATUS=$?
+  
+  if [ ${EXIT_STATUS} -ne 0 ] ; then
+    $ECHO "Creating snapshot of ${REP_DIR} failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+    rollback_dir_snapshot snapshot_DATA_DIR_${TIMESTAMP} ${DATA_DIR}
+    delete_dir_snapshot snapshot_DATA_DIR_${TIMESTAMP} ${DATA_DIR}
+    rollback_dir_snapshot snapshot_DWH_DIR_${TIMESTAMP} ${DWH_DIR}
+    delete_dir_snapshot snapshot_DWH_DIR_${TIMESTAMP} ${DWH_DIR}
+    
+    start_eniq
+    exit 6	  
+  fi
+  
+  $ECHO "Snapshot created successfully." | $TEE -a ${MAIN_LOGFILE}
+  start_eniq
+}
+
+### Function: rollback_snapshots ###
+#
+#   Rollbacks the snapshots of the system.
+#
+# Arguments:
+#   none
+# Return Values:
+#	none
+rollback_snapshots() {
+	
+  # Shutdown ENIQ and databases before rollbacking.
+  stop_eniq
+	
+  rollback_dir_snapshot snapshot_DATA_DIR_${TIMESTAMP} ${DATA_DIR}
+  EXIT_STATUS=$?
+
+  if [ ${EXIT_STATUS} -ne 0 ] ; then
+    $ECHO "Rollbacking ${DATA_DIR} snapshot failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+  fi
+
+  rollback_dir_snapshot snapshot_DWH_DIR_${TIMESTAMP} ${DWH_DIR}
+  EXIT_STATUS=$?
+  
+  if [ ${EXIT_STATUS} -ne 0 ] ; then
+    $ECHO "Rollbacking ${DWH_DIR} snapshot failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+  fi
+
+  rollback_dir_snapshot snapshot_REP_DIR_${TIMESTAMP} ${REP_DIR}
+  EXIT_STATUS=$?
+  
+  if [ ${EXIT_STATUS} -ne 0 ] ; then
+    $ECHO "Rollbacking REP_DIR snapshot failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+  fi
+
+  $ECHO "Rollbacking finished." | $TEE -a ${MAIN_LOGFILE}
+  start_eniq
+}
+
+### Function: delete_snapshots ###
+#
+#   Deletes the snapshot of the system.
+#
+# Arguments:
+#   none
+# Return Values:
+#	none
+delete_snapshots() {
+
+  delete_dir_snapshot snapshot_DATA_DIR_${TIMESTAMP} ${DATA_DIR}
+  EXIT_STATUS=$?
+  
+  if [ ${EXIT_STATUS} -eq 0 ] ; then
+    $ECHO "snapshot_DATA_DIR_${TIMESTAMP} snapshot deleted succesfully." | $TEE -a ${MAIN_LOGFILE}
+  else 
+    $ECHO "Deleting snapshot_DATA_DIR_${TIMESTAMP} snapshot failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+  fi
+	
+  delete_dir_snapshot snapshot_DWH_DIR_${TIMESTAMP} ${DWH_DIR}
+  EXIT_STATUS=$?
+  
+  if [ ${EXIT_STATUS} -eq 0 ] ; then
+    $ECHO "snapshot_DWH_DIR_${TIMESTAMP} snapshot deleted succesfully." | $TEE -a ${MAIN_LOGFILE}
+  else 
+    $ECHO "Deleting snapshot_DWH_DIR_${TIMESTAMP} snapshot failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+  fi
+
+  delete_dir_snapshot snapshot_REP_DIR_${TIMESTAMP} ${REP_DIR}
+  EXIT_STATUS=$?
+  
+  if [ ${EXIT_STATUS} -eq 0 ] ; then
+    $ECHO "snapshot_REP_DIR_${TIMESTAMP} snapshot deleted succesfully." | $TEE -a ${MAIN_LOGFILE}
+  else 
+    $ECHO "Deleting snapshot_REP_DIR_${TIMESTAMP} snapshot failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+  fi	  
+}
+
+### Function: stop_eniq ###
+#
+#   Stops the ENIQ processes.
+#
+# Arguments:
+#   none
+# Return Values:
+#	none
+stop_eniq()
+{
+  $ECHO "Shutting down ENIQ processes..." | $TEE -a ${MAIN_LOGFILE}
+
+  ${BIN_DIR}/scheduler stop
+  EXIT_STATUS=$?
+  
+  if [ ${EXIT_STATUS} -ne 0 ] ; then
+    $ECHO "Stopping ENIQ process scheduler failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+    start_eniq
+    exit 42
+  fi
+
+  ${BIN_DIR}/engine stop
+  EXIT_STATUS=$?
+
+  if [ ${EXIT_STATUS} -ne 0 ] ; then
+    $ECHO "Stopping ENIQ process engine failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+    start_eniq
+    exit 43
+  fi
+
+  ${BIN_DIR}/webserver stop
+  EXIT_STATUS=$?
+  
+  if [ ${EXIT_STATUS} -ne 0 ] ; then
+    $ECHO "Stopping ENIQ process webserver failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+    start_eniq
+    exit 44
+  fi
+
+  ${BIN_DIR}/dwhdb stop
+  EXIT_STATUS=$?
+  
+  if [ ${EXIT_STATUS} -ne 0 ] ; then
+    $ECHO "Stopping ENIQ process dwhdb failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+    start_eniq
+    exit 18
+  fi
+
+  ${BIN_DIR}/repdb stop
+  EXIT_STATUS=$?
+  
+  if [ ${EXIT_STATUS} -ne 0 ] ; then
+    $ECHO "Stopping ENIQ process repdb failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+    start_eniq
+    exit 19
+  fi
+  $ECHO "ENIQ processes stopped successfully." | $TEE -a ${MAIN_LOGFILE}
+}
+
+### Function: start_eniq ###
+#
+#   Starts the ENIQ processes.
+#
+# Arguments:
+#   none
+# Return Values:
+#	none
+start_eniq()
+{
+  $ECHO "Starting ENIQ processes..." | $TEE -a ${MAIN_LOGFILE}
+
+  ${BIN_DIR}/repdb start
+  EXIT_STATUS=$?
+  
+  if [ ${EXIT_STATUS} -ne 0 ] ; then
+    $ECHO "ENIQ process repdb failed to start with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+  fi
+
+  ${BIN_DIR}/dwhdb start
+  EXIT_STATUS=$?
+  
+  if [ ${EXIT_STATUS} -ne 0 ] ; then
+    $ECHO "ENIQ process dwhdb failed to start with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+  fi
+
+  ${BIN_DIR}/webserver start
+  EXIT_STATUS=$?
+
+  if [ ${EXIT_STATUS} -ne 0 ] ; then
+    $ECHO "ENIQ process webserver failed to start with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+  fi
+
+  ${BIN_DIR}/engine start
+  EXIT_STATUS=$?
+
+  if [ ${EXIT_STATUS} -ne 0 ] ; then
+    $ECHO "ENIQ process engine failed to start with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+  fi
+
+  ${BIN_DIR}/scheduler start
+  EXIT_STATUS=$?
+
+  if [ ${EXIT_STATUS} -ne 0 ] ; then
+    $ECHO "ENIQ process scheduler failed to start with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+  fi
+  
+  $ECHO "ENIQ processes started." | $TEE -a ${MAIN_LOGFILE}
+}
+
+### Function: create_dir_snapshot ###
+#
+#   Creates the snapshot of one directory of the system.
+#
+# Arguments:
+#   SNAPSHOT_NAME - Name of the snapshot to create.
+#   TARGET_DIR - Path to the directory where snapshot is created.
+# Return Values:
+#	none
+create_dir_snapshot()
+{
+  SNAPSHOT_NAME=$1
+  TARGET_DIR=$2
+  
+  $ECHO "Starting to create a snapshot of ${TARGET_DIR}..." | $TEE -a ${MAIN_LOGFILE}
+
+  ${ADMIN_BIN}/snapshot_fs.bsh -a create -d ${TARGET_DIR} -n ${SNAPSHOT_NAME} -l ${MAIN_LOGFILE} -N
+  EXIT_STATUS=$?
+
+
+  if [ ${EXIT_STATUS} -eq 0 ] ; then
+    $ECHO "Snapshot of ${TARGET_DIR} named ${SNAPSHOT_NAME} created succesfully." | $TEE -a ${MAIN_LOGFILE}
+    return 0
+  else 
+    $ECHO "Creating snapshot of ${TARGET_DIR} named ${SNAPSHOT_NAME} failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+    return 40
+  fi
+}
+
+### Function: rollback_dir_snapshot ###
+#
+#   Rollbacks one directory.
+#
+# Arguments:
+#   SNAPSHOT_NAME - Name of the snapshot to rollback.
+#   TARGET_DIR - Path to the directory where snapshot is rollbacked.
+# Return Values:
+#	none
+rollback_dir_snapshot()
+{
+  SNAPSHOT_NAME=$1
+  TARGET_DIR=$2
+  
+  $ECHO "Starting to rollback snapshot of ${TARGET_DIR}..." | $TEE -a ${MAIN_LOGFILE}
+
+  ${ADMIN_BIN}/snapshot_fs.bsh -a rollback -d ${TARGET_DIR} -n ${SNAPSHOT_NAME} -l ${MAIN_LOGFILE} -N -F
+  EXIT_STATUS=$?
+
+  if [ ${EXIT_STATUS} -eq 0 ] ; then
+    $ECHO "Snapshot of ${TARGET_DIR} rollbacked succesfully." | $TEE -a ${MAIN_LOGFILE}
+    return 0
+  else
+    $ECHO "Rollbacking snapshot of ${TARGET_DIR} failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+    return 41
+  fi
+}
+
+### Function: delete_dir_snapshot ###
+#
+#   Deletes the snapshot of one directory of the system.
+#
+# Arguments:
+#   SNAPSHOT_NAME - Name of the snapshot to delete.
+#   TARGET_DIR - Path to the directory where snapshot is deleted.
+# Return Values:
+#	none
+delete_dir_snapshot()
+{
+  SNAPSHOT_NAME=$1
+  TARGET_DIR=$2
+  
+  $ECHO "Starting to delete a snapshot of ${TARGET_DIR}..." | $TEE -a ${MAIN_LOGFILE}
+
+  ${ADMIN_BIN}/snapshot_fs.bsh -a delete -d ${TARGET_DIR} -n ${SNAPSHOT_NAME} -l ${MAIN_LOGFILE} -N -F
+  EXIT_STATUS=$?
+
+  if [ ${EXIT_STATUS} -eq 0 ] ; then
+    $ECHO "Snapshot of ${TARGET_DIR} deleted succesfully." | $TEE -a ${MAIN_LOGFILE}
+    return 0
+  else
+    $ECHO "Deleting snapshot of ${TARGET_DIR} failed with exit status ${EXIT_STATUS}." | $TEE -a ${MAIN_LOGFILE}
+    return 45
+  fi
+}
+
+
+########## End of functions ##############

@@ -1,0 +1,284 @@
+#!/bin/bash
+# ******************************************************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ******************************************************************************************************
+#
+# (c) Ericsson Radio Systems AB 2015 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ******************************************************************************************************
+# Name    : disableOrEnableBusyHourSets.bsh
+# Date    : 02/02/2016
+# Purpose : Script to enable or disable the corresponding active placeholders 
+#			for a particular techpack
+# Usage   : ./disableOrEnableBusyHourSets <Source_Techpack> <Target_Techpack> <PP> <Disable/Enable>
+#
+# ******************************************************************************************************
+#
+# Command Section
+#
+# ******************************************************************************************************
+
+if [ -z "${CONF_DIR}" ] ; then
+  echo "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  echo "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 2
+fi
+
+. ${CONF_DIR}/niq.rc
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+        echo "Could not find /eniq/admin/lib/common_functions.lib"
+        exit 1
+fi
+
+
+if [ -z "${BIN_DIR}" ] ; then
+  echo "ERROR: BIN_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+INSTALLER_DIR="/eniq/sw/installer"
+LOG_DIR="/eniq/log/sw_log/engine"
+
+IQ_DIR=/eniq/sybase_iq
+IQISQL=${IQ_DIR}/${SYBASE_OCS}/bin/isql
+TEMP_FILE="TEMP"
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $connection_string ]; then
+  $RM -f $connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string"
+  fi
+fi
+
+if [ -f $connection_string_2 ]; then
+  $RM -f $connection_string_2
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string_2"
+  fi
+fi
+}
+trap remove_connection_string EXIT
+
+
+### Function: pecho ###
+#
+#   This method is called to print the logs and append .
+#  	it to the Log file as well
+#
+# Arguments:
+#       $1 -  message from part of program 
+# Return Values:
+#		none
+function pecho(){
+	$ECHO ${*} | ${TEE} -a ${LOG_FILE}
+}
+
+### Function: usage ###
+#
+#   This method is used to print the usage of the script.
+#
+# Arguments:
+#     	none 
+# Return Values:
+#		none
+usage(){
+	$ECHO "./disableOrEnableBusyHourSets <Source_Techpack> <Target_Techpack> <PP> <Disable/Enable> "
+	$ECHO "Example : "
+	$ECHO "./disableOrEnableBusyHourSets DC_E_ERBS DC_E_ERBS_CELLFDDBH PP0 enable"
+	exit 1
+}
+
+DBISQL="$(ls /eniq/sybase_iq/IQ-*/bin64/dbisql)"
+if [ ! -x "$DBISQL" ]; then
+	pecho "$DBISQL commands not found or not executable."
+	exit 1
+fi
+
+DWHDBPASSWORD=`inigetpassword DWH -v DCPassword -f ${CONF_DIR}/niq.ini`
+DWHDB_PORT=`inigetpassword DWH -v PortNumber -f ${CONF_DIR}/niq.ini`
+DWH_SERVER_NAME=`inigetpassword DWH -v ServerName -f ${CONF_DIR}/niq.ini`
+DWHREPUSER=`inigetpassword REP -v DWHREPUsername -f ${CONF_DIR}/niq.ini`
+DWHREPPASSWORD=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+
+connection_string_dwhrep=/var/tmp/encrypt_$$.txt
+connection_string_dc=/var/tmp/encrypt2_$$.txt
+connection_string_decrypt_dwhrep="-nogui -c \"eng=${REP_SERVER_NAME};links=tcpip{host=${REP_SERVER_NAME};port=${REP_PORT}};uid=$DWHREPUSER;pwd=$DWHREPPASSWORD\"" 
+connection_string_decrypt_dc="-nogui -c \"eng=${DWH_SERVER_NAME};links=tcpip{host=${DWH_SERVER_NAME};port=${DWHDB_PORT}};uid=dc;pwd=${DWHDBPASSWORD}\""
+  get_encrypt_file "${connection_string_decrypt_dwhrep}" "${connection_string_dwhrep}"
+  get_encrypt_file "${connection_string_decrypt_dc}" "${connection_string_dc}"
+  
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+if [ ! -d ${LOG_DIR} ] ; then
+  $MKDIR -p ${LOG_DIR}
+  $CHMOD 777 ${LOG_DIR}
+fi
+
+TIMESTAMP=`$DATE +%d.%m.%y_%H:%M:%S`
+LOG_FILE=${LOG_DIR}/disableOrEnableBusyHourSets_${TIMESTAMP}.log
+
+### Get the details from the Command Line And Assign it to a Variable
+
+if [ "$#" -ne 4 ]; then
+	pecho "ERROR: Insufficient arguments in commandLine "
+	usage
+fi
+
+if $ECHO  $4 | $GREP -i ENABLE; then
+    ENABLE_STATE=ENABLE
+elif $ECHO  $4 | $GREP -i DISABLE; then
+    ENABLE_STATE=DISABLE
+else 
+	pecho "Enable State is not Correct.Enable state has to be either "enable/disable" "
+	exit 2
+fi
+
+if [[ $3 == PP* ]] ; then  
+	$ECHO " " >> ${LOG_FILE}   
+else
+	pecho "Placeholder is wrong. Enter the correct placeholder  " 
+	exit 3
+fi
+
+SOURCE_TP=$1
+TARGET_TP=$2
+PP_NAME=$3
+ENABLE=$ENABLE_STATE
+
+##### Checking the details entered are correct
+${DBISQL} @${connection_string_dwhrep} "select VERSIONID from dwhrep.DWHTechPacks where TECHPACK_NAME='$1' ; OUTPUT TO ${INSTALLER_DIR}/TEMP" >> ${LOG_FILE}  
+VERSION=`$SED 's/) /)/g' ${INSTALLER_DIR}/TEMP` >> ${LOG_FILE}  
+
+$RM -rf ${INSTALLER_DIR}/TEMP >> ${LOG_FILE}  
+
+${DBISQL} @${connection_string_dwhrep} "select DISTINCT BHLEVEL,BHTYPE,ENABLE,BHOBJECT from busyhour WHERE versionid = ${VERSION} and BHLEVEL='${TARGET_TP}' and BHTYPE = '${PP_NAME}' ;OUTPUT TO ${INSTALLER_DIR}/TEMP" >> ${LOG_FILE}  
+$SED -e "s/,/ /g" -e "s/'/ /g" ${INSTALLER_DIR}/TEMP > ${INSTALLER_DIR}/TEMP.tmp   
+$MV ${INSTALLER_DIR}/TEMP.tmp ${INSTALLER_DIR}/TEMP
+
+Target=`$CAT ${INSTALLER_DIR}/TEMP  | $NAWK '{ print $1 }'`
+if [ "$Target" == "$TARGET_TP" ]; then 
+    $ECHO "$TARGET_TP exists" >> ${LOG_FILE}  
+else 
+	 pecho "$TARGET_TP doesnot exist for the particular techpack $SOURCE_TP "
+	exit 4
+fi
+
+PP=`$CAT ${INSTALLER_DIR}/TEMP  | $NAWK '{ print $2 }'`
+if [ "$PP_NAME" == "$PP" ] ; then 
+    $ECHO "$PP_NAME exists" >> ${LOG_FILE}  
+else 
+	 pecho "$PP_NAME doesnot exist for the particular techpack $SOURCE_TP "
+	 exit 5
+fi
+ 
+ES=`$CAT ${INSTALLER_DIR}/TEMP  | $NAWK '{ print $3 }'`
+BHOBJECT=`$CAT ${INSTALLER_DIR}/TEMP  | $NAWK '{ print $4 }'`
+
+$ECHO "Updating the Enable status to user wish " >> ${LOG_FILE}  
+if [ $ENABLE == ENABLE ]; then
+	ENABLE_STATUS=1
+fi
+if [ $ENABLE == DISABLE ]; then
+	ENABLE_STATUS=0
+fi
+	
+if [ "$ES" == "$ENABLE_STATUS" ]; then
+	pecho " The Particulsr Set is already in $ENABLE_STATE State "
+	exit 6
+fi 
+
+### UPDATING THE TABLES
+${DBISQL} @${connection_string_dwhrep} "update dwhrep.Busyhour set ENABLE =$ENABLE_STATUS where VERSIONID=${VERSION} and BHLEVEL ='$TARGET_TP' and BHTYPE = '$PP_NAME';" >> ${LOG_FILE}  
+if [ $? -ne 0 ] ; then
+	pecho " Failed while updating BH table " 
+else
+	$ECHO " BusyHour table for $TARGET_TP has been updated successfully from  $ES to $ENABLE_STATUS " >> ${LOG_FILE}  
+	${DBISQL} @${connection_string_dwhrep} "update dwhrep.AggregationRule set ENABLE =$ENABLE_STATUS WHERE AGGREGATION like '$2%'  and VERSIONID=${VERSION} and target_type='$2' and bhtype='${BHOBJECT}_${PP_NAME}';" >> ${LOG_FILE}  
+	if [ $? -ne 0 ] ; then
+		pecho " Failed to update AggregationRule Table "
+		${DBISQL} @${connection_string_dwhrep} "update dwhrep.Busyhour set ENABLE =$ES where VERSIONID=${VERSION} and BHLEVEL ='$TARGET_TP' and BHTYPE = '$PP_NAME';" >> ${LOG_FILE}  
+		$ECHO " BusyHour table for $TARGET_TP has been updated again to old value since AggregationRule table execution is not done" >> ${LOG_FILE}  
+	else 
+		$ECHO " AggregationRule table for $TARGET_TP has been updated successfully from  $ES to $ENABLE_STATUS " >> ${LOG_FILE}  
+		if [ "${ENABLE_STATUS}" == 0 ]; then 
+			${DBISQL} @${connection_string_dc} "DELETE FROM LOG_AggregationRules WHERE AGGREGATION like '$2%' and target_type='$2' and bhtype='${BHOBJECT}_${PP_NAME}';" >> ${LOG_FILE}  
+			if [ $? -ne 0 ] ; then
+				pecho " Failed to update the Log_AggregationRules table whie deleting"
+				${DBISQL} @${connection_string_dwhrep} "update dwhrep.AggregationRule set ENABLE =$ES WHERE AGGREGATION like '$2%'  and VERSIONID=${VERSION} and target_type='$2' and bhtype='${BHOBJECT}_${PP_NAME}';" >> ${LOG_FILE}  
+				${DBISQL} @${connection_string_dwhrep} "update dwhrep.Busyhour set ENABLE =$ES where VERSIONID=${VERSION} and BHLEVEL ='$TARGET_TP' and BHTYPE = '$PP_NAME';" >> ${LOG_FILE}  
+				$ECHO "Busyhour and AggregationRule table has been updated with the previous values since deletion is unsuccessful in LOG_AGGREGATIONRULES TABLE " >> ${LOG_FILE}  
+			else 
+				$ECHO " Log_AggregationRule table for $TARGET_TP has been deleted successfully " >> ${LOG_FILE}  
+				pecho " Placeholder :: $PP_NAME for the techpack :: $SOURCE_TP and Set :: $TARGET_TP has been updated to $ENABLE state. " 
+			fi
+		elif [ "${ENABLE_STATUS}" == 1 ]; then
+			$RM -rf ${INSTALLER_DIR}/TEMP
+			${DBISQL} @${connection_string_dwhrep} "select AGGREGATION, RULEID, TARGET_TYPE, TARGET_LEVEL, TARGET_TABLE, SOURCE_TYPE, SOURCE_LEVEL, SOURCE_TABLE, RULETYPE, AGGREGATIONSCOPE, BHTYPE from AggregationRule WHERE AGGREGATION like '$2%'  and VERSIONID=${VERSION} and target_type='$2' and bhtype='${BHOBJECT}_${PP_NAME}';OUTPUT TO ${INSTALLER_DIR}/TEMP" >> ${LOG_FILE}  
+			LINES=`$WC -l < ${INSTALLER_DIR}/TEMP` 
+			TEMP=1
+			while [ "$TEMP" -le "$LINES" ]
+			do
+				ITEMPER_SQL=`$SED -n ${TEMP}p ${INSTALLER_DIR}/TEMP`
+				${DBISQL} @${connection_string_dc} "INSERT INTO LOG_AggregationRules (AGGREGATION, RULEID, TARGET_TYPE, TARGET_LEVEL, TARGET_TABLE, SOURCE_TYPE, SOURCE_LEVEL, SOURCE_TABLE, RULETYPE, AGGREGATIONSCOPE, BHTYPE, STATUS, MODIFIED) VALUES( $ITEMPER_SQL , null ,null);" >> ${LOG_FILE}
+				TEMP=$((TEMP+1))
+			done
+			if [ $? -ne 0 ] ; then
+				pecho " Failed to update the LOG_AggregationRules table whie inserting"
+				${DBISQL} @${connection_string_dwhrep} "update dwhrep.AggregationRule set ENABLE =$ES WHERE AGGREGATION like '$2%'  and VERSIONID=${VERSION} and target_type='$2' and bhtype='${BHOBJECT}_${PP_NAME}';" >> ${LOG_FILE}  
+				${DBISQL} @${connection_string_dwhrep} "update dwhrep.Busyhour set ENABLE =$ES where VERSIONID=${VERSION} and BHLEVEL ='$TARGET_TP' and BHTYPE = '$PP_NAME';" >> ${LOG_FILE}  
+				$ECHO "Busyhour and AggregationRule table has been updated with the previous values since insertion is unsuccessful in LOG_AGGREGATIONRULES TABLE "
+			else 
+				$ECHO " Log_AggregationRule table for $TARGET_TP has been inserted with $LINES rows successfully " >> ${LOG_FILE}  
+				pecho " Placeholder :: $PP_NAME for the techpack :: $SOURCE_TP and Set :: $TARGET_TP has been updated to $ENABLE state. " 
+			fi
+		fi	
+	fi
+fi
+$ECHO " Deleting the TEMP file from /eniq/sw/installer " >> ${LOG_FILE} 
+$RM -rf ${INSTALLER_DIR}/TEMP  
+$ECHO " Restarting the repdb " >> ${LOG_FILE}
+
+repdb restart >> ${LOG_FILE}
+if [ $? -ne 0 ] ; then
+	$ECHO " Failed to restart the repdb"
+fi
+ 

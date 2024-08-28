@@ -1,0 +1,381 @@
+<!--
+     Ericsson Network IQ Tech Pack installer ant tasks.
+     Copyright (c) 1999 - 2006 AB LM Ericsson Oy  All rights reserved.
+-->
+
+<project name="tech_pack_installation" default="post_directory_checker_and_DWHM_install">
+
+	<property name="tech_pack_unzip_path" location="${current_working_directory}/tp_installer_temp/unzipped_tp"/>
+
+	<taskdef resource="net/sf/antcontrib/antlib.xml"/>
+	<taskdef name="GetDBProperties" classname="com.distocraft.dc5000.install.ant.GetDBProperties"/>
+	<taskdef name="PreinstallCheck" classname="com.distocraft.dc5000.install.ant.PreinstallCheck"/>
+	<taskdef name="ETLSetImport" classname="com.distocraft.dc5000.install.ant.ETLSetImport"/>
+	<taskdef name="forcedelete" classname="com.distocraft.dc5000.install.ant.ForceDeleteFile"/>
+	<taskdef name="TechPackAndTypeActivation" classname="com.distocraft.dc5000.install.ant.TechPackAndTypeActivation"/>
+	<taskdef name="ETLSetImport" classname="com.distocraft.dc5000.install.ant.ETLSetImport"/>
+	<taskdef name="DirectoryCheckerAndDWHMInstall" classname="com.distocraft.dc5000.install.ant.DirectoryCheckerAndDWHMInstall"/>
+	<taskdef name="InsertAlarmInterface" classname="com.distocraft.dc5000.install.ant.InsertAlarmInterface"/>
+	<taskdef name="UpdateAlarmInterface" classname="com.distocraft.dc5000.install.ant.UpdateAlarmInterface"/>
+	<taskdef name="UpdateDataItem" classname="com.distocraft.dc5000.install.ant.UpdateDataItem"/>
+	<taskdef name="HandleBusyhourActivation" classname="com.distocraft.dc5000.install.ant.HandleBusyhourActivation" />
+	<taskdef name="UpdateMzTpVersionInfo" classname="com.distocraft.dc5000.install.ant.UpdateMzTpVersionInfo" />
+	<taskdef name="RunOldLoadersAntTask" classname="com.distocraft.dc5000.install.ant.RunOldLoadersAntTask" />
+	<taskdef name="SetNewVectorFlag" classname="com.distocraft.dc5000.install.ant.SetNewVectorFlag" />
+
+	<import file="${tech_pack_unzip_path}/install/install.xml"/>
+
+	<property name="mz_bin_dir" value="/eniq/mediation_sw"/>
+	<property name="mz_int_dir" value="/eniq/mediation_inter"/>
+
+	<target name="preinstall_check" depends="pre_preinstall_check">
+		
+		<tstamp>
+			<format property="PREINS_CHECK_DDCSTARTTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+		</tstamp>
+		
+		<!-- <echo message="classpath = ${classpath}"/> -->
+		<!--<record name="${tech_pack_unzip_path}/${tech_pack_filename}/install_log.txt" action="start" />-->
+
+		<!-- Set the following ANT project properties:
+		${etlrepDatabaseUrl}
+		${etlrepDatabaseUsername}
+		${etlrepDatabasePassword}
+		${etlrepDatabaseDriver}
+		-->
+		<GetDBProperties name="etlrep" configurationDirectory="${configurationDirectory}"/>
+
+		<!-- Set the following ANT project properties:
+		${dwhrepDatabaseUrl}
+		${dwhrepDatabaseUser}
+		${dwhrepDatabasePassword}
+		${dwhrepDatabaseDriver}
+		-->
+		<GetDBProperties name="dwhrep" configurationDirectory="${configurationDirectory}"/>
+
+		<!-- Use the custom ANT task to check if the tech pack can be installed or updated. 
+		PreinstallCheck creates the following ANT properties to be used in other custom ANT tasks:
+		${techPackContentPath}
+		${techPackName}
+		${techPackVersion}
+		${techPackMetadataVersion}
+		${buildNumber}
+		${installingTechPack}
+		${installingInterface}
+		${skipInstallationPhases}
+		-->
+		<PreinstallCheck configurationDirectory="${configurationDirectory}" checkForRequiredTechPacks="${checkForRequiredTechPacks}" forceInstall="${forceInstall}" currentWorkingDirectory="${current_working_directory}" binDirectory="${binDirectory}" tpDir="${tpdir}" checkPrevMzTPInstall="${CheckPrevMzTPInstall}"/>
+		
+		<echo>DDC:preinstall_check:${techPackName}:START:${PREINS_CHECK_DDCSTARTTIME}</echo>
+
+	        <tstamp>
+			<format property="PREINS_CHECK_DDCENDTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+		</tstamp>
+ 		<echo>DDC:preinstall_check:${techPackName}:END:${PREINS_CHECK_DDCENDTIME}</echo>
+
+	</target>
+
+	<target name="unzip_external_files" description="Unbundle/unzip any external files contained in the /${tech_pack_external_files_path} path in the .tpi file onto the ENIQ server">
+
+		 <tstamp>
+	           <format property="UNZIP_FILES_DDCSTARTTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+	     </tstamp>
+
+		 <echo>DDC:unzip_external_files:${techPackName}:START:${UNZIP_FILES_DDCSTARTTIME}</echo>
+
+		<property name="tech_pack_external_files_path" value="externalFiles"/>
+		<property name="techpack_external_files_location" value="/eniq/sw/conf/techPacks/"/>
+		<property name="techpack_specific_external_files_folder_name" value="externalFiles"/>
+		<property name="unzip_destination" value="${techpack_external_files_location}/${techPackName}/${techpack_specific_external_files_folder_name}"/>
+		<property name="external_files_in_unzip_file" value="${techPackContentPath}/${tech_pack_external_files_path}"/>
+		<if>
+			<isset property="skipInstallationPhases" />
+			<then>
+				<echo message="Skipping tech pack external files installation..." />
+			</then>
+			<else>
+				<available file="${external_files_in_unzip_file}" property="externalFilesExist" />
+				<if>
+					<isset property="externalFilesExist" />
+					<then>
+						<echo message="Starting external files installation." />
+						<echo message="Removing any existing files in ${unzip_destination}"/>
+						<delete dir="${unzip_destination}"/>
+						<echo message="Copying files from ${external_files_in_unzip_file} to ${unzip_destination}"/>
+						<copy todir="${unzip_destination}">
+							<fileset dir="${external_files_in_unzip_file}"/>
+						</copy>
+						<echo message="External files installed succesfully." />
+					</then>
+					<else>
+						<echo message="Folder ${tech_pack_external_files_path} is not included in the tech pack installation file, no external files will be installed for this tech pack.  This is an optional feature, the tech pack installation will still proceed " />
+					</else>
+				</if>
+			</else>
+		</if>
+		
+		<tstamp>
+	           <format property="UNZIP_FILES_DDCENDTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+	    </tstamp>
+		<echo>DDC:unzip_external_files:${techPackName}:END:${UNZIP_FILES_DDCENDTIME}</echo>
+
+	</target>
+
+	<target name="metadata_installation" depends="pre_metadata_installation, unzip_external_files">
+		
+	 <tstamp>
+           <format property="META_INS_DDCSTARTTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+     </tstamp>
+
+	 <echo>DDC:metadata_installation:${techPackName}:START:${META_INS_DDCSTARTTIME}</echo>
+
+		<if>
+			<isset property="skipInstallationPhases"/>
+			<then>
+				<echo message="Skipping tech pack metadata installation..."/>
+			</then>
+			<else>
+				<available file="${techPackContentPath}/sql/Tech_Pack_${techPackName}.sql" type="file" property="metadataFileExists"/>
+				<if>
+					<isset property="metadataFileExists"/>
+					<then>
+						<echo message="Starting metadata installation."/>
+						<!-- Use the ANT core sql task to insert metadata to database. -->
+						<sql output="${techPackContentPath}/metadata_log.txt" driver="${dwhrepDatabaseDriver}" url="${dwhrepDatabaseUrl}" userid="${dwhrepDatabaseUsername}" password="${dwhrepDatabasePassword}" src="${techPackContentPath}/sql/Tech_Pack_${techPackName}.sql" keepformat="true" onerror="abort" autocommit="false">
+							<classpath>
+								<fileset dir="${dc.platform.dir}/">
+									<include name="**/dclib/*.jar"/>
+								</fileset>
+							</classpath>
+						</sql>
+						<echo message="Metadata installed succesfully."/>
+					</then>
+					<else>
+						<echo message="File ${techPackContentPath}/sql/Tech_Pack_${techPackName}.sql is missing from tech pack installation file. No metadata will be inserted or updated."/>
+					</else>
+				</if>
+			</else>
+		</if>
+    
+	<tstamp>
+           <format property="META_INS_DDCENDTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+    </tstamp>
+	<echo>DDC:metadata_installation:${techPackName}:END:${META_INS_DDCENDTIME}</echo>
+
+	</target>
+
+	<target name="ETL_set_installation" depends="pre_ETL_set_installation,update_data_item">
+
+		<tstamp>
+               <format property="ETL_INS_DDCSTARTTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+	    </tstamp>
+        <echo>DDC:ETL_set_installation:${techPackName}:START:${ETL_INS_DDCSTARTTIME}</echo>
+
+		<if>
+			<isset property="skipInstallationPhases"/>
+			<then>
+				<echo message="Skipping tech pack set installation..."/>
+			</then>
+			<else>
+				<!-- Use the custom ANT task to create sets for the tech pack. -->
+				<ETLSetImport setDirectoryPath="${techPackContentPath}/set" importingInterfaces="false"/>
+			</else>
+		</if>
+		
+		<tstamp>
+             <format property="ETL_INS_DDCENDTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+        </tstamp>
+        <echo>DDC:ETL_set_installation:${techPackName}:END:${ETL_INS_DDCENDTIME}</echo>
+
+	</target>
+	
+	<target name="update_data_item">
+		<tstamp>
+                <format property="UPDATE_DATA_DDCSTARTTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+        </tstamp>
+        <echo>DDC:update_data_item:${techPackName}:START:${UPDATE_DATA_DDCSTARTTIME}</echo>
+
+		<!-- Set the database properties -->
+		<echo message="Starting to update the DataItem table..."/>		
+		<!-- Call the UpdateDataItem class with parameters -->
+		<UpdateDataItem currentWorkingDirectory="${current_working_directory}"/>
+		<echo message="Updated the DataItem table."/>
+		<tstamp>
+                <format property="UPDATE_DATA_DDCENDTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+        </tstamp>
+        <echo>DDC:update_data_item:${techPackName}:END:${UPDATE_DATA_DDCENDTIME}</echo>
+	</target>
+
+	<target name="tech_pack_and_type_activation" depends="pre_tech_pack_and_type_activation">
+		<tstamp>
+	           <format property="TPACT_DDCSTARTTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+	    </tstamp>
+	    <echo>DDC:tech_pack_and_type_activation:${techPackName}:START:${TPACT_DDCSTARTTIME}</echo>
+
+		<if>
+			<isset property="skipInstallationPhases"/>
+			<then>
+				<echo message="Skipping tech pack activation..."/>
+			</then>
+			<else>
+				<if>
+					<isset property="setVectorFlagNew"/>
+					<then>
+						<echo message="Installing with new vector range handling..."/>
+						<property name="newVectorFlag" value="true"/>
+						<SetNewVectorFlag techPackName="${techPackName}" />
+					</then>
+					<else>
+						<property name="newVectorFlag" value="false"/>
+					</else>
+				</if>
+				<!-- Does this techpack support busyhour placeholders -->
+				<if>
+					<isset property="doBusyhourActivation" />
+					<then>
+						<!-- Use the custom ANT task to check busyhour placeholder activations. -->
+						<HandleBusyhourActivation buildNumber="${buildNumber}" techPackName="${techPackName}" techPackVersion="${techPackVersion}" techPackMetadataVersion="${techPackMetadataVersion}" configurationDirectory="${configurationDirectory}" />
+						<!-- Use the custom ANT task to install or update tech pack and type activations. -->
+						<TechPackAndTypeActivation buildNumber="${buildNumber}" techPackContentPath="${techPackContentPath}" techPackName="${techPackName}" techPackVersion="${techPackVersion}" techPackMetadataVersion="${techPackMetadataVersion}" binDirectory="${binDirectory}" newVectorFlag="${newVectorFlag}"/>
+					</then>
+					<else>
+						<!-- Use the custom ANT task to install or update tech pack and type activations. -->
+						<TechPackAndTypeActivation buildNumber="${buildNumber}" techPackContentPath="${techPackContentPath}" techPackName="${techPackName}" techPackVersion="${techPackVersion}" techPackMetadataVersion="${techPackMetadataVersion}" binDirectory="${binDirectory}" newVectorFlag="${newVectorFlag}"/>
+					</else>
+				</if>
+				
+				
+				
+			</else>
+		</if>
+		<tstamp>
+	         <format property="TPACT_DDCENDTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+	    </tstamp>
+	    <echo>DDC:tech_pack_and_type_activation:${techPackName}:END:${TPACT_DDCENDTIME}</echo>
+	</target>
+
+	<target name="ETL_interface_metadata_installation" depends="pre_ETL_interface_metadata_installation">
+		
+        <tstamp>
+             <format property="ETL_INT_DDCSTARTTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+        </tstamp>
+        <echo>DDC:ETL_interface_metadata_installation:${techPackName}:START:${ETL_INT_DDCSTARTTIME}</echo>
+
+		<if>
+			<isset property="skipInstallationPhases"/>
+			<then>
+				<echo message="Skipping tech pack activation..."/>
+			</then>
+			<else>
+				<!-- Use the ANT core sql task to insert metadata to database. -->
+				<available file="${techPackContentPath}/interface" type="dir" property="interfaceDirectoryExists"/>
+				<if>
+					<isset property="interfaceDirectoryExists"/>
+					<then>
+						<for param="currentDirectory">
+							<dirset dir="${techPackContentPath}/interface">
+								<include name="**/**"/>
+							</dirset>
+							<sequential>
+								<for param="interfaceMetadataFile">
+									<fileset dir="@{currentDirectory}">
+										<include name="*.sql"/>
+									</fileset>
+									<sequential>
+										<!-- Use the ANT core sql task to insert interface metadata to database. -->
+										<echo message="Inserting interface metadata from file @{interfaceMetadataFile}"/>
+										<sql output="${techPackContentPath}/metadata_log.txt" driver="${dwhrepDatabaseDriver}" url="${dwhrepDatabaseUrl}" userid="${dwhrepDatabaseUsername}" password="${dwhrepDatabasePassword}" src="@{interfaceMetadataFile}" keepformat="true" onerror="abort" autocommit="false">
+											<classpath>
+												<fileset dir="${dc.platform.dir}/">
+													<include name="**/dclib/*.jar"/>
+												</fileset>
+											</classpath>
+										</sql>
+									</sequential>
+								</for>
+							</sequential>
+						</for>
+					</then>
+					<else>
+						<echo message="No interface metadata to install."/>
+					</else>
+
+				</if>
+			</else>
+		</if>
+	
+		<tstamp>
+	             <format property="ETL_INTF_DDCENDTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+	    </tstamp>
+	    <echo>DDC:ETL_interface_metadata_installation:${techPackName}:END:${ETL_INTF_DDCENDTIME}</echo>
+
+	</target>
+
+	<target name="ETL_interface_set_installation" depends="pre_ETL_interface_set_installation">
+		
+        <tstamp>
+             <format property="ETL_INTF_SET_DDCSTARTTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+        </tstamp>
+        <echo>DDC:ETL_interface_set_installation:${techPackName}:START:${ETL_INTF_SET_DDCSTARTTIME}</echo>
+
+		<if>
+			<isset property="skipInstallationPhases"/>
+			<then>
+				<echo message="Skipping interface set installation..."/>
+			</then>
+			<else>
+				<!-- Create the sets for the interfaces. -->
+				<ETLSetImport setDirectoryPath="${techPackContentPath}/interface" importingInterfaces="true"/>
+			</else>
+		</if>
+		
+	       <tstamp>
+	             <format property="ETL_INTF_SET_DDCENDTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+	        </tstamp>
+	        <echo>DDC:ETL_interface_set_installation:${techPackName}:END:${ETL_INTF_SET_DDCENDTIME}</echo>
+		
+	</target>
+
+	<target name="directory_checker_and_DWHM_install" depends="pre_directory_checker_and_DWHM_install">
+
+		<tstamp>
+             <format property="DIRCHECK_DDCSTARTTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+        </tstamp>
+        <echo>DDC:directory_checker_and_DWHM_install:${techPackName}:START:${DIRCHECK_DDCSTARTTIME}</echo>
+		
+		<available file="${techPackContentPath}/vector/Tech_Pack_${techPackName}.txt" type="file" property="vecrefFileExists"/>
+		<if>
+			<isset property="vecrefFileExists"/>
+			<then>
+				<property name="loadFile" value="${techPackContentPath}/vector/Tech_Pack_${techPackName}.txt"/>
+			</then>
+			<else>
+				<property name="loadFile" value="NULL"/>
+			</else>
+		</if>
+
+		<if>
+			<isset property="skipInstallationPhases"/>
+			<then>
+				<echo message="Skipping running directory checker and DWHM_install..."/>
+			</then>
+			<else>
+
+				<!-- Use the custom ANT task to check if the tech pack can be installed or updated. -->
+				<DirectoryCheckerAndDWHMInstall installingInterface="${installingInterface}" techPackName="${techPackName}" binDirectory="${binDirectory}" techPackVersion="${techPackVersion}" buildNumber="${buildNumber}" techPackMetadataVersion="${techPackMetadataVersion}" loadFile="${loadFile}"/>
+			</else>
+		</if>
+
+		<tstamp>
+             <format property="DIRCHECK_DDCENDTIME" pattern="yyyy-MM-dd HH:mm:ss"/>
+        </tstamp>
+        <echo>DDC:directory_checker_and_DWHM_install:${techPackName}:END:${DIRCHECK_DDCENDTIME}</echo>
+
+	</target>
+	
+	<target name="run_old_Loaders" depends="">
+		<RunOldLoadersAntTask techpackName="${techpackName}"/>
+	</target>
+	
+
+</project>

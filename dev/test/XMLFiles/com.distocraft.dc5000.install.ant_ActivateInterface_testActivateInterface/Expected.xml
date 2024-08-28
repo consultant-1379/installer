@@ -1,0 +1,4 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<dataset>
+  <INTERFACEMEASUREMENT TAGID="tagID" DATAFORMATID="vID:typeName:dataType" INTERFACENAME="if_name" STATUS="1" DESCRIPTION="description" TECHPACKVERSION="N/A" INTERFACEVERSION="ifVersion"/>
+</dataset>

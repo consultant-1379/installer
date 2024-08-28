@@ -1,0 +1,243 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : test_tp_installer
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : Script to test tp_installer script
+# Usage   : test_tp_installer [-f <tp_installer script>] [-t <tech pack dir>] [-i]"
+# ********************************************************************
+
+ECHO=echo
+NAWK=nawk
+CAT=cat
+GREP=grep
+
+usage_msg () {
+	$ECHO "Usage: test_tp_installer [-f <tp_installer script>] [-t <tech pack dir>] [-i]"
+	$ECHO " -f  : Path to a tp_installer script to be tested. Default is /eniq/sw/installer/tp_installer"
+	$ECHO " -t  : Path of directory with tech packs. Default is /eniq/home/dcuser/techpacks"
+	$ECHO " -e  : Exclude a runs of tp_installer with have nothing mocked."
+}
+
+setupAndChecks () {
+	installDir=/eniq/sw/installer
+	if [ ! $script_to_test ] ; then
+		script_to_test=${installDir}/tp_installer
+		$ECHO "No tp_installer script submitted. Going with default: $script_to_test"
+	elif [[ "$script_to_test" != /* ]] ; then
+		$ECHO "Please submit absolute path to the script to test."
+		usage_msg
+		exit 1
+	fi
+	if [ ! -f $script_to_test ] ; then
+		$ECHO "File $script_to_test not found."
+		exit 1
+	fi
+	if [ $real_techpack_dir ] ; then
+		if [[ "$real_techpack_dir" != /* ]] ; then
+			$ECHO "Please submit absolute path to location of tech packs."
+			exit 1
+		fi
+		if [ ! "$(ls $real_techpack_dir | grep ".tpi")" ] ; then
+			$ECHO "$real_techpack_dir has not even 1 tech pack in it. If non-mocked test are to be run, then make sure the chosen this location has all tech packs of features involved in this testing."
+			exit 1
+		fi
+	fi
+	if [ ! -d $real_techpack_dir ] ; then
+		$ECHO "Directory $techpack_dir not found."
+		exit 1
+	fi
+	
+	ENIQ_CONF_DIR=/eniq/installation/config
+	CURR_SERVER_TYPE=`cat $ENIQ_CONF_DIR/installed_server_type | grep -v '^[[:blank:]]*#' | sed -e 's/ //g'`
+	if [ $CURR_SERVER_TYPE==eniq_stats ] ; then
+		test_config_file=$installDir/test_harness/test_config_stats
+	else 
+		$ECHO "ENIQ stats server type could not be determined from ${ENIQ_CONF_DIR}/installed_server_type."
+		exit 1
+	fi
+	
+	dependencyRecordFile=$installDir/test_harness/dependency_record
+	failFunctionFile=$installDir/test_harness/fail_function
+	testResultsFile=$installDir/test_harness/testResults
+	if [ -f $dependencyRecordFile ] ; then
+		rm $dependencyRecordFile
+	fi
+	if [ -f $testResultsFile ] ; then
+		rm $testResultsFile
+	fi
+	if [ -f $failFunctionFile ] ; then
+		rm $failFunctionFile
+	fi
+	
+	MOCK_FLAG="-M"
+}
+
+parseFromLine () {
+	delim=$1
+	testName=`$ECHO ${line}| $NAWK -F"$delim" '{print $1}'`
+	feature_list_file=$installDir/test_harness/`$ECHO ${line}| $NAWK -F"$delim" '{print $2}'`
+	expected_exit_code=`$ECHO ${line}| $NAWK -F"$delim" '{print $3}'`
+	expectation_file=$installDir/test_harness/`$ECHO ${line}| $NAWK -F"$delim" '{print $4}'`
+	mock_fail_function=`$ECHO ${line}| $NAWK -F"$delim" '{print $5}'`
+}
+
+checkTestConfig () {
+	#Make sure each line of test config has all columns set
+	for line in `echo "${testConfig}"`; do
+		parseFromLine ::
+		if [[ ! $testName || ! $feature_list_file || ! $expected_exit_code || ! $expected_exit_code || ! $mock_fail_function ]] ; then
+			$ECHO "There is something wrong with the following line in the test config file:
+${line}"
+			exit 1
+		fi
+	done
+}
+
+prepForTest () {
+echo "result beggining of prepForTest = ${result}"
+	techpack_dir=$installDir/test_harness/dummy_techpacks
+	$ECHO "Preparing for Test ${testName}."
+	$ECHO "Test ${testName} will use features:"
+	$CAT $feature_list_file
+	if [ "${mock_fail_function}" != "nofail" ] ; then
+		$ECHO "Failure will be simulated for dependency call: $mock_fail_function"
+	fi
+	$ECHO $mock_fail_function > $failFunctionFile
+	if [ `$ECHO "$expectation_file" | $GREP nomock` ]; then
+		$ECHO "Nothing will be mocked in this test."
+		echo "result just before check = ${result}"
+		if [ $result == 1 ]; then
+			$ECHO "Cancelling test ${testName} because one or more mocked tests have failed!!" 
+			rm $dependencyRecordFile
+			continue #No non-mocked tests should be run while any mocked tests are failing.
+		fi
+		MOCK_FLAG=""
+		techpack_dir=$real_techpack_dir
+	fi
+}
+		
+runTests () { 
+	result=0
+	for line in `echo "${testConfig}"`; do
+		parseFromLine ::
+		
+		$ECHO "
+*********************************************************"
+		prepForTest
+		$ECHO "*********************************************************
+******************** STARTING TEST ${testName} ********************
+*********************************************************
+" #NB: it is advised not to add any code lines between here and the line that calls tp_installer 
+  #so as to distinguish between printout of this script and that of tp_installer.
+
+		#Call tp_installer (change to installer dir, call tp_installer, change back to original dir)
+		cd $installDir; $script_to_test -c $feature_list_file -p $techpack_dir  -N -R $MOCK_FLAG; exitcode=$?; cd - 1>/dev/null;
+		$ECHO ""
+		if [ $exitcode -ne $expected_exit_code ] ; then
+			$ECHO "TEST $testName: exit code $exitcode. Exit code $expected_exit_code expected." >> $testResultsFile
+			result=1
+		else
+			$ECHO "TEST $testName: exit code Ok" >> $testResultsFile
+		fi
+		if [ ! `$ECHO "$expectation_file" | $GREP nomock` ]; then	#If it is a mocked test
+			#Assert the dependency calls are as expected:
+			diffCmd="diff $dependencyRecordFile $expectation_file"
+			if ! $diffCmd > /dev/null ; then
+				$ECHO "TEST $testName: Unexpected dependency call sequence. Here is the difference between what happened and what was expected:" >> $testResultsFile
+				$ECHO $diffCmd >> $testResultsFile
+				$diffCmd >> $testResultsFile
+				result=1
+			else
+				$ECHO "TEST $testName: the expected dependency calls were made" >> $testResultsFile
+			fi
+		fi
+		rm $dependencyRecordFile
+		rm $failFunctionFile
+		$ECHO "*************** FINISHED TEST $testName **************"
+	done
+}
+
+########################
+##MAIN BODY OF PROGRAM##
+########################
+
+while getopts "f:t:h" Option
+do
+	case $Option in
+		f) script_to_test="$OPTARG"  #Absolute path to tp_installer script to test. Default will be /eniq/sw/installer/tp_installer
+		
+		;;
+		t) real_techpack_dir="$OPTARG"  #Absolute path to location of techpacks
+		
+		;;
+		h) usage_msg  #Help - Print usage
+			exit 0
+		;;
+		\?) usage_msg
+			exit 1
+		;;
+	esac
+done
+
+setupAndChecks
+
+
+#**** RUN TESTS ****#
+$ECHO "Test configuration file is $test_config_file"
+
+# Cache the test config, exluding line beginning with the hash character
+testConfig=`$GREP -v "^#"  $test_config_file`
+if [ ! $real_techpack_dir ]; then 
+	# Exclude non-mocked tests as no tech pack dir was provided by user
+	testConfig=`$ECHO "$testConfig" | $GREP -v nomock` 
+fi
+if [ `$ECHO "$testConfig" | $GREP nomock` ]; then #Check if there are are tests that have no mocking of dependencies 
+	
+	$ECHO "********* This test run will include a non-mocked test(s) and could take considerable time. ************"
+else
+echo "testConfig =${testConfig}B"
+	if [ -n "${testConfig}" ]; then 
+		$ECHO "********* THIS WILL BE A MOCK-ONLY TEST RUN ************"
+	else
+		$ECHO "There are no tests to run. Please check test configuration file (for non-mocked test include the -t arg). 
+Exiting..."
+		exit 1
+	fi
+fi
+$ECHO "Test configuration to run is:"
+$ECHO "#NAME::FEATURE_LIST_FILENAME::EXPECTED_ERROR_CODE::MOCK_RECORD_FILENAME::MOCK_FUNCTION_TO_FAIL"
+$ECHO "$testConfig"
+
+# Make sure formatted Ok
+checkTestConfig
+
+# Run the tests as per the config
+runTests
+
+
+#**** SHOW TEST RESULTS ****#
+$ECHO "
+Test configuration that was run:"
+$ECHO "#NAME::FEATURE_LIST_FILENAME::EXPECTED_ERROR_CODE::MOCK_RECORD_FILENAME::MOCK_FUNCTION_TO_FAIL"
+$ECHO "${testConfig}"
+if [ $result -ne 0 ] ; then
+	$ECHO "TEST RUN FAILED."
+else
+	$ECHO "TEST RUN PASSED."
+fi
+$ECHO  Results:
+cat $testResultsFile

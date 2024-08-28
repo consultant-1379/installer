@@ -1,0 +1,538 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2019 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : loader_delimiter.bsh
+# Date    : 23/04/2019
+# Purpose : Correct the row/column delimiter issue in loader file
+# Usage   : loader_delimiter.bsh
+#
+# ********************************************************************
+
+if [[ `whoami` == "root" ]]
+then
+   $ECHO "ERROR: Please run the script as dcuser"
+   exit 1
+fi
+. /eniq/home/dcuser/.profile
+
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+        echo "Could not ${FIND} /eniq/admin/lib/common_functions.lib"
+        exit 6
+fi
+
+
+if [ -z "${CONF_DIR}" ] ; then
+  $ECHO "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+if [ -z "${BIN_DIR}" ] ; then
+  $ECHO "ERROR: BIN_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  $ECHO "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+INSTALLER_DIR=/eniq/sw/installer
+CONF_DIR=/eniq/sw/conf
+OSS_DIR=/eniq/admin/managed_oss
+ENIQ_BACKUP_DIR=/eniq/backup
+INSTALLATION_DIR=/eniq/installation/config
+SMF_BIN_DIR=/eniq/smf/bin
+BIN_DIR=/eniq/sw/bin
+ENIQ_CONF_DIR=/eniq/installation/config
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $connection_string ]; then
+  $RM -f $connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string"
+  fi
+fi
+}
+trap remove_connection_string EXIT
+
+DWHREPUSER=`inigetpassword REP -v DWHREPUsername -f ${CONF_DIR}/niq.ini`
+DWHREPPASSWORD=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+
+connection_string=/var/tmp/encrypt_$$.txt
+connection_string_decrypt="-c \"uid=${DWHREPUSER};pwd=${DWHREPPASSWORD};eng=${REP_SERVER_NAME}\" -host localhost -port $REP_PORT -nogui -onerror exit"
+
+get_encrypt_file "${connection_string_decrypt}" "${connection_string}"
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+#Handling log directory and log file.
+LOG_DIR=/eniq/log/sw_log/engine
+if [ ! -d $LOG_DIR ]; then
+        $$ECHO "ERROR - $LOG_DIR not found. Aborting script. "
+        exit 3
+fi
+LOG_FILE=$LOG_DIR/loader_delimiter_`date '+%Y-%m-%d'`.log
+NOW=`date '+%Y-%m-%d_%H.%M.%S'`
+$ECHO "***********************************************************" >> $LOG_FILE
+$ECHO "INFO: $NOW - Loader Delimiter correction started. " >> $LOG_FILE
+
+
+function remove_char()
+{
+    failed_file=$1
+    if [ -f $failed_file ]
+    then
+           havenonascii=$(perl -ne 'print if /[^[:ascii:]]/' $failed_file)
+           if [[ -z $havenonascii ]]
+           then
+              return 2
+           else
+              $ECHO "INFO: Non-ASCII Character present in the loader file" >> $LOG_FILE
+           fi
+       perl -pi -e 's/[^[:ascii:]]//g' $failed_file
+       if [ $? -eq 0 ]
+       then
+          return 0
+       else
+          return 3
+       fi
+    else
+       return 0
+    fi
+
+}
+
+function remove_junkcharinnewline()
+{
+    failed_file=$1
+    if [ -f $failed_file ]
+    then
+       
+           hasextrachar=$($AWK -F"\t" '{print $NF}' $failed_file)
+           if [[ ! -z $hasextrachar ]]
+           then
+               cntextrachar=$($ECHO $hasextrachar|wc -w)
+                   if [ $cntextrachar -ge 1 ]
+                   then
+                       $ECHO "INFO: Extra character present in the loader file $failed_file along with new line character('\n')" >> $LOG_FILE
+                   else
+                          return 2
+                   fi
+            else
+                   return 2
+           fi
+       $AWK -F"\t" '{sub($NF,'\n');print}' $failed_file > /eniq/backup/temp_file
+       if [ $? -eq 0 ]
+       then
+              perl -i -n -e "print if /S/" /eniq/backup/temp_file
+          $MV /eniq/backup/temp_file $failed_file
+          if [ $? -eq 0 ]
+          then
+             return 0
+          else
+             return 3
+          fi
+       else
+          return 3
+       fi
+    else
+       return 0
+    fi
+}
+
+function getcolumncount()
+{
+moName=$1
+$ECHO "select count(*) from dataitem where dataformatid in (select distinct dataformatid from dataformat where foldername like '$moName' and versionid in (select versionid from tpActivation where status = 'active'))" > /eniq/backup/getcolumn.sql
+columncnt=$(${DBISQL} @${connection_string} /eniq/backup/getcolumn.sql |tail -4|head -1|tr -d " ")
+return $columncount
+}
+
+function remove_extra_columns()
+{
+        failed_file=$1
+        tmp=1
+        dirname=$(dirname "$failed_file")
+    filename=$(basename "$failed_file")
+    moName=$($ECHO $dirname|$AWK -F"/" '{print $(NF-1)}'|$TR '[:lower:]' '[:upper:]')
+        getcolumncount $moName
+        columcount=$?
+        if [[ -z $columncnt ]]
+        then
+                $ECHO "ERROR: Failed to get the column count from the repdb for the MO $moName" >> $LOG_FILE
+            return 3
+        fi
+        if [ -f $failed_file ]
+    then
+           findgreat=$($AWK -F"\t" '{print NF}' $failed_file|sort|uniq)
+       if [[ ! -z $findgreat ]]
+           then
+              count=$($ECHO $findgreat|$WC -w)
+          if [ $count -gt 1 ]
+              then
+                    columncntval=$(expr $columncnt + 1 )
+                        $AWK -F"\t" '{if(NF != '$columncntval') print NR}' $failed_file |sort|uniq > /eniq/backup/lineno
+                    lines=$($CAT /eniq/backup/lineno)
+                        if [[ ! -z $lines ]]
+                        then
+                $ECHO "INFO: Extra column present in the loader file" >> $LOG_FILE
+                                $CP $failed_file ${ENIQ_BACKUP_DIR}/delimiterloaderfile/unprocessed/
+                                for linenum in `$ECHO $lines`
+                                do
+                                   line+=${linenum}d\;
+                                done
+                $SED "${line}" $failed_file > /eniq/backup/tmpfile
+                                if [ $? -eq 0 ]
+                                then
+                                    $MV /eniq/backup/tmpfile $failed_file
+                                    if [ $? -eq 0 ]
+                                        then
+                                            tmp=0
+                                            $RM -f /eniq/backup/lineno
+                                        else
+                                            return 3
+                                    fi
+                                fi
+            else
+                                return 2
+                    fi
+                 else
+                   return 2
+             fi
+           fi
+        fi
+    if [ $tmp -eq 0 ]
+    then
+        return 0
+    fi
+}
+
+
+function monitor_filesystem()
+{
+   filesystemtomonitor=$1
+   val=$2
+   filepresent_failed=$($FIND ${filesystemtomonitor}/failed/ -type f -mtime +7)
+    if [[ ! -z $filepresent_failed ]]; then
+      $FIND ${filesystemtomonitor}/failed/ -mtime +7 -execdir echo {} ';'|xargs tar -cvf ${filesystemtomonitor}/failed/Loaderfiles_archive_$val.tar -C ${filesystemtomonitor}/failed --exclude='*.tar'
+      $FIND ${filesystemtomonitor}/failed/ -type f -mtime +7 -exec rm {} \;
+   fi
+
+   filepresent_unprocessed=$($FIND ${filesystemtomonitor}/unprocessed/ -type f -mtime +7)
+    if [[ ! -z $filepresent_unprocessed ]]; then
+          $FIND ${filesystemtomonitor}/unprocessed/ -mtime +7 -execdir echo {} ';'|xargs tar -cvf ${filesystemtomonitor}/unprocessed/Loaderfiles_archive_$val.tar -C ${filesystemtomonitor}/unprocessed/
+      $FIND ${filesystemtomonitor}/unprocessed/ -type f -mtime +7 -exec rm {} \;
+   fi
+
+   filepresent_general=$($FIND ${filesystemtomonitor} -type f -mtime +14)
+    if [[ ! -z $filepresent_general ]]; then
+
+                $FIND ${filesystemtomonitor} -type f -mtime +14 -exec rm {} \;
+                if [ $? -eq 0 ]; then
+                        $ECHO "Removed the 7 days older file from the $filesystemtomonitor directory" >> $LOG_FILE
+                fi
+   fi
+   filesystem_line=$($DF -k ${ENIQ_BACKUP_DIR}|$AWK '{print $5,$6}'|sed "1 d")
+   filesystem_usage=$($ECHO $filesystem_line|$CUT -d' ' -f1|$CUT -d% -f1)
+   if [ $filesystem_usage -gt 70 ]; then
+      if [[ ! -d ${filesystemtomonitor} ]]; then
+         $RM -rf ${filesystemtomonitor}/failed/
+                 $RM -rf ${filesystemtomonitor}/unprocessed/
+      fi
+        fi
+        return 0
+}
+
+function movefailedloaderfile()
+{
+        if [[ ! -d $1 ]]
+    then
+                $MKDIR -p $1
+        fi
+        $MV $2 $1
+        if [ $? -ne 0 ]; then
+           return 1
+        fi
+        return 0
+}
+
+function filefilterwithcolumn()
+{
+filetoexcludeflag=1
+
+havenonascii=$(perl -ne 'print if /[^[:ascii:]]/' $2)
+if [[ ! -z $havenonascii ]]; then
+    filetoexcludeflag=0
+	
+fi
+
+hasextrachar=$($AWK -F"\t" '{print $NF}' $2)
+if [[ ! -z $hasextrachar ]]
+then
+        cntextrachar=$($ECHO $hasextrachar|wc -w)
+        if [ $cntextrachar -ge 1 ]; then
+                 filetoexcludeflag=0
+        fi
+
+fi
+
+findgreat=$($AWK -F"\t" '{print NF}' $2|sort|uniq|$WC -w)
+if [ $findgreat -gt 1 ]; then
+            getcolumncount $1
+            columcount=$?
+                columncntval=$(expr $columncnt + 1 )
+                $AWK -F"\t" '{if(NF != '$columncntval') print NR}' $2 |sort|uniq > /eniq/backup/lineno
+                lines=$($CAT /eniq/backup/lineno)
+                if [[ ! -z $lines ]]; then
+                        filetoexcludeflag=0
+            fi
+fi
+
+if [ $filetoexcludeflag -eq 0 ]; then
+    return 1
+fi
+return 0
+}
+
+function filteralreadyprocessedfile()
+{
+   action=$1
+   filetobefilter=$2
+   extractedoutput=$($GREP -w $filetobefilter /eniq/home/dcuser/.loader_delimiter)
+   if [[ "$action" = "check" ]]; then
+                if [[ ! -z $extractedoutput ]]; then
+                    retry_count=$($ECHO $extractedoutput|$AWK -F"," '{print $2}')
+					    if [ $retry_count -eq 3 ]; then
+                           return 1
+                        else
+                           return 0
+                        fi
+                else
+                    return 0
+                fi
+   elif [[ "$action" = "add" ]]; then
+                if [[ ! -z $extractedoutput ]]; then
+                    retry_count=$($ECHO $extractedoutput|$AWK -F"," '{print $2}')
+					    if [ $retry_count -ne 3 ]; then
+                          $GREP -v $extractedoutput /eniq/home/dcuser/.loader_delimiter > /var/tmp/tempfile
+                          mv /var/tmp/tempfile /eniq/home/dcuser/.loader_delimiter
+                          ((retry_count=$retry_count+1))
+                           $ECHO $filetobefilter,$retry_count >> /eniq/home/dcuser/.loader_delimiter
+                           return 0
+                        else
+                           return 1
+                        fi
+                else
+                        $ECHO $filetobefilter,0 >> /eniq/home/dcuser/.loader_delimiter
+                        return 0
+                fi
+   else
+                $ECHO"ERROR: Action is not valid"
+   fi
+}
+
+
+#*********************************************************************
+#
+#       Main
+#       Search for the file in failed directory and for the files
+#       present in the failed directory remove the non-ascii characters
+# ********************************************************************
+
+if [ "$1" != "" ]; then
+	if [[ $1 != [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9] ]] ;then 
+		echo "Format of the date should be +%Y-%m-%d"
+		echo "example:2022-05-11"
+		exit 1
+	else
+	val_for_monitorfilesystem=$1
+	val=`date -d "$val_for_monitorfilesystem" '+%Y_%m_%d'`
+
+	
+	fi
+else
+	echo "No args"
+	val=`date '+%Y_%m_%d'`
+	
+fi
+ENG_ERROR_LOG=$LOG_DIR/error-${val}.log
+ENIQ_BACKUP_DIR=/eniq/backup
+TEMP_DIR=/var/tmp/bulk.txt
+status=`$PS -aef | $GREP $0 | $GREP -v grep |wc -l`
+if [ $status -gt 3 ]; then
+    echo "[`date`] : loader_delimiter.bsh : Process $status is already running.Exiting" >> $LOG_FILE
+	
+    exit 1
+fi
+if [[ ! -f /eniq/home/dcuser/.loader_delimiter ]]; then
+   $TOUCH /eniq/home/dcuser/.loader_delimiter
+fi
+
+Techpack_Fail=`$EGREP -B 1 "Number of bytes|row delimiter" $ENG_ERROR_LOG | $GREP -i Loader_ | $GREP "General loader failure" | $AWK -F"." '{print $3}' | sort|uniq`
+
+
+for Techpack in $Techpack_Fail
+do
+TP_ENGINE_LOG=$LOG_DIR/${Techpack}/engine-${val}.log
+echo $TP_ENGINE_LOG
+FailedFileList=`$GREP "Loader files failed for Delimiter" $TP_ENGINE_LOG  | $AWK -F" " '{print $13}'`
+monitor_filesystem "${ENIQ_BACKUP_DIR}/delimiterloaderfile/" "$val_for_monitorfilesystem"
+if [ $? -ne 0 ]; then
+    $ECHO "INFO: ${ENIQ_BACKUP_DIR} file system is more than 70% and failed to cleanup the filesystem"
+        exit 1
+fi
+for failedfile in $FailedFileList
+do
+if [[ ! -z $failedfile ]]
+then
+   if [[ ! -f $failedfile ]]; then
+   
+      continue
+   fi
+   if [[ ${failedfile} != *.txt ]]; then
+   
+       continue
+   fi
+   Failed_File=`$ECHO $FailedFileList | awk -F"/failed" '{print $1}' | awk -F"/" '{print $NF}'`
+    failedfilename=$($ECHO $failedfile|$AWK -F"/" '{print $NF}')
+    filteralreadyprocessedfile "check" $failedfilename
+   if [ $? -eq 1 ]; then
+     $ECHO "INFO: Loader file $failedfilename has been processed three times and it is being moved to the temporary directory" >> $LOG_FILE
+         movefailedloaderfile "${ENIQ_BACKUP_DIR}/delimiterloaderfile/failed/" $failedfile
+     continue
+   fi
+        flag=1
+        errflag=1
+        faileddir=$(dirname $failedfile)
+        basedir=$(dirname $faileddir)
+        moname=$($ECHO $faileddir|$AWK -F"/" '{print $(NF-1)}'|$TR '[:lower:]' '[:upper:]')
+		$ECHO "INFO: File took for processing is $failedfile" >> $LOG_FILE
+        $ECHO "INFO: MO Name is $moname">> $LOG_FILE
+
+        filefilterwithcolumn $moname $failedfile
+        res=$?
+        if [ $res -eq 0 ]; then
+		        $ECHO "INFO: Loader file $failedfilename is proper. It will be moved to raw directory" >> $LOG_FILE
+                failedfilename=$($ECHO $failedfile|$AWK -F"/" '{print $NF}')
+                $MV ${failedfile} ${basedir}/raw/$failedfilename
+                continue
+        else
+		
+                $ECHO "INFO: Loader file $failedfilename is not proper. It will be processed for delimiter issue" >> $LOG_FILE
+        fi
+
+    remove_char $failedfile
+        res=$?
+    if [ $res -eq 0 ]
+    then
+             flag=0
+    elif [ $res -eq 2 ]
+        then
+		
+            $ECHO "INFO: Non-ASCII characters are not present in the file $failedfilename" >> $LOG_FILE
+    else
+            errflag=0
+			
+        $ECHO "INFO: Failed to remove the Non-ASCII characters from the file $failedfilename" >> $LOG_FILE
+    fi
+
+        remove_junkcharinnewline $failedfile
+        res=$?
+    if [ $res -eq 0 ]
+    then
+            flag=0
+    elif [ $res -eq 2 ]
+        then
+		
+            $ECHO "INFO: Extra Character is not present in the row delimiter('\n') in the file $failedfilename" >> $LOG_FILE
+        else
+            errflag=0
+			
+        $ECHO "ERROR: Failed to remove the extra character in the row delimiter('\n') from the file $failedfilename" >> $LOG_FILE
+    fi
+
+        remove_extra_columns $failedfile
+        res=$?
+        if [ $res -eq 0 ]
+        then
+            flag=0
+        elif [ $res -eq 2 ]
+        then
+		
+                $ECHO "INFO: Extra columns not present in the file $failedfilename" >> $LOG_FILE
+        else
+                errflag=0
+				
+                $ECHO "ERROR: Failed to remove the extra column in the row from the file $failedfilename" >> $LOG_FILE
+        fi
+
+
+        $ECHO "INFO: File $failedfile has been analysed for the row or column delimiter" >> $LOG_FILE
+        $MV ${failedfile} ${basedir}/raw/${failedfilename}
+        if [ $? -eq 0 ]; then
+		echo "info"
+                $ECHO "INFO: File $failedfile has been moved to RAW directory after processing" >> $LOG_FILE
+                if [[ $Failed_File == *"dc_e_bulk_cm"* ]]; then
+			      echo $Failed_File >> $TEMP_DIR	                 
+                                	                            		
+                      fi
+                
+        fi
+          
+
+   filteralreadyprocessedfile "add" $failedfilename
+   if [ $? -eq 0 ]; then
+   
+           $ECHO "Loader file $failedfilename details added to the track file with the retry count" >> $LOG_FILE
+   fi
+fi
+done
+done
+
+if [[ -f $TEMP_DIR ]];then
+distinct_value=$($CAT $TEMP_DIR|sort|uniq)
+echo $distinct_value
+for i in `$ECHO $distinct_value`;
+ do
+    engine -e startSet DC_E_BULK_CM Loader_$i    
+done
+fi
+#Clean up
+if [[ -f $TEMP_DIR ]]; then
+	 $RM -rf $TEMP_DIR
+fi
+
+exit 0

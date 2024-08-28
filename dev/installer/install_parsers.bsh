@@ -1,0 +1,100 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2015 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : install_parsers.bsh
+# Date    : 23/12/2015
+# Purpose : Script to pass the parsers as arguements to the 
+#			platform_installer module
+# Usage   : install_parsers.bsh
+#
+# ********************************************************************
+#
+# Command Section
+#
+# ********************************************************************
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 3
+fi
+. ${BIN_DIR}/common_variables.lib
+
+
+STARTTIMESTAMP=`$DATE '+%y%m%d_%H%M%S'`
+INSTALLER_DIR=/eniq/sw/installer
+LOGPATH=/eniq/log/sw_log
+PLATFORMINSTALLERLOG=${LOGPATH}/platform_installer
+LOG=${PLATFORMINSTALLERLOG}/install_parsers${STARTTIMESTAMP}.log
+curr_dir=`$PWD`
+
+if [ ! -d ${LOGPATH} ] ; then
+  $MKDIR -p ${LOGPATH}
+  $CHMOD 770 ${LOGPATH}
+fi
+
+usage()
+{
+   $ECHO "Usage: install_parsers <path_to_parsers>"
+}
+
+parserinstaller()
+{
+$ECHO "The install_parsers script began at $STARTTIMESTAMP" >> ${LOG} 
+for entry in $search_dir/*
+do
+
+	#Read the package name for each entry in the given directory
+	package=$($ECHO "$entry" | $SED 's#.*/##g') 
+	
+	$ECHO "Reading the package $entry " >> ${LOG}
+	
+	#Read the module name and build number
+	modulename=`$ECHO "$package" | $CUT -d_ -f1`
+	buildnumber_tmp=`$ECHO "$package" | $CUT -d_ -f2`
+	buildnumber=`$ECHO "$buildnumber_tmp" | $CUT -d. -f1`
+	
+	######------commenting code for version check as it will be covered in platform_installer script -------######
+	# Check if the package is already installed..
+	# version="module.$modulename=$buildnumber"
+	
+	# $ECHO "Checking if the parser $package is already installed " >> ${LOG}
+	# $GREP ${version} ${INSTALLER_DIR}/versiondb.properties > /dev/null
+	# install_status=$?
+	
+	$CP $entry $package
+	# if [ ${install_status} -eq 0 ] ; then
+		# $ECHO "Previous installation found for $package. Force Installing" >> ${LOG}
+		# bash ${INSTALLER_DIR}/platform_installer -f $package
+	# else
+		$ECHO "Installation started for $package.." >> ${LOG}
+		bash ${INSTALLER_DIR}/platform_installer $package	
+	# fi
+	
+	$CD $curr_dir
+	$RM -rf $package
+	$ECHO "Completed installing $package successfully" >> ${LOG}
+	$ECHO "-------------------------------------------------------------------------" >> ${LOG}
+	
+done
+ENDTIMESTAMP=`$DATE '+%y%m%d_%H%M%S'`
+$ECHO "The install_parsers script completed its execution at $ENDTIMESTAMP" >> ${LOG}
+}
+
+if [ $# -ne 1 ] ; then
+	usage
+else
+	search_dir=$1
+	parserinstaller
+fi
+

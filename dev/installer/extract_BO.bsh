@@ -1,0 +1,177 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2015 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : extract_BO.bsh
+# Date    : 9/04/2018
+# Purpose : Script to extract universes 
+#			Used while upgrade
+# Usage   : ./extract_BO.bsh
+#
+# ********************************************************************
+#
+# Command Section
+#
+# ********************************************************************
+
+
+
+DCUSER_PROFILE=/eniq/home/dcuser/.profile
+
+if [ -f ${DCUSER_PROFILE} ] ; then
+	. ${DCUSER_PROFILE}
+	
+	if [ -z "${BIN_DIR}" ] ; then
+    echo "Environment variable BIN_DIR is not set or empty. Script is aborted." 
+    exit 1
+	fi
+	
+	if [ -f ${BIN_DIR}/common_variables.lib ] ; then
+		. ${BIN_DIR}/common_variables.lib
+		export ANT_HOME
+	else
+		echo "Cant not find file ${BIN_DIR}/common_variables.lib"
+		exit 2
+	fi
+	
+	if [ -z "${CONF_DIR}" ] ; then
+		$ECHO "Environment variable CONF_DIR is not set or empty. Script is aborted."
+		exit 3
+	fi
+	
+	if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+		$ECHO "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+		exit 4
+	fi
+
+	. ${CONF_DIR}/niq.rc
+
+	if [ -z "${INSTALLER_DIR}" ] ; then
+    $ECHO "Environment variable INSTALLER_DIR is not set or empty. Script is aborted." 
+    exit 5
+	fi
+	
+	if [ -z "${LOG_DIR}" ] ; then
+    $ECHO "Environment variable LOG_DIR is not set or empty. Script is aborted." 
+    exit 6
+	fi
+	
+else
+	echo "Cant not find ${DCUSER_PROFILE}"
+	exit 7
+fi
+
+
+TIMESTAMP=`$DATE +%Y.%m.%d`
+SCRIPT_TIMESTAMP=`$DATE +%Y.%m.%d_%H:%M:%S`
+ENIQ_TECHPACKS=eniq_techpacks
+BO_UNI=${INSTALLER_DIR}/bouniverses
+BO_TEMP=${INSTALLER_DIR}/BO_tmp
+BO_REP=${INSTALLER_DIR}/boreports
+LOG_FILE=${LOG_DIR}/tp_installer/${TIMESTAMP}_extract_reports.log
+
+if [ ! -d ${BO_UNI} ] ; then
+  ${MKDIR} -p ${BO_UNI}
+  $CHMOD 770 ${BO_UNI}
+fi
+
+if [ ! -d ${BO_TEMP} ] ; then
+  $MKDIR -p ${BO_TEMP}
+  $CHMOD 770 ${BO_TEMP}
+  else
+  $RM -rf ${BO_TEMP}
+  $MKDIR -p ${BO_TEMP}
+  $CHMOD 770 ${BO_TEMP}
+fi
+
+if [ ! -d ${BO_REP} ] ; then
+  $MKDIR -p ${BO_REP}
+  $CHMOD 770 ${BO_REP}
+  else
+  $RM -rf ${BO_REP}
+  $MKDIR -p ${BO_REP}
+  $CHMOD 770 ${BO_REP}
+fi
+
+usage(){
+	$ECHO "Usage: ./extract_BO.bsh <features_to_be_extracted> <path to eniq_base_sw>"
+}
+
+
+
+#---checks for license and extracts the BO packages in eniq_techpacks directory into /eniq/sw/installer/
+extractor(){
+while IFS= read line 
+do 
+	if [[ ! -z $line ]]; then
+		count=`$CAT $2/feature_report_packages | $GREP  "$line" | $WC -l` 2>/dev/null
+		if [[ $count -gt 0 ]]; then
+			package=`$CAT $2/feature_report_packages | $GREP  "$line"` 2>/dev/null
+			$ECHO "For license $line , following features are mapped : " >> ${LOG_FILE}
+			$ECHO "$package " >> ${LOG_FILE}
+			arr=(`$ECHO "$package" | $CUT -d: -f3`)
+			for i in "${arr[@]}"
+			do
+				file=`$LS $2 | $GREP ${i}_R[0-9A-Za-z]*_b[0-9]*` 2>/dev/null
+				if [[ $file ]]; then
+					BO_package=$2/${i}_R[0-9A-Za-z]*_b[0-9]*
+					$CP $BO_package $BO_TEMP
+					$ECHO "Copying $file to $BO_TEMP" >> ${LOG_FILE}
+				else
+					:
+				fi
+			done
+		fi
+	fi
+done < $1
+#-----------------copying BO_DWH_MONITOR to BO_TMP-----------------
+DWHM_package=`$CAT $2/feature_report_packages | $GREP  "BO_DWH_MONITOR"` 2>/dev/null
+if [ $? ]; then
+	DWHM_package=(`$ECHO "$DWHM_package" | $CUT -d: -f3`)
+	DWHM_file=`$LS $2 | $GREP $DWHM_package` 2>/dev/null
+	if [ $? ]; then
+		$CP $2/$DWHM_file $BO_TEMP
+	fi
+   $ECHO "Copying $DWHM_file to $BO_TEMP" >> ${LOG_FILE}
+ fi
+ 
+START_TIMESTAMP=`$DATE +%Y.%m.%d_%H:%M:%S`
+$ECHO "Extracting universes present in $BO_TEMP into $BO_UNI at $START_TIMESTAMP " >> ${LOG_FILE}
+$BASH ${INSTALLER_DIR}/extract_report_packages.bsh $BO_TEMP $BO_UNI
+END_TIMESTAMP=`$DATE +%Y.%m.%d_%H:%M:%S`
+$ECHO "Extraction of universes ended at $END_TIMESTAMP" >> ${LOG_FILE}
+$ECHO "-------------------------------------------------------------------------------------------------------" >> ${LOG_FILE}
+
+#---------------extracting report packages-----------------------------
+$BASH ${INSTALLER_DIR}/extract_reports.bsh $2
+
+$ECHO "-------------------------------------------------------------------------------------------------------" >> ${LOG_FILE}
+
+}
+
+
+#####-------------Main body of the program----------------------
+ $ECHO "Extracting of universes started at $SCRIPT_TIMESTAMP" >> ${LOG_FILE}
+if [ $# -ne 2 ] ; then
+	usage
+else
+	$ECHO "Path to BO Packages $2" >> ${LOG_FILE}
+	extractor $1 $2	
+	
+fi
+
+
+
+
+

@@ -1,0 +1,145 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2016 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+#
+# ********************************************************************
+# Name    : VectorCounterBinMonitoring.bsh
+# Date    : 08/06/2016
+# Purpose : this script is for identifying the vector counters which has 
+#			exceeded the maximum row count limit for a particular SN for a given ROP.
+#           
+# Usage   : VectorCounterBinMonitoring.bsh
+#
+# ********************************************************************
+#
+# Command Section
+#
+# ********************************************************************
+
+AWK=/usr/bin/awk
+CAT=/usr/bin/cat
+CP=/usr/bin/cp
+DATE=/usr/bin/date
+ECHO=/usr/bin/echo
+GREP=/usr/bin/grep
+READ=/usr/bin/read
+CONF_DIR=/eniq/sw/conf
+INSTALLER_DIR=/eniq/sw/installer
+ENIQ_ADMIN_DIR=/eniq/admin
+
+VectorCounterBinCheck="$($CAT $CONF_DIR/static.properties | $GREP VectorCounterBinCheck | $AWK -F'=' 'NR==1 { print $2 } ')"
+$ECHO "VectorCounterBinCheck  : $VectorCounterBinCheck "
+
+if [ -s ${ENIQ_ADMIN_DIR}/lib/common_functions.lib ]; then
+    . ${ENIQ_ADMIN_DIR}/lib/common_functions.lib
+else
+	echo "File ${ENIQ_ADMIN_DIR}/lib/common_functions.lib not found"
+fi
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $connection_string ]; then
+  $RM -f $connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string"
+  fi
+fi
+}
+trap remove_connection_string EXIT
+
+VectorViews=$INSTALLER_DIR/VectorViews.csv
+ExceededCounts=$INSTALLER_DIR/count.csv
+ExceededCounters=$INSTALLER_DIR/counters.csv
+VectorCounterBinFile=$INSTALLER_DIR/vectorcounterbinfile.csv
+DWHDBPassword=`inigetpassword DWH -v DCPassword -f ${CONF_DIR}/niq.ini`
+DWHREPPassword=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+connection_string=/var/tmp/encrypt_$$.txt
+connection_string_decrypt="-nogui -c \"eng=dwhdb;links=tcpip{host=dwhdb;port=2640};uid=dc;pwd=$DWHDBPassword\""
+
+get_encrypt_file "${connection_string_decrypt}" "${connection_string}"
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+$CP /dev/null $VectorViews
+$CP /dev/null $ExceededCounts
+$CP /dev/null $ExceededCounters
+$CP /dev/null $VectorCounterBinFile
+
+hour=$($DATE +%H)
+
+
+#Extracting all the vector tables
+${DBISQL} @${connection_string} "select distinct table_name from systable where table_name like '%\_v\_raw' ESCAPE '\';OUTPUT TO ${VectorViews}" >/dev/null
+
+#if script is running at 12 P.M.
+#for each table counting the number of rows for each SN for previous hour
+if [[ $hour == 12 ]];then
+	$ECHO "script is running for 12th hour"
+while IFS='' $READ -r line || [[ -n "$line" ]]; 
+do
+	VIEW_NAME="${line%\'}"
+	VIEW_NAME="${VIEW_NAME#\'}"
+	${DBISQL} @${connection_string} "select '$VIEW_NAME',count(SN),datetime_id,SN from ${VIEW_NAME} where date_id = dateadd(day, -0, NOW())
+	And datetime_id = datetime(CONVERT(VARCHAR, date_id)+' 11:00:00') group by SN,datetime_id having count(SN) >= $VectorCounterBinCheck ;OUTPUT TO ${ExceededCounts} DELIMITED BY '|' APPEND"	
+done < ${VectorViews}
+
+fi
+
+#if script is running at 12 A.M.
+#for each table counting the number of rows for each SN for previous hour
+if [[ $hour == 00 ]];then
+	$ECHO "script is running for 00th hour"
+while IFS='' $READ -r line || [[ -n "$line" ]]; 
+do
+	VIEW_NAME="${line%\'}"
+	VIEW_NAME="${VIEW_NAME#\'}"
+	${DBISQL} @${connection_string} "select '$VIEW_NAME',count(SN),datetime_id,SN from ${VIEW_NAME} where date_id = dateadd(day, -1, NOW())
+	And datetime_id = datetime(CONVERT(VARCHAR, date_id)+' 23:00:00') group by SN,datetime_id having count(SN) >= $VectorCounterBinCheck ;OUTPUT TO ${ExceededCounts} DELIMITED BY '|' APPEND"
+done < ${VectorViews}
+
+fi
+
+#getting count of counters for the tables which has exceeded the limit
+while IFS='|' $READ f1 f2 f3 f4 ;
+do
+	TABLE_NAME="${f1%_*}"
+	TABLE_NAME="${TABLE_NAME#\'}"
+	echo $TABLE_NAME
+	${DBISQL} @${connection_string} "select DATANAME from DWHCOLUMN WHERE STORAGEID ='${TABLE_NAME}:RAW' AND DATANAME like 'pm%';
+	OUTPUT TO ${ExceededCounters} APPEND"
+	
+	while IFS='' $READ -r line || [[ -n "$line" ]];
+	do
+		COUNTER_NAME="${line%\'}"
+		COUNTER_NAME="${COUNTER_NAME#\'}"
+		${DBISQL} @${connection_string} "select $f1 ,'${COUNTER_NAME}',count($COUNTER_NAME), $f3,$f4 from ${TABLE_NAME}_RAW 
+		where SN = $f4 AND DATETIME_ID = $f3 group by SN,datetime_id having count($COUNTER_NAME) >= $VectorCounterBinCheck  ;OUTPUT TO ${VectorCounterBinFile} DELIMITED BY '|' APPEND"
+	done < $ExceededCounters
+	$CP /dev/null $ExceededCounters
+
+done < $ExceededCounts

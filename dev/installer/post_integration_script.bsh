@@ -1,0 +1,748 @@
+#!/bin/bash
+# ********************************************************************
+# LMI Ericsson                                      SCRIPT
+# ********************************************************************
+#
+#
+# (c) LMI Ericsson  2001 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of LMI Ericsson , Ireland. The programs may be used 
+# and/or copied only with the written permission from LMI Ericsson  
+# or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : post_integration_script.bsh
+# written : XSARAVE
+# Date    : 2016
+# Revision: A
+# Purpose : This script is for getting the details of the ENM server and to add the certicates to the keystore.  
+#
+# Usage   : ./post_integration_script.bsh
+#
+# ********************************************************************
+# ********************************************************************
+#
+# 	Execution
+#
+# ********************************************************************
+
+
+if [ ! -r "/eniq/admin/lib/common_functions.lib" ] ; then
+  echo "ERROR: Source file is not readable at /eniq/admin/lib/common_functions.lib"
+  exit 3
+fi
+
+. /eniq/admin/lib/common_functions.lib
+
+if [ ! -r "/eniq/sw/bin/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at /eniq/sw/bin/common_variables.lib"
+  exit 3
+fi
+
+. /eniq/sw/bin/common_variables.lib
+
+#--------------------------------------------------------------------
+#Global variable
+#--------------------------------------------------------------------
+CONF_DIR=/eniq/sw/conf
+TRUST_STORE=/eniq/sw/runtime/jdk/jre/lib/security/truststore.ts
+ENM_SERVER_DETAIL=${CONF_DIR}/enmserverdetail
+OSS_REF_FILE=${CONF_DIR}/.oss_ref_name_file
+ENM_SERVER_DETAIL_TMP=`$ECHO ${ENM_SERVER_DETAIL}.tmp`
+ETC_HOSTS=/etc/hosts
+ETC_HOSTS_TMP=`$ECHO ${ETC_HOSTS}.tmp`
+ENIQHOSTNAME=`$HOSTNAME`
+ENM="ENM"
+ENMCERTIFICATE_DIR=/eniq/home/dcuser/enmcertificate/
+PK_ALIAS=pki
+INFRA_ALIAS=infra
+UI_ALIAS=ui
+confirm_input=""
+count=0
+
+TIMESTAMP=`$DATE +%d.%m.%Y`
+
+LOGFILE=/eniq/log/sw_log/symboliclinkcreator/enm_post_integration_${TIMESTAMP}.log
+
+EchoText() {
+   $ECHO -e $*
+   $ECHO -e `$DATE '+%Y-%m-%d %H:%M:%S': ` $* >> ${LOGFILE}
+}
+
+if [ ${LOGNAME} != "root"  ] ; then
+  EchoText "This script must be executed as root"
+  exit 1
+fi
+
+KEYSTORE_PASSWORD=`inigetpassword KEYSTOREPASS -v keyStorePassValue -f ${CONF_DIR}/niq.ini`
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+	if [ -f $dwhrep_connection_string ]; then
+	  $RM -f $dwhrep_connection_string
+	  if [ $? != 0 ]; then
+		$ECHO "Unable to delete $dwhrep_connection_string"
+	  fi
+	fi
+}
+trap remove_connection_string EXIT
+
+ENIQ_CONF_DIR=/eniq/installation/config
+STORAGE_TYPE=`$CAT ${ENIQ_CONF_DIR}/san_details | $GREP STORAGE_TYPE | $NAWK -F= '{print $2}'`
+DBISQL="$($LS /eniq/sybase_iq/IQ-*/bin64/dbisql)"
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+DWHREPUSER=`inigetpassword REP -v DWHREPUsername -f ${CONF_DIR}/niq.ini`
+DWHREPPASSWORD=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+
+dwhrep_connection_string=/var/tmp/encrypt_$$.txt
+dwhrep_connection_string_decrypt="-nogui -c \"eng=${REP_SERVER_NAME};links=tcpip{host=${REP_SERVER_NAME};port=${REP_PORT}};uid=$DWHREPUSER;pwd=$DWHREPPASSWORD\""
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+
+DBISQL=$(which dbisql)
+
+if [ ! -x "$DBISQL" ]; then
+    EchoText "$DBISQL commands not found or not executable."
+    exit 1;
+fi
+
+type get_encrypt_file &>/dev/null && isPresent='true' || isPresent='false'
+if [ ${isPresent} == 'true' ]; then
+  get_encrypt_file "${dwhrep_connection_string_decrypt}" "${dwhrep_connection_string}"
+  DBISQL_DWHREP="${DBISQL} @${dwhrep_connection_string}"
+else
+  DBISQL_DWHREP="${DBISQL} ${dwhrep_connection_string_decrypt}"
+fi
+
+
+usage() {
+EchoText ""
+EchoText "usage: $0 [ -a configure | -a updatepassword | -a updatecertificate ]" 1>&2;
+EchoText "\t    -a configure\t\t\t              cofigure a new enm server details."
+EchoText "\t    -a updatepassword\t\t           update the new ENM server password."
+EchoText "\t    -a updatecertificate\t\t        updates the new ENM certificate for the exsisting ENM host."
+exit 1;
+}
+
+read_validate_userinput () {
+        unset tempinput
+        while [[ -z $tempinput ]] || [[ "`$ECHO $tempinput | tr -d ' '`" == "" ]]; do
+        if [[ "$2" == "PASSWORDINPUT" ]]; then
+           $ECHO $1
+           read -s tempinput
+        else
+           read -p "$1 " tempinput
+        fi
+        done
+        if [[ "$2" == "IP" ]]; then
+			while true
+			do
+				if [ $count -eq 3 ]; then
+					tempinput=""
+					break
+				fi
+                validate_ip ${tempinput}
+                if [ $? -ne 0 ]; then
+					count=$((count+1))
+                    read_validate_userinput "$@"
+				else
+					break
+                fi
+				
+			done
+        fi
+
+}
+
+display_list_of_enm_hostnames() {
+	EchoText "Integrated/Avialable ENM hostnames are:"
+	EchoText "`$CAT $ENM_SERVER_DETAIL | $CUT -d " " -f 2`"
+}
+
+fetch_enm_password() {
+        read_validate_userinput "$1" "PASSWORDINPUT"
+        if [[ "$tempinput" =~ ^.*[\&\+\|\#\{\}\/\?\\]+.*$ ]]
+        then
+           EchoText "Password should not contain special characters like # & + ? / | \ { } "
+           EchoText "Change the password in the ENM GUI and rerun the same script."
+           return 1
+        fi
+        PASSWORD=$($ECHO $tempinput | ${OPENSSL} enc -base64)
+}
+
+fetch_enm_hostname() {	
+	read_validate_userinput "$1"
+	HOSTNAME=$tempinput
+}
+
+fetch_enm_nas_ipaddress() {
+	read_validate_userinput "Enter the NAS IP Address OR Load Balancer IP of the ENM server:" "IP"
+	if [[ $tempinput == "" ]]; then
+		EchoText "Exiting. Provide valid ipaddress"
+		exit 1
+	fi
+	$GREP $tempinput $OSS_REF_FILE >> /dev/null
+	if [ $? -ne 0 ]; then
+		EchoText "Exiting.. IP address not matches with ${OSS_REF_FILE} file. Enter correct ipaddress"
+		exit 1
+	fi
+	IPADDRESS=$tempinput
+}
+
+fetch_enm_username(){
+	read_validate_userinput "Enter the Username:"
+	USERNAME=$tempinput
+}
+
+fetch_user_confirmation(){
+	cnt=0
+	while (($cnt<3))
+	do
+		read_validate_userinput "$1"
+		if [[ $tempinput = "yes" || $tempinput = "no" ]]; then
+			confirm_input=$tempinput
+			break
+		else
+			EchoText "Provide valid input as yes or no"
+			confirm_input=""
+		fi
+		cnt=$((cnt+1))
+	done
+	
+}
+
+prerequsite_checks() {
+	EchoText "Initiating the prerequsite checks"
+	number_of_certificates=`$LS -l ${ENMCERTIFICATE_DIR}/*ENM_*_CA* | $GREP -v '^d' | $WC -l`
+	if [[ ! -z $number_of_certificates ]]; then
+	PK_FILE=`$LS ${ENMCERTIFICATE_DIR}/*ENM_PKI_Root_CA*`
+	INFRA_FILE=`$LS ${ENMCERTIFICATE_DIR}/*ENM_Infrastructure_CA*`
+	UI_FILE=`$LS ${ENMCERTIFICATE_DIR}/*ENM_UI_CA*`
+	if [[ ! -z $PK_FILE ]] && [[ ! -z $INFRA_FILE ]] && [[ ! -z $UI_FILE ]]; then
+		EchoText "Three certificate files are available"
+		#EchoText "$PK_FILE"
+		#EchoText "$INFRA_FILE"
+		#EchoText "$INFRA_FILE"
+	else
+		EchoText "Three certificate files are not available under $ENMCERTIFICATE_DIR." 
+		EchoText "Aborting the configuration..."
+		exit 1
+	fi
+	else
+	if [[ $number_of_certificates -gt 3 ]]; then
+	EchoText "More than 3 certificates are available under $ENMCERTIFICATE_DIR."
+	else
+	EchoText "Less than 3 certificates are available under $ENMCERTIFICATE_DIR."
+	fi
+	EchoText "Please keep 3 valid ENM certifcates which you are configuring now and re trigger the script. Aborting script... "
+	exit 1
+	fi
+}
+
+updateNATTable(){
+	OLDHOSTNAME=$1
+	NEWHOSTNAME=$2
+	output=$(${DBISQL_DWHREP} "update ENIQS_NODE_ASSIGNMENT SET ENIQ_IDENTIFIER='$NEWHOSTNAME' where ENIQ_IDENTIFIER='$OLDHOSTNAME';")
+	if [ $? -ne 0 ]; then
+		EchoText "Error while updating NAT table"
+		EchoText $output
+		exit 10
+	else
+		EchoText "NAT table successfully updated with HOSTNAME=$NEWHOSTNAME where previous hostname was=$OLDHOSTNAME"
+		EchoText $output
+	fi
+}
+
+set_enm_server_details()
+{
+	fetch_enm_hostname "Enter the hostname of the ENM server:"
+
+	fetch_enm_nas_ipaddress
+            ossRefFileOutput=$( cat /eniq/sw/conf/.oss_ref_name_file | grep $IPADDRESS )
+            eniq_oss_alias=${ossRefFileOutput%% *}
+	        ENM_TYPE_FILE_PATH=$( cat /eniq/connectd/mount_info/$eniq_oss_alias/enm_type )
+            enmType=$ENM_TYPE_FILE_PATH
+	        if [ -z $enmType ]; then
+                EchoText 'ENM type cannot be blank please try again!' 
+                exit 0	 
+            fi
+	 
+	# if [[ $enmType != "CENM" || $enmType != "PENM" || $enmType != "VENM" ]]; then
+	 #if [[ "CENM" != $enmType || "PENM" != $enmType || "VENM" != $enmType ]]; then
+	  # EchoText 'No proper ENM type value present in the enm_type file.' 
+         #exit 0	 
+	 #fi
+	 
+	  if [[ $enmType == "cENM" ]]; then
+	         enm_type="Cloud Native ENM"
+			 var1=$( arp -n $HOSTNAME )
+           #echo $var1
+         if [[ $var1 != *$IPADDRESS* ]]; then
+			 EchoText "Exiting.. Entered IP address is not Load Balancer IP"
+		     exit 1
+         fi
+	 		 set_cenm_server_details
+	  fi
+	
+ #PENM
+ if [[ $enmType == "pENM" || $enmType == "vENM" ]]; then 
+  
+         if [[ $enmType == "vENM" ]]; then
+		     enm_type="vENM"
+		 fi
+      enm_type="pENM"
+	fetch_enm_username
+	
+	fetch_enm_password "Enter the Password:"
+	if [ $? == 1 ]; then
+           EchoText "Error in adding the ENM server details in enmserverdetail file. Aborting the configuration..."
+           exit 1
+    fi
+	
+	ENMSERVERDETAILS_FILE_ENTRY=`${ECHO} "${IPADDRESS} ${HOSTNAME} ${ENM} ${USERNAME} ${PASSWORD} ${ENIQHOSTNAME}"`
+
+if [[ -f ${ENM_SERVER_DETAIL} ]]; then
+   
+   if [[ -f ${ENM_SERVER_DETAIL_TMP} ]]; then
+	$RM $ENM_SERVER_DETAIL_TMP
+   fi
+   $SU - dcuser -c "${GREP} ${IPADDRESS} ${ENM_SERVER_DETAIL}" > ${ENM_SERVER_DETAIL_TMP}
+   if [ $? -eq 0 ]; then
+		EchoText "Below entry with ipaddress ${IPADDRESS} already existing in the ${ENM_SERVER_DETAIL} file."
+		$CAT ${ENM_SERVER_DETAIL_TMP}
+		oldHostname=$($CAT ${ENM_SERVER_DETAIL_TMP} | $AWK -F" " '{print $NF}')
+		${RM} ${ENM_SERVER_DETAIL_TMP}
+		fetch_user_confirmation "Confirm to remove the existing entry ${IPADDRESS} and update it again with new inputs provided (yes/no): "
+		if [[ $confirm_input = "yes" ]]; then
+			EchoText "Removing the entry from the ${ENM_SERVER_DETAIL} file and updating with the new inputs provided."
+			$SU - dcuser -c "$GREP -v $IPADDRESS ${ENM_SERVER_DETAIL} > /tmp/tmp_enmserverdetail_modified ; ${MV} /tmp/tmp_enmserverdetail_modified ${ENM_SERVER_DETAIL};"
+			if [ $? -ne 0 ]; then
+				EchoText "Error in removing the ENM server details from enmserverdetail file. Aborting the configuration..."
+				exit 1
+			fi
+		elif [[ $confirm_input = "no" ]]; then
+			EchoText "Exiting.. Rerun the script by providing correct ipaddress"
+			exit 1
+		else
+			EchoText "Exiting..Provide valid input as yes or no"
+			exit 1
+		fi
+	fi
+fi
+
+
+$SU - dcuser -c "${ECHO} ${ENMSERVERDETAILS_FILE_ENTRY} >> ${ENM_SERVER_DETAIL}"
+
+if [ $? -eq 0 ] ; then
+	EchoText "ENM server details are added into enmserverdetail successfully"
+	if [[ -n $oldHostname ]];then
+		updateNATTable $oldHostname $ENIQHOSTNAME
+	fi
+else
+	EchoText "Error in adding the ENM server details in enmserverdetail file. Aborting the configuration..."
+	exit 1
+fi
+
+fi 
+}
+
+set_hosts_details()
+{
+	 if [[ $enm_type = "pENM" ]]; then
+	    read_validate_userinput "Enter the Apache IP Address of the ENM server:" "IP"
+	    APACHEIPADDRESS=$tempinput
+	    ${GREP} ${APACHEIPADDRESS} ${ETC_HOSTS} > ${ETC_HOSTS_TMP}
+	if [ $? -eq 0 ]; then
+		EchoText "Below entry with ipaddress ${APACHEIPADDRESS} already existing in the ${ETC_HOSTS} file."
+		$CAT ${ETC_HOSTS_TMP}
+		$RM ${ETC_HOSTS_TMP}
+		fetch_user_confirmation "Confirm to remove the existing entry ${APACHEIPADDRESS} and update it again with new inputs provided (yes/no): "
+		if [[ $confirm_input = "yes" ]]; then
+			EchoText "Removing the entry from the ${ETC_HOSTS} file and updating with the new input provided."
+			$GREP -v ${APACHEIPADDRESS} ${ETC_HOSTS} > /tmp/tmp_post_integration_hosts_modified ; ${MV} /tmp/tmp_post_integration_hosts_modified ${ETC_HOSTS}
+			if [ $? -ne 0 ]; then
+				EchoText "Error in removing the ENM server details from /etc/hosts file. Aborting the configuration..."
+				exit 1
+			fi
+		elif [[ $confirm_input = "no" ]]; then
+			EchoText "Exiting.. Rerun the script by providing correct ipaddress"
+			exit 1
+		else
+			EchoText "Exiting..Provide valid input as yes or no"
+			exit 1
+		fi
+	fi
+
+	HOSTS_FILE_ENTRY=`${ECHO} "${APACHEIPADDRESS} ${HOSTNAME}"`
+$ECHO $HOSTS_FILE_ENTRY >> "${ETC_HOSTS}"
+if [ $? -eq 0 ] ; then
+	EchoText "Details are added into /etc/hosts file successfully"
+else
+	EchoText "Error in adding details in /etc/hosts file. Rolling back the configured data..."
+	rollback_onerror
+	if [ $? == 0 ] ; then
+	EchoText "Rolling back is successful. "
+	else
+	EchoText "Error while roll back."
+	fi
+	EchoText "Aborting the script.."
+	exit 1
+fi
+fi
+
+#CENM
+if [[ $enm_type = "Cloud Native ENM" ]]; then	
+  
+		  output=$(grep "$APACHEIPADDRESS.*$HOSTNAME\|$HOSTNAME.*$APACHEIPADDRESS" $ETC_HOSTS)
+	     if [ ! -z "$output"  ]; then
+		EchoText "Below entry with ipaddress ${APACHEIPADDRESS} ${HOSTNAME} already existing in the ${ETC_HOSTS} file."
+		fetch_user_confirmation "Confirm to remove the existing entry ${APACHEIPADDRESS} ${HOSTNAME} and update it again with new inputs provided (yes/no): "
+		if [[ $confirm_input = "yes" ]]; then
+			EchoText "Removing the entry from the ${ETC_HOSTS} file and updating with the new input provided."
+			sed -i 's/$output/${APACHEIPADDRESS} ${HOSTNAME}/g' ${ETC_HOSTS}
+			if [ $? -ne 0 ]; then
+				EchoText "Error in removing the ENM server details from /etc/hosts file. Aborting the configuration..."
+				exit 1
+			fi
+		elif [[ $confirm_input = "no" ]]; then
+			EchoText "Exiting.. Rerun the script by providing correct ipaddress"
+			exit 1
+		else
+			EchoText "Exiting..Provide valid input as yes or no"
+			exit 1
+		fi
+	else 
+	   HOSTS_FILE_ENTRY=`${ECHO} "${APACHEIPADDRESS} ${HOSTNAME}"`
+	   $ECHO $HOSTS_FILE_ENTRY >> "${ETC_HOSTS}"
+	fi
+
+if [ $? -eq 0 ] ; then
+	EchoText "Details are added into /etc/hosts file successfully"
+else
+	EchoText "Error in adding details in /etc/hosts file. Rolling back the configured data..."
+	rollback_onerror
+	if [ $? == 0 ] ; then
+	EchoText "Rolling back is successful. "
+	else
+	EchoText "Error while roll back."
+	fi
+	EchoText "Aborting the script.."
+	exit 1
+fi 
+ fi
+
+}
+
+adding_cetificate() {
+if [[ ! -z `$ECHO "$ALL_CERTIFICATE" | $GREP -i "Alias name: $1"` ]]; then
+EchoText "The PKI certificate for this alias is already exsisting. Deleting the older certificate.."
+delete_enm_certificate "$1"
+fi
+
+$SU - dcuser -c ""yes" | ${KEYTOOL} -import -file "$2" -alias "$1" -keystore ${TRUST_STORE} -storepass ${KEYSTORE_PASSWORD} > /dev/null"
+if [ $? == 0 ] ; then
+	EchoText "Successfully imported certificate and moved the certificate to $BACKUP_DIR."
+	$MV "$2" $BACKUP_DIR
+else
+	EchoText "Error while imported the certificates."
+	rollback_onerror
+	if [ $? == 0 ] ; then
+	EchoText "Rolling back is successful. "
+	else
+	EchoText "Error while roll back."
+	fi
+	EchoText "Aboring the script.."
+	exit 1
+fi
+}
+
+initalizing_certificate_init_data() {
+PK_ALIAS=`$ECHO "${HOSTNAME}_${PK_ALIAS}"`
+INFRA_ALIAS=`$ECHO "${HOSTNAME}_${INFRA_ALIAS}"`
+UI_ALIAS=`$ECHO "${HOSTNAME}_${UI_ALIAS}"`
+BACKUP_DIR=`$ECHO "${ENMCERTIFICATE_DIR}/backup_${HOSTNAME}/"`
+if [[ ! -d $BACKUP_DIR ]]; then
+$MKDIR -p $BACKUP_DIR
+fi
+}
+
+set_certificate_details() {
+initalizing_certificate_init_data
+fetch_all_enm_certificates
+adding_cetificate "$PK_ALIAS" "$PK_FILE"
+adding_cetificate "$INFRA_ALIAS" "$INFRA_FILE"
+adding_cetificate "$UI_ALIAS" "$UI_FILE"
+}
+
+update_enm_password() {
+	fetch_enm_hostname "Enter the hostname of the ENM server which password need to be changed:"
+	
+	if [[ ! -z `$CAT $ENM_SERVER_DETAIL | $GREP $HOSTNAME` ]]; then
+	
+	fetch_enm_password "Enter the new password:"
+	if [ $? == 1 ]; then
+          EchoText "Error while updating password for $HOSTNAME"
+          exit 1
+        fi
+	
+	ENM_SERVER_DETAIL_TMP=`$ECHO ${ENM_SERVER_DETAIL}.tmp`
+	if [[ -f ${ENM_SERVER_DETAIL_TMP} ]]; then
+	$RM $ENM_SERVER_DETAIL_TMP
+	fi
+	
+	while read line;do
+	if [[ ! -z `$ECHO $line | $GREP $HOSTNAME` ]]; then
+	$SU - dcuser -c "$CAT $ENM_SERVER_DETAIL | $GREP $HOSTNAME | $SED -e 's/[^ ]*[^ ]/$PASSWORD/5' >> $ENM_SERVER_DETAIL_TMP"
+	else
+	$SU - dcuser -c "$ECHO "$line" >> $ENM_SERVER_DETAIL_TMP"
+	fi
+	done < $ENM_SERVER_DETAIL
+	$SU - dcuser -c ""yes" | $MV $ENM_SERVER_DETAIL_TMP $ENM_SERVER_DETAIL"
+	if [ $? == 0 ] ; then
+	EchoText "Password for $HOSTNAME is updated successfully."
+	else
+	EchoText "Error while updating password for $HOSTNAME"
+	if [[ -f ${ENM_SERVER_DETAIL_TMP} ]]; then
+	$RM $ENM_SERVER_DETAIL_TMP
+	fi
+	fi
+	
+	else
+	
+	EchoText "Entered hostname is not valid!!"
+	display_list_of_enm_hostnames	
+	fi
+}
+
+fetch_all_enm_certificates() {
+EchoText "Fetching all the enm certificates.."
+if [[ -f $TRUST_STORE ]]; then
+ALL_CERTIFICATE=`$SU - dcuser -c ""yes" | ${KEYTOOL} -v -list -keystore ${TRUST_STORE} -storepass ${KEYSTORE_PASSWORD}"`
+if [[ -z "${ALL_CERTIFICATE}" ]] ; then
+	EchoText "Error while accessing the truststore file..."
+	rollback_onerror
+	if [ $? == 0 ] ; then
+	EchoText "Rolling back is successful. "
+	else
+	EchoText "Error while roll back."
+	fi
+	EchoText "Aboring the script.."
+	exit 1
+fi
+fi
+}
+
+delete_enm_certificate() {
+$SU - dcuser -c ""yes" | ${KEYTOOL} -v -delete -alias "$1" -keystore ${TRUST_STORE} -storepass ${KEYSTORE_PASSWORD} > /dev/null"
+if [ $? == 0 ] ; then
+	EchoText "Successfully deleted the exsisting certificate."
+else
+	EchoText "Error while deleting the certificate for $HOSTNAME..."
+	rollback_onerror
+	if [ $? == 0 ] ; then
+	EchoText "Rolling back is successful. "
+	else
+	EchoText "Error while roll back."
+	fi
+	EchoText "Aboring the script.."
+	exit 1
+fi
+}
+
+enm_certifiacte_modifier() {
+	fetch_enm_hostname "Enter the hostname of the ENM server for which certificate need to be changed:"
+	
+	if [[ ! -z `$CAT $ENM_SERVER_DETAIL | $GREP $HOSTNAME` ]]; then
+	initalizing_certificate_init_data
+	fetch_all_enm_certificates
+	read_validate_userinput "Enter the type of certificate to be modified [ PKI | INFRA | UI | ALL ]:"
+	tempinput=`$ECHO $tempinput | tr '[:upper:]' '[:lower:]'`
+	if [[ ${tempinput} == "all" ]]; then
+		PK_FILE=`$LS ${ENMCERTIFICATE_DIR}/*ENM_PKI_Root_CA*`
+		INFRA_FILE=`$LS ${ENMCERTIFICATE_DIR}/*ENM_Infrastructure_CA*`
+		UI_FILE=`$LS ${ENMCERTIFICATE_DIR}/*ENM_UI_CA*`
+		adding_cetificate "$PK_ALIAS" "$PK_FILE"
+		adding_cetificate "$INFRA_ALIAS" "$INFRA_FILE"
+		adding_cetificate "$UI_ALIAS" "$UI_FILE"
+	elif [[ ${tempinput} == "pki" ]]; then
+		PK_FILE=`$LS ${ENMCERTIFICATE_DIR}/*ENM_PKI_Root_CA*`
+		adding_cetificate "$PK_ALIAS" "$PK_FILE"
+	elif [[ ${tempinput} == "infra" ]]; then
+		INFRA_FILE=`$LS ${ENMCERTIFICATE_DIR}/*ENM_Infrastructure_CA*`
+		adding_cetificate "$INFRA_ALIAS" "$INFRA_FILE"
+	elif [[ ${tempinput} == "ui" ]]; then
+		UI_FILE=`$LS ${ENMCERTIFICATE_DIR}/*ENM_UI_CA*`
+		adding_cetificate "$UI_ALIAS" "$UI_FILE"
+	else
+	EchoText "Cannot identify the entered certificate!! please try the options available [ PKI | INFRA | UI | ALL ]."
+	fi
+	else
+	EchoText "Entered hostname is not valid!!"
+	display_list_of_enm_hostnames
+	fi
+	
+}
+
+rollback_onerror() {
+if [[ ! -z $ENMSERVERDETAILS_FILE_ENTRY ]] && [[ ! -z `$CAT $ENM_SERVER_DETAIL | $GREP $ENMSERVERDETAILS_FILE_ENTRY` ]]; then
+	ENM_SERVER_DETAIL_TMP=`$ECHO ${ENM_SERVER_DETAIL}.tmp`
+	if [[ -f ${ENM_SERVER_DETAIL_TMP} ]]; then
+	$RM $ENM_SERVER_DETAIL_TMP
+	fi
+	$SED "/^$ENMSERVERDETAILS_FILE_ENTRY/d" $ENM_SERVER_DETAIL >> $ENM_SERVER_DETAIL_TMP
+	if [ $? != 0 ] ; then
+		EchoText "Error while rolling back the changes from $ENM_SERVER_DETAIL."
+		if [[ -f ${ENM_SERVER_DETAIL_TMP} ]]; then
+		$RM $ENM_SERVER_DETAIL_TMP
+		fi
+		return 1
+	fi
+	$MV $ENM_SERVER_DETAIL_TMP $ENM_SERVER_DETAIL
+	if [ $? != 0 ] ; then
+		EchoText "Error while rolling back the changes from $ENM_SERVER_DETAIL."
+		if [[ -f ${ENM_SERVER_DETAIL_TMP} ]]; then
+		$RM $ENM_SERVER_DETAIL_TMP
+		fi
+		return 1
+	fi
+fi
+
+if [[ ! -z $HOSTS_FILE_ENTRY ]] && [[ ! -z `$CAT $ETC_HOSTS | $GREP $HOSTS_FILE_ENTRY` ]]; then
+	ETC_HOSTS_FILE_TMP=`$ECHO ${ETC_HOSTS}.tmp`
+	if [[ -f ${ETC_HOSTS_FILE_TMP} ]]; then
+	$RM $ETC_HOSTS_FILE_TMP
+	fi
+	$SED "/^$HOSTS_FILE_ENTRY/d" $ETC_HOSTS >> $ETC_HOSTS_FILE_TMP
+	if [ $? != 0 ] ; then
+		EchoText "Error while rolling back the changes from $ETC_HOSTS."
+		if [[ -f ${ETC_HOSTS_FILE_TMP} ]]; then
+		$RM $ETC_HOSTS_FILE_TMP
+		fi
+		return 1
+	fi
+	$MV $ETC_HOSTS_FILE_TMP $ETC_HOSTS
+	if [ $? != 0 ] ; then
+		EchoText "Error while rolling back the changes from $ETC_HOSTS."
+		if [[ -f ${ETC_HOSTS_FILE_TMP} ]]; then
+		$RM $ETC_HOSTS_FILE_TMP
+		fi
+		return 1
+	fi
+fi
+return 0
+}
+
+#cENM
+
+set_cenm_server_details()
+{
+	APACHEIPADDRESS=$tempinput
+	IPADDRESS=$tempinput
+	fetch_enm_username
+	fetch_enm_password "Enter the Password:"
+	if [ $? == 1 ]; then
+           EchoText "Error in adding the ENM server details in enmserverdetail file. Aborting the configuration..."
+           exit 1
+    fi
+	
+	ENMSERVERDETAILS_FILE_ENTRY=`${ECHO} "${IPADDRESS} ${HOSTNAME} ${ENM} ${USERNAME} ${PASSWORD} ${ENIQHOSTNAME}"`
+
+if [[ -f ${ENM_SERVER_DETAIL} ]]; then
+   
+   if [[ -f ${ENM_SERVER_DETAIL_TMP} ]]; then
+	$RM $ENM_SERVER_DETAIL_TMP
+   fi
+   $SU - dcuser -c "${GREP} ${IPADDRESS} ${ENM_SERVER_DETAIL}" > ${ENM_SERVER_DETAIL_TMP}
+   if [ $? -eq 0 ]; then
+		EchoText "Below entry with ipaddress ${IPADDRESS} already existing in the ${ENM_SERVER_DETAIL} file."
+		$CAT ${ENM_SERVER_DETAIL_TMP}
+		oldHostname=$($CAT ${ENM_SERVER_DETAIL_TMP} | $AWK -F" " '{print $NF}')
+		${RM} ${ENM_SERVER_DETAIL_TMP}
+		fetch_user_confirmation "Confirm to remove the existing entry ${IPADDRESS} and update it again with new inputs provided (yes/no): "
+		if [[ $confirm_input = "yes" ]]; then
+			EchoText "Removing the entry from the ${ENM_SERVER_DETAIL} file and updating with the new inputs provided."
+			$SU - dcuser -c "$GREP -v $IPADDRESS ${ENM_SERVER_DETAIL} > /tmp/tmp_enmserverdetail_modified ; ${MV} /tmp/tmp_enmserverdetail_modified ${ENM_SERVER_DETAIL};"
+			if [ $? -ne 0 ]; then
+				EchoText "Error in removing the ENM server details from enmserverdetail file. Aborting the configuration..."
+				exit 1
+			fi
+		elif [[ $confirm_input = "no" ]]; then
+			EchoText "Exiting.. Rerun the script by providing correct ipaddress"
+			exit 1
+		else
+			EchoText "Exiting..Provide valid input as yes or no"
+			exit 1
+		fi
+	fi
+fi
+
+
+$SU - dcuser -c "${ECHO} ${ENMSERVERDETAILS_FILE_ENTRY} >> ${ENM_SERVER_DETAIL}"
+
+if [ $? -eq 0 ] ; then
+	EchoText "ENM server details are added into enmserverdetail successfully"
+	if [[ -n $oldHostname ]];then
+		updateNATTable $oldHostname $ENIQHOSTNAME
+	fi
+else
+	EchoText "Error in adding the ENM server details in enmserverdetail file. Aborting the configuration..."
+	exit 1
+fi
+}
+#end
+
+######MAIN PROGRAM###
+$CLEAR
+
+while getopts ":a:" opt; do
+    case "${opt}" in
+        a)
+            ACTION=${OPTARG}
+			ACTION=`$ECHO $ACTION | tr '[:upper:]' '[:lower:]'`
+            (($ACTION == "configure" || $ACTION == "updatepassword" || $ACTION == "updatecertificate")) || usage
+            ;;
+        \?)
+            EchoText "Invaild arguments passed."
+            usage
+            exit 1
+            ;;
+        :)
+            EchoText "Option -$OPTARG requires an argument." >&2
+            usage
+            exit 1
+            ;;
+    esac
+done
+
+
+if [[ ! -z $ACTION ]]; then
+	case "$ACTION" in
+		"configure")
+			prerequsite_checks
+			set_enm_server_details
+			set_hosts_details
+			set_certificate_details
+			;;
+		"updatepassword")
+			update_enm_password
+			;;
+		"updatecertificate")
+			enm_certifiacte_modifier
+			;;
+	esac
+else
+	usage
+	exit 1
+fi
+

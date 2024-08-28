@@ -1,0 +1,132 @@
+<!--
+     Ericsson Network IQ Installation utility ant tasks.
+     Copyright (c) 1999 - 2006 AB LM Ericsson Oy  All rights reserved.
+-->
+
+<project name="tasks_install_utils" default="noop">
+	<taskdef resource="net/sf/antcontrib/antlib.xml" />
+
+	<taskdef name="TPInstallOrderer" classname="com.distocraft.dc5000.install.ant.TPInstallOrderer" />
+	<taskdef name="GetDBProperties" classname="com.distocraft.dc5000.install.ant.GetDBProperties" />
+	<taskdef name="ActivateInterface" classname="com.distocraft.dc5000.install.ant.ActivateInterface" />
+	<taskdef name="DeactivateInterface" classname="com.distocraft.dc5000.install.ant.DeactivateInterface" />
+	<taskdef name="GetInstalledTechPacks" classname="com.distocraft.dc5000.install.ant.GetInstalledTechPacks" />
+	<taskdef name="GetActiveInterfaces" classname="com.distocraft.dc5000.install.ant.GetActiveInterfaces" />
+	<taskdef name="ChangeDBUsersPermissions" classname="com.distocraft.dc5000.install.ant.ChangeDBUsersPermissions" />
+	<typedef name="ZipCrypter" classname="com.distocraft.dc5000.install.ant.ZipCrypter" />
+	<typedef name="RemoveDuplicateActivations" classname="com.distocraft.dc5000.install.ant.RemoveDuplicateActivations" />
+
+
+
+	<target name="noop" />
+
+	<target name="orderer">
+		<TPInstallOrderer TechpackDirectory="${tpdir}" InstallListFile="${listfile}" NewTpInstallFile="${newListFile}" NewTpDependencyFile="${newDisableListFile}" checkForRequiredTechPacks="${checkForRequiredTechPacks}" />
+	</target>
+
+	<target name="execute_sql">
+		<if>
+			<isset property="con_type" />
+			<then />
+			<else>
+				<property name="con_type" value="USER" />
+			</else>
+		</if>
+
+		<GetDBProperties name="${dbname}" configurationDirectory="${dc.conf.dir}" type="${con_type}" />
+
+		<propertycopy name="rs_drv" from="${dbname}DatabaseDriver" />
+		<propertycopy name="rs_url" from="${dbname}DatabaseUrl" />
+		<propertycopy name="rs_usr" from="${dbname}DatabaseUsername" />
+		<propertycopy name="rs_pwd" from="${dbname}DatabasePassword" />
+
+		<sql driver="${rs_drv}" url="${rs_url}" userid="${rs_usr}" password="${rs_pwd}" src="${sqlfile}">
+			<classpath>
+				<fileset dir="${dc.platform.dir}/">
+					<include name="**/dclib/*.jar" />
+				</fileset>
+			</classpath>
+		</sql>
+	</target>
+
+	<target name="unzip_tech_pack_file">
+		<!-- Unzip the tech pack installation file to a temporary folder. -->
+		<echo message="Starting to unzip ${tech_pack_file_name}..." />
+		<copy file="${current_working_directory}/tp_installer_temp/temp/${tech_pack_file_name}" tofile="${current_working_directory}/tp_installer_temp/temp/${tech_pack_file_name}.orig" />
+
+		<ZipCrypter CryptType="decrypt" File="${current_working_directory}/tp_installer_temp/temp/${tech_pack_file_name}" IsPublicKey="true" />
+		<unzip src="${current_working_directory}/tp_installer_temp/temp/${tech_pack_file_name}" dest="${current_working_directory}/tp_installer_temp/unzipped_tp" />
+		<echo message="File ${tech_pack_file_name} unzipped successfully..." />
+
+		<available file="${current_working_directory}/tp_installer_temp/unzipped_tp/install/version.properties" property="versionPropertiesExist" />
+		<fail unless="versionPropertiesExist" message="File ${current_working_directory}/tp_installer_temp/unzipped_tp/install/version.properties does not exist! Installation failed." />
+
+		<!-- Read the version.properties and check if the tech_pack.name property exists. -->
+		<property file="${current_working_directory}/tp_installer_temp/unzipped_tp/install/version.properties" />
+
+	</target>
+
+	<target name="activate_interface">
+		<!-- Sets the following ANT project properties:
+         ${etlrepDatabaseUrl}
+         ${etlrepDatabaseUsername}
+         ${etlrepDatabasePassword}
+         ${etlrepDatabaseDriver}
+    -->
+
+		<GetDBProperties name="etlrep" configurationDirectory="${configurationDirectory}" />
+
+		<!-- Sets the following ANT project properties:
+         ${dwhrepDatabaseUrl}
+         ${dwhrepDatabaseUser}
+         ${dwhrepDatabasePassword}
+         ${dwhrepDatabaseDriver}
+    -->
+		<GetDBProperties name="dwhrep" configurationDirectory="${configurationDirectory}" />
+
+		<ActivateInterface activatedInterfaceName="${interfaceName}" onlyActivateInterface="${onlyActivateInterface}" binDirectory="${dc.bin.dir}" ossName="${ossName}" configurationDirectory="${configurationDirectory}" />
+
+	</target>
+
+	<target name="deactivate_interface">
+		<!-- Sets the following ANT project properties:
+	  	         ${etlrepDatabaseUrl}
+	  	         ${etlrepDatabaseUsername}
+	  	         ${etlrepDatabasePassword}
+	  	         ${etlrepDatabaseDriver}
+	  	    -->
+		<GetDBProperties name="etlrep" configurationDirectory="${configurationDirectory}" />
+
+		<!-- Sets the following ANT project properties:
+		         ${dwhrepDatabaseUrl}
+		         ${dwhrepDatabaseUser}
+		         ${dwhrepDatabasePassword}
+		         ${dwhrepDatabaseDriver}
+		    -->
+		<GetDBProperties name="dwhrep" configurationDirectory="${configurationDirectory}" />
+		<DeactivateInterface deactivatedInterfaceName="${interfaceName}" onlyDeactivateInterface="${onlyDeactivateInterface}" binDirectory="${dc.bin.dir}" ossName="${ossName}" configurationDirectory="${configurationDirectory}" />
+	</target>
+	<target name="remove_duplicate_activations">
+		<RemoveDuplicateActivations filepath="${filepath}" />
+	</target>
+
+	<target name="remove_duplicate_deactivations">
+		<RemoveDuplicateActivations filepath="${filepath}" />
+	</target>
+
+	<target name="get_installed_tech_packs">
+
+		<GetInstalledTechPacks showNames="${showNames}" showProductNumbers="${showProductNumbers}" showVersionNumbers="${showVersionNumbers}" showDetails="${showDetails}" showFeatureList="${showFeatureList}" configurationDirectory="${configurationDirectory}" />
+
+	</target>
+
+	<target name="get_active_interfaces">
+
+		<GetActiveInterfaces showNames="${showNames}" techpackName="${techpackName}" showDetails="${showDetails}" configurationDirectory="${configurationDirectory}" />
+
+	</target>
+
+	<target name="change_db_users_permissions">
+		<ChangeDBUsersPermissions action="${action}" dbUser="${dbUser}" configurationDirectory="${configurationDirectory}" />
+	</target>
+</project>

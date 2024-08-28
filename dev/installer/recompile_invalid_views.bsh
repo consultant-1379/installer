@@ -1,0 +1,302 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : recompile_invalid_views.bsh
+# Date    : 02/05/2018
+# Purpose : This script is will search for all the invalid views 
+#			and if found then re-compiles them to make it valid
+#
+# Usage   : bash recompile_invalid_views.bsh [ -l <path_to_logfile> ]
+#
+# ********************************************************************
+#
+# Command Section
+#
+# ********************************************************************
+
+CHMOD=/usr/bin/chmod
+DATE=/usr/bin/date
+ECHO=/usr/bin/echo
+MKDIR=/usr/bin/mkdir
+RM=/usr/bin/rm
+SED=/usr/bin/sed
+TEE=/usr/bin/tee
+TOUCH=/usr/bin/touch
+SU=/bin/su
+SYS_USER=dcuser
+USER=`id -un`
+
+# ********************************************************************
+#
+#       Configuration Section
+#
+# ********************************************************************
+
+CONF_DIR=/eniq/sw/conf
+DBA=dba
+LOGFILE=""
+TEMP=/eniq/sw/installer/temp_invalid_views
+
+# Directory on the root filesystem
+ENIQ_ROOT_DIR=/eniq
+
+# ********************************************************************
+#
+#       Pre-execution Operations
+#
+# ********************************************************************
+
+# ********************************************************************
+#
+#   Functions
+#
+# ********************************************************************
+### Function: abort_script ###
+#
+#   This will is called if the script is aborted through an error
+#   error signal sent by the kernel such as CTRL-C or if a serious
+#   error is encountered during runtime
+#
+# Arguments:
+#       $1 - Error message from part of program (Not always used)
+# Return Values:
+#       none
+abort_script()
+{
+	_err_time_=`${DATE} '+%Y-%b-%d_%H.%M.%S'`
+
+	if [ "$1" ]; then
+		_err_msg_="${_err_time_} - $1"
+	else
+		_err_msg_="${_err_time_} - ERROR : Script aborted.......\n"
+	fi
+
+	${ECHO} "\n$_err_msg_\n" | ${TEE} -a ${LOGFILE}
+
+	if [ "$2" ]; then
+		${2}
+	else
+
+	   exit 1
+	fi
+
+	${RM} -rf ${TEMP}
+}
+
+
+### Function: usage_msg ###
+#
+#   Print out the usage message
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+usage_msg() {
+	${ECHO} "
+Usage : bash recompile_invalid_views.bsh [ -l <path_to_logfile> ]
+   -l : parameter specifying the full path to logfile
+"
+
+exit 2
+
+}
+
+### Function: timestamp ###
+#
+#   Add time stamp to the log message
+#
+# Arguments:
+#       $1 - Log message
+# Return Values:
+#       none
+timestamp() {
+	${ECHO} `${DATE} '+%Y-%M-%d_%H.%M.%S'` ${1}  
+}
+
+
+### Function: check_for_invalid_views ###
+#
+#   This function checks for any invalid views in the server and
+#	if found then re-compiles them to make it valid
+#
+#
+# Arguments:
+#		None
+# Return Values:
+#		None
+recompile_invalid_views() {
+	timestamp "checking for invalid views" >> ${LOGFILE}
+	
+
+	if [ $USER == 'root' ]; then
+		$SU - $SYS_USER -c '/eniq/sw/bin/dwhdb status'
+		_dwhdb_status_=$?
+	else
+		/eniq/sw/bin/dwhdb status
+		_dwhdb_status_=$?
+	fi
+	
+	if [ $_dwhdb_status_ -ne 0 ]; then
+		_err_msg_="ERROR: DWHDB is down."
+		abort_script "$_err_msg_"
+	fi
+	
+	views=`${DBISQL_DBA} "select U.user_name, T.table_name from sysobject O, systab T, sysuser U where T.object_id = O.object_id and U.user_id = T.creator and O.status = 2 and O.object_type = 2;OUTPUT TO ${TEMP}/invalidviewstmp.txt DELIMITED BY '.'" 2>&1`
+	
+	if [ ${?} -eq  0 ]; then
+
+		${SED} "s/'//g" ${TEMP}/invalidviewstmp.txt >> ${TEMP}/invalidviews.txt
+
+		if [ -s ${TEMP}/invalidviews.txt ] ; then
+			while IFS= read -r line
+				do
+					view_name=(${line})
+					if [[ ! -z ${view_name} ]]; then
+						recompile=`${DBISQL_DBA} "ALTER VIEW ${view_name} RECOMPILE"`
+
+						if [ ${?} -eq  0 ]; then
+							timestamp "Successfully recompiled the ${view_name} view"  >> ${LOGFILE}
+						else
+							timestamp "ERROR: Failed to recompile the ${view_name} view"  >> ${LOGFILE}
+						fi
+					fi
+			done < ${TEMP}/invalidviews.txt
+		else
+			timestamp "All views are valid" | ${TEE} -a ${LOGFILE}
+		fi
+	else
+		_err_msg_="ERROR: Failed to fetch the invalid views. ${views}"
+		abort_script "$_err_msg_"
+	fi
+
+}
+
+######################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $connection_string_dba ]; then
+  $RM -f $connection_string_dba
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string_dba"
+  fi
+fi
+}
+
+trap remove_connection_string EXIT
+
+
+# ********************************************************************
+#
+#   Main body of program
+#
+# ********************************************************************
+
+
+if [[ ${#} -eq 2 ]]; then
+	while getopts ":l:" opt; do
+		case "${opt}" in
+			l)
+				LOGFILE=${OPTARG}
+				;;
+			\?)
+				${ECHO} "Invalid arguments passed"
+
+				usage_msg
+				;;
+			:)
+				${ECHO} "Option -$OPTARG requires an argument" >&2
+
+				usage_msg
+				;;
+		esac
+	done
+else
+
+	usage_msg
+fi
+
+
+if [ ! -d ${TEMP} ] ; then
+	${MKDIR} -p ${TEMP}
+	${CHMOD} 777 ${TEMP}
+else
+	${RM} -rf ${TEMP}
+	${MKDIR} -p ${TEMP}
+	${CHMOD} 777 ${TEMP}
+fi
+
+# Source the common functions
+if [ -s ${ENIQ_ROOT_DIR}/admin/lib/common_functions.lib ]; then
+    . ${ENIQ_ROOT_DIR}/admin/lib/common_functions.lib
+else
+	_err_msg_="File ${ENIQ_ROOT_DIR}/admin/lib/common_functions.lib not found"
+	abort_script "$_err_msg_"
+fi
+
+. ${CONF_DIR}/niq.rc
+
+DWHREPUSER=`inigetpassword REP -v DWHREPUsername -f ${CONF_DIR}/niq.ini`
+DWHREPPASSWORD=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+UTILDBAPASSWORD=`inigetpassword DB -v UtilDBAPASSWORD -f ${CONF_DIR}/niq.ini`
+DBAPASSWORD=`inigetpassword DB -v DBAPassword -f ${CONF_DIR}/niq.ini`
+
+connection_string_dba=/var/tmp/encrypt_$$.txt
+connection_string_decrypt_dba="-nogui -onerror exit -c \"eng=dwhdb;links=tcpip{host=dwhdb;port=2640};uid=dba;pwd=${DBAPASSWORD}\"" 
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+if [ ! -x "$DBISQL" ]; then
+    _err_msg_="$DBISQL commands not found or not executable."
+    abort_script "$_err_msg_"
+fi
+
+type get_encrypt_file &>/dev/null && isPresent='true' || isPresent='false'
+if [ ${isPresent} == 'true' ]; then
+  get_encrypt_file "${connection_string_decrypt_dba}" "${connection_string_dba}"
+  DBISQL_DBA="${DBISQL} @${connection_string_dba}"
+else
+  DBISQL_DBA="${DBISQL} ${connection_string_decrypt_dba}"
+fi
+
+
+${ECHO} "----------------------------------------------------------------------------"  
+${ECHO} "`${DATE} '+%Y-%b-%d_%H:%M:%S'` Starting to search and re-compile invalid views"  
+${ECHO} "----------------------------------------------------------------------------" 
+
+STARTTIMESTAMP=`$DATE '+%Y_%m_%d_%H:%M:%S'`
+timestamp "Starting execution of recompiling views script" | ${TEE} -a ${LOGFILE}
+
+
+recompile_invalid_views
+
+ENDTIMESTAMP=`$DATE '+%Y_%m_%d_%H:%M:%S'`
+timestamp "Completed execution of recompiling views script " | ${TEE} -a ${LOGFILE}
+

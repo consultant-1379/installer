@@ -1,0 +1,33 @@
+<project name="installer" default="create_jar">
+
+  <property name="pack.name" value="installer"/>
+  <property name="pack.version" value="5-0-0"/>
+  <!-- Attention! pack.dir have to be under tmp-dir because the actual build is done there --> 
+  <property name="pack.dir" value="tmp/dc5000/src/installer"/>
+
+  <target name="create_jar" depends="compile">
+	  <jar destfile="../installer/lib/installer.jar" basedir="../classes"/>
+  </target>
+  
+  <target name="compile">
+    <mkdir dir="../classes"/>
+    <javac srcdir="../java" destdir="../classes"
+           failonerror="true"
+           debug="off"
+           optimize="off" 
+           deprecation="off">
+      <classpath>
+        <pathelement path="${classpath}"/>
+		<fileset dir="../buildlib/">
+	    	<include name="**/*.jar"/>
+	    </fileset>
+      </classpath>
+    </javac>
+  </target>
+
+  <target name="create_parse_jar" depends="compile">
+  	<mkdir dir="../jar"/>
+	<jar destfile="../jar/ParseChangeLog.jar" basedir="../classes" includes="com/distocraft/dc5000/install/ant/ParseChangelog**"/>
+  </target>
+
+</project>

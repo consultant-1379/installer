@@ -1,0 +1,312 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2020 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : manage_tomcat_user.bsh
+# Date    : 11/11/2019
+# Purpose : Script to manage the tomcat users.
+# Usage   : bash manage_tomcat_user.bsh -A <Action>
+# ********************************************************************
+if [ `id -un` != "dcuser"  ] ; then
+        echo -e "\n This script must be executed as dcuser \n"
+        exit 1
+fi
+. /eniq/home/dcuser/.profile
+if [[ ! -r "${BIN_DIR}/common_variables.lib" ]] ; then
+  echo "ERROR: File does not exists or is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+. ${BIN_DIR}/common_variables.lib
+TIMESTAMP=`$DATE +%d.%m.%Y`
+LOGFILE=/eniq/log/sw_log/adminui/user_management_${TIMESTAMP}.log
+FILE=${RT_DIR}/tomcat/conf/tomcat-users.xml
+REPOSITORY_JAR=/eniq/sw/platform/repository-*/dclib/repository.jar
+JAVA=/eniq/sw/runtime/java/bin/java
+if [ ! -r $FILE ]; then
+        EchoText "File $FILE NotFound or not readable, aborting the script"
+        exit 3
+fi
+usage_msg()
+{
+        $CLEAR
+        EchoText "\n
+        \tUsage: bash manage_tomcat_user.bsh -A <Action>\n
+        \n
+        \tAction options:\n
+        \n
+        \tADD_USER : To create a new user and password\n
+        \tCHANGE_PASSWORD : To change the existing user's password\n
+        \tREMOVE_USER : To delete the existing user"
+        EchoText "\n Please run the script as per the usage. \n"
+}
+EchoText() {
+   $ECHO -e $*
+   $ECHO -e `$DATE '+%Y-%m-%d %H:%M:%S': ` $* >> ${LOGFILE}
+}
+if [ ! -r $REPOSITORY_JAR ]; then
+        EchoText "Repository jar file is NotFound, aborting the script"
+        exit 3
+fi
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+  . /eniq/admin/lib/common_functions.lib
+else
+  EchoText "Could not find /eniq/admin/lib/common_functions.lib"
+  exit 2
+fi
+check_params()
+{
+if [ ! "${ACTION}" ]; then
+    usage_msg
+    exit 6
+fi
+case "${ACTION}" in
+     ADD_USER)  add_new_user
+            ;;
+     CHANGE_PASSWORD)  change_user_password
+            ;;
+     REMOVE_USER)  remove_user
+            ;;
+	 RESTART_TOMCAT) restart_tomcat_adminui
+			;;
+        *)  usage_msg
+            exit 7
+            ;;
+esac
+}
+restart_tomcat_adminui ()
+{
+	EchoText "Restarting webserver..."
+	${BIN_DIR}/webserver restart
+	webserver_code=$?
+	if [[ $webserver_code != 0 ]]; then
+			EchoText "Webserver failed to restart with error code $webserver_code"
+			exit $webserver_code
+	else
+			EchoText "Webserver restarted successfully"
+	fi
+}
+add_new_user ()
+{
+        EchoText "Enter the new Username"
+        read username
+        if [[ "$username"  = *" "* ]]; then
+                EchoText "Username provided has space in it, provide the valid username to proceed"
+                exit 41
+        fi
+        if [ -z "$username" ]; then
+                EchoText "Username provided is empty, provide the valid username to proceed"
+                exit 21
+        fi
+		
+		if [[ $username =~ ^.*[\'\"\&\<\>\/\\]+.*$ ]]; then
+                EchoText "Username should not contain ' \" < > & / \ characters"
+                exit 24
+        fi
+        username_to_search="username=\"$username\""
+        string_to_search="role rolename"
+        $GREP "$username_to_search" $FILE > /dev/null
+        if [ $? -eq 0 ]; then
+                EchoText "Username with the name $username already exists, please provide a new user to add"
+                exit 22
+        fi
+        EchoText "Enter password without space for the new user $username"
+        read -rs password
+		
+		if [ -z "$password" ]; then
+                EchoText "Password provided is empty, provide the valid password to proceed"
+                exit 23
+        fi
+		if [[ ${#password} -lt 8 ]]; then
+                EchoText "Length of Password provided is less than 8 characters, provide the valid password to proceed"
+                exit 43
+        fi
+        
+        if [[ "$password" = *" "* ]]; then
+                EchoText "Password provided has space in it, provide the valid password to proceed"
+                exit 42
+        fi
+		
+		if [[ "$password" != *[A-Z]* ]]; then
+                EchoText "Password should contain atleast one upper case letter, provide the valid password to proceed"
+                exit 43
+        fi
+		
+		if [[ "$password" != *[a-z]* ]]; then
+                EchoText "Password should contain atleast one lower case letter, provide the valid password to proceed"
+                exit 43
+        fi
+        if [[ $password =~ ^.*[\'\"\&\<\>\/\\]+.*$ ]]; then
+                EchoText "Password should not contain ' \" < > & / \ characters"
+                exit 24
+        fi
+                new_username_password="<user username=\"$username\" password=\"$password\" roles=\"eniq\"\/>"
+                #$SED -e "${line_no}s/.*/$new_username_password/g" $FILE
+                $SED -e "/${string_to_search}/a\\${new_username_password}" $FILE > ${RT_DIR}/tomcat/conf/tomcat-users.xml_tmp
+                $MV ${RT_DIR}/tomcat/conf/tomcat-users.xml_tmp $FILE
+                if [[ $? -ne 0 ]]; then
+                        EchoText "Failed to update the password!!!"
+                        exit 25
+                fi
+                $GREP $username_to_search $FILE > /dev/null
+                if [ $? -ne 0 ]; then
+                        EchoText "New user $username failed to create"
+                        exit 26
+                else
+                        EchoText "New User $username created successfully"
+                        restart_tomcat_adminui
+                fi
+}
+change_user_password()
+{
+        EchoText "Enter the Username for which the password needs to be changed"
+        read username
+        if [ -z "$username" ]; then
+                EchoText "Username provided is empty, provide the valid username to proceed"
+                exit 11
+        fi
+        username_to_search="username=\"$username\""
+        $GREP "$username_to_search" $FILE > /dev/null
+        if [ $? -ne 0 ]; then
+                EchoText "Did not find the username $username"
+                exit 12
+        fi
+		$SED -i 's/roles="eniq"\/>/roles="eniq"\/>\n/g' $FILE
+        old_password_string=$($GREP $username_to_search $FILE)
+	    stored_old_password=$(EchoText "$old_password_string" | $GREP -oP 'password="{AsciiCrypter}\K[^"]*')
+	    decrypted_password=$($JAVA -cp $REPOSITORY_JAR com.ericsson.eniq.repository.AsciiCrypter $stored_old_password)
+        default_pw_stored=`inigetpassword WEBSERVER -v Default_Value -f ${CONF_DIR}/default_platform.ini`
+		default_pw=$($JAVA -cp $REPOSITORY_JAR com.ericsson.eniq.repository.AsciiCrypter $default_pw_stored)
+		if [ "$decrypted_password" == "$default_pw" ]
+		then
+		        EchoText "Found the username, enter new password without space"
+                read -rs password
+								
+	    else
+		        EchoText "Found the username, enter existing password without space"
+                read -rs entered_old_password
+	
+	            if [ "$entered_old_password" != "$decrypted_password" ]; then
+                        EchoText "Old password mismatch. Could not change the password."
+                        exit 12
+                fi
+	            EchoText "Password is matching, enter the new password:"
+	            read -rs password
+	    fi
+		if [ -z "$password" ]; then
+                    EchoText "Password provided is empty, provide the valid password to proceed"
+                    exit 13
+        fi
+				
+        if [[ ${#password} -lt 8 ]]; then
+            EchoText "Length of Password provided is less than 8 characters, provide the valid password to proceed"
+            exit 43
+        fi
+				
+        if [[ "$password" = *" "* ]]; then
+            EchoText "Password provided has space in it, provide the valid password to proceed"
+            exit 43
+        fi
+				
+		if [[ "$password" != *[A-Z]* ]]; then
+			EchoText "Password should contain atleast one upper case letter, provide the valid password to proceed"
+			exit 43
+			fi
+				
+		if [[ "$password" != *[a-z]* ]]; then
+			EchoText "Password should contain atleast one lower case letter, provide the valid password to proceed"
+			exit 43
+		fi
+        if [[ "$password" =~ ^.*[\'\"\&\<\>\/\\]+.*$ ]]; then
+            EchoText "Password should not contain ' \" < > & / \ characters"
+            exit 14
+        fi
+        line_no=$($GREP -n $username_to_search $FILE | $CUT -f1 -d:)
+        if [[ $line_no = '' ]]; then
+            EchoText "Unable to update the username to update the password."
+            exit 15
+        else
+            #line_to_modify=$(($line_no+1))
+            replacing_string="<user username=\"$username\" password=\"$password\" roles=\"eniq\"\/>"
+            $SED -i "${line_no}s/.*/$replacing_string/g" $FILE
+            if [[ $? -ne 0 ]]; then
+                EchoText "Failed to update the password"
+                exit 16
+            else
+                EchoText "Password updated successfully for user $username"
+                restart_tomcat_adminui
+            fi
+        fi
+}
+remove_user ()
+{
+	$SED -i 's/roles="eniq"\/>/roles="eniq"\/>\n/g' $FILE
+    count=`${GREP} "user username" $FILE | $WC -l`
+    if [ $count -eq 1 ]; then
+        EchoText "Only one user left, At least one user should be present to access AdminUI"
+        exit 44
+    fi
+    EchoText "Enter the Username to remove"
+    read username
+    if [ -z "$username" ]; then
+        EchoText "Username passed is empty, provide the valid username to proceed"
+        exit 31
+    fi
+    username_to_search="username=\"$username\""
+    $GREP "$username_to_search" $FILE > /dev/null
+    if [ $? -ne 0 ]; then
+        EchoText "Did not find the username $username"
+        exit 32
+    fi
+    EchoText "Found the username to remove, enter the existing password"
+	read -rs entered_old_password
+	old_password_string=$($GREP $username_to_search $FILE)
+	stored_old_password=$(EchoText "$old_password_string" | $GREP -oP 'password="{AsciiCrypter}\K[^"]*')
+	decrypted_password=$($JAVA -cp $REPOSITORY_JAR com.ericsson.eniq.repository.AsciiCrypter $stored_old_password)
+	if [ $entered_old_password != $decrypted_password ]; then
+                EchoText "Old password mismatch, cannot delete the user"
+                exit 12
+        fi
+	EchoText "Password is matching, proceeding to remove the user"
+        $SED "/$username_to_search/d" $FILE > $FILE"_tmp"
+        $MV $FILE"_tmp" $FILE
+        $GREP "$username_to_search"  $FILE > /dev/null
+    if [ $? -eq 0 ]; then
+        EchoText "User $username failed to remove"
+        exit 33
+    else
+        EchoText "User removed successfully for user $username"
+        restart_tomcat_adminui
+    fi
+}
+if [[ $# -ne 2 ]]; then
+        usage_msg
+        exit 4
+fi
+while getopts "T:A:" arg; do
+  case $arg in
+    A) ACTION="$OPTARG"
+                ;;
+	T) ACTION="$OPTARG"
+				;;
+   \?)
+                usage_msg
+       exit 5
+       ;;
+  esac
+done
+shift `expr $OPTIND - 1`
+# Check Input Params
+check_params
+exit 0

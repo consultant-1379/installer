@@ -1,0 +1,127 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : change_dcuser_pass.bsh
+# Date    : 03/05/2019
+# Purpose : Changes the password of all services after migration
+# Usage   : bash change_dcuser_pass.bsh
+#
+# ********************************************************************
+#
+# Command Section
+#
+# ********************************************************************
+
+if [ ${LOGNAME} != "dcuser"  ] ; then
+  echo "\nThis script must be executed as dcuser\n"
+  exit 1
+fi
+
+ENIQ_CONF_DIR=/eniq/installation/config
+CONF_DIR=/eniq/sw/conf
+LOG_DIR=/eniq/log/sw_log/tp_installer
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+        echo "Could not find /eniq/admin/lib/common_functions.lib"
+        exit 1
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 3
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $connection_string ]; then
+  $RM -f $connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string"
+  fi
+fi
+}
+
+trap remove_connection_string EXIT
+
+ETLREPUser=`inigetpassword REP -v ETLREPUsername -f ${CONF_DIR}/niq.ini`
+ETLREPPASSWORD=`inigetpassword REP -v ETLREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+
+connection_string=/var/tmp/encrypt_$$.txt
+connection_string_decrypt="-nogui -c \"eng=${REP_SERVER_NAME};links=tcpip{host=${REP_SERVER_NAME};port=${REP_PORT}};uid=$ETLREPUser;pwd=$ETLREPPASSWORD\" -onerror exit"
+
+get_encrypt_file "${connection_string_decrypt}" "${connection_string}"
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+if [ ! -x "$DBISQL" ]; then
+    _err_msg_="$DBISQL commands not found or not executable."
+    abort_script "$_err_msg_"
+fi
+
+
+DBUSER="dcuser"
+OLD_PASSWORD="dcuser"
+NEW_PASSWORD="$(${DBISQL} @${connection_string} "select password from Meta_databases where connection_name = 'engine'" | $EGREP -v '(----|count|rows|Execution|password)' | $SED '/^\s*$/d')"
+
+. ${CONF_DIR}/niq.rc
+
+CPATH="${INSTALLER_DIR}/lib/installer.jar"
+
+DIRS=`ls ${PLATFORM_DIR}`
+
+for file in $DIRS
+do
+  if [ -d ${PLATFORM_DIR}/$file/dclib ]
+  then
+    JARS=`ls ${PLATFORM_DIR}/$file/dclib/*.jar`
+
+    for jar in $JARS
+    do
+      CPATH="${CPATH}:${jar}"
+    done
+  fi
+done
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+PATH=${RT_DIR}/java/bin:${PATH}
+export PATH
+
+NEW_PASSWORD=`echo ${NEW_PASSWORD} | openssl enc -base64 -d`
+
+${JAVA_HOME}/bin/java -d64 -Dpname="DBUsers" -DCONF_DIR=${CONF_DIR} -classpath ${CPATH} com.ericsson.eniq.repository.dbusers.UpdateDBPass ${DBUSER} ${OLD_PASSWORD} ${NEW_PASSWORD}
+E=${?}
+exit ${E}

@@ -1,0 +1,170 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : change_db_new
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : Ericsson Network IQ script that changes the permissions of database public users like dcbo and dcpublic
+# Usage   : basename $0` -a <action> | -u <database_user> | -l <logfile> "
+#           "options:"
+#              "-a  : Action to perform to the database user. Can be either lock or unlock"
+#              "-u  : Username of the database user to be locked or unlocked. Can be dcbo, dcpublic or ALL."
+#              "-l  : Path to the file where log is written."
+# ********************************************************************
+
+### Function: usage_msg ###
+#
+#   Print out the usage message
+#
+# Arguments:
+#	none
+# Return Values:
+#	none
+usage_msg() 
+{
+echo ""
+echo "Usage: `basename $0` -a <action> | -u <database_user> | -l <logfile> "
+echo "options:"
+echo "-a  : Action to perform to the database user. Can be either lock or unlock"
+echo "-u  : Username of the database user to be locked or unlocked. Can be dcbo, dcpublic or ALL."
+echo "-l  : Path to the file where log is written."
+}
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  echo "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 1
+fi
+
+. ${CONF_DIR}/niq.rc
+
+TIMESTAMP=`date +%Y.%m.%d_%H:%M:%S`
+
+while getopts ":a:u:l:" Option
+do
+  case $Option in
+    a) ACTION="$OPTARG"
+       echo "ACTION=$OPTARG"
+       ;;
+    u) DB_USER="$OPTARG"
+       echo "DB_USER=$OPTARG"
+       ;;
+    l) MAIN_LOGFILE="$OPTARG"
+       echo "MAIN_LOGFILE=$OPTARG"
+       ;;
+   \?) usage_msg
+       exit 6 
+       ;;
+  esac
+done
+
+if [ -z "${ACTION}" ]; then
+    usage_msg
+    exit 8 
+elif [ -z "${DB_USER}" ]; then
+    usage_msg
+    exit 9
+elif [ -z "${MAIN_LOGFILE}" ]; then
+    usage_msg
+    exit 10
+fi
+
+if [ -z "${CONF_DIR}" ] ; then
+  echo "Environment variable CONF_DIR is not set or empty. Permission change aborted." | tee -a ${MAIN_LOGFILE}
+  exit 2
+fi
+
+if [ -z "$PLATFORM_DIR" ] ; then
+    echo "Environment variable PLATFORM_DIR is not set or empty. Permission change aborted." | tee -a ${MAIN_LOGFILE}
+    exit 3
+fi
+
+if [ -z "$INSTALLER_DIR" ] ; then
+    echo "Environment variable INSTALLER_DIR is not set or empty. Permission change aborted." | tee -a ${MAIN_LOGFILE}
+    exit 4
+fi
+
+if [ -z "$RT_DIR" ] ; then
+    echo "Environment variable RT_DIR is not set or empty. Permission change aborted." | tee -a ${MAIN_LOGFILE}
+    exit 5
+fi
+
+if [ -z "$ADMIN_BIN" ] ; then
+    echo "Environment variable ADMIN_BIN is not set or empty. Permission change aborted." | tee -a ${MAIN_LOGFILE}
+    exit 13
+fi
+
+if [ -z "$DATA_DIR" ] ; then
+    echo "Environment variable DATA_DIR is not set or empty. Permission change aborted." | tee -a ${MAIN_LOGFILE}
+    exit 14
+fi
+
+CPATH="${INSTALLER_DIR}/lib/installer.jar"
+INSTALLER_JARPATH="${CPATH}"
+
+if [ ! -r "${CPATH}" ] ; then
+  echo "ERROR: Jar file "installer.jar" is not readable at ${CPATH}" | tee -a ${MAIN_LOGFILE}
+  exit 11
+fi
+
+DIRS=`ls ${PLATFORM_DIR}`
+
+for file in $DIRS
+do
+  if [ -d ${PLATFORM_DIR}/$file/dclib ]
+  then
+    JARS=`ls ${PLATFORM_DIR}/$file/dclib/*.jar`
+
+    for jar in $JARS
+    do
+      CPATH="${CPATH}:${jar}"
+    done
+  fi
+done
+
+CURRENT_WORKING_DIRECTORY=`pwd`
+
+# Make sure that the ACTION and DB_USER parameters are in lower case
+${ACTION} = nawk '{print tolower("${ACTION}")}'
+${DB_USER} = nawk '{print tolower("${DB_USER}")}'
+
+echo "ACTION=${ACTION}"
+echo "DB_USER=${DB_USER}"
+
+
+if [ "${ACTION}" = "lock" ]; then
+  if [ "${DB_USER}" = "all" ]; then
+    echo "This script will now lock dcbo and dcpublic users from the database..." | tee -a ${MAIN_LOGFILE}
+  else 
+    echo "This script will now lock user ${DB_USER} from the database..." | tee -a ${MAIN_LOGFILE}
+  fi
+elif [ "${ACTION}" = "unlock" ]; then
+  if [ "${DB_USER}" = "all" ]; then
+    echo "This script will now unlock dcbo and dcpublic users from the database..." | tee -a ${MAIN_LOGFILE}
+  else 
+    echo "This script will now unlock user ${DB_USER} from the database..." | tee -a ${MAIN_LOGFILE}
+  fi
+else
+  echo "Parameter action was unknown with value ${ACTION}. Exiting permission change." | tee -a ${MAIN_LOGFILE}
+  exit 112
+fi
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+ANT_OPTS="$ANT_OPTS $PF_ANT_OPTS" 
+export ANT_OPTS 
+
+${RT_DIR}/ant/bin/ant -f tasks_install_utils.xml -lib ${CPATH} -logfile ${MAIN_LOGFILE} -Daction=${ACTION} -DdbUser=${DB_USER} change_db_users_permissions
+

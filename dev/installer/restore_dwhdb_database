@@ -1,0 +1,1404 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : restore_dwhdb_database
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : Ericsson Network IQ Restore DWHDB database.
+#           This should only be used for restoring the DWHDB database.
+# Usage   : restore_dwhdb_database
+# ********************************************************************
+~/.profile
+
+if [ -z "${CONF_DIR}" ] ; then
+  echo "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  echo "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 2
+fi
+
+. ${CONF_DIR}/niq.rc
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+. /eniq/admin/lib/common_functions.lib
+else
+        echo "Could not find /eniq/admin/lib/common_functions.lib"
+        exit 6
+fi
+
+if [ -z "${BIN_DIR}" ] ; then
+  echo "ERROR: BIN_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+ENIQ_BASE_DIR=/eniq
+ENIQ_CORE_DIR=${ENIQ_BASE_DIR}/installation/core_install
+ENIQ_CONF_DIR=${ENIQ_BASE_DIR}/installation/config
+RESTORE_LOG_DIR=${ENIQ_BASE_DIR}/log/sw_log/restore_dwhdb_database
+
+TOTAL_FEATURE_FILE=/eniq/admin/managed_oss/total_feature_install_list
+ACTIVE_STAGE=/eniq/sw/installer/nodata_active_restore
+HIST_STAGE=/eniq/sw/installer/nodata_historical_restore
+ERBSCV_FLAG=/eniq/sw/installer/hist_erbscombinedview
+WCDMACV_FLAG=/eniq/sw/installer/hist_wcdmacombinedview
+RESTART_DWHDB_FEATURE=10
+
+usage(){
+$ECHO "Usage: $0 [-a active | -a historical | -a status ]" 1>&2
+$ECHO "Option details :-" 1>&2
+$ECHO "  -a active		: Active restore" 1>&2
+$ECHO "  -a historical	: Historical restore" 1>&2
+$ECHO "  -a status		: Status of restore process" 1>&2
+exit 1
+}
+
+EchoDateText() {
+   $ECHO `$DATE '+%Y-%m-%d %H:%M:%S': ` $* | $TEE -a ${LOGFILE}
+}
+
+EchoText() {
+   $ECHO "$*" | $TEE -a ${LOGFILE}
+}
+
+abort_script(){
+   EchoDateText "Aborting the $1 restore with exit code $2..."
+   exit $2
+}
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $dwhrep_connection_string ]; then
+  $RM -f $dwhrep_connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $dwhrep_connection_string"
+  fi
+fi
+
+if [ -f $etlrep_connection_string ]; then
+  $RM -f $etlrep_connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $etlrep_connection_string"
+  fi
+fi
+}
+trap remove_connection_string EXIT
+
+create_dir() {
+  if [[ ! -d ${1} ]]; then
+    $MKDIR -p $1
+    ioErrCode=$?
+    if [ $ioErrCode -ne 0 ]; then
+      EchoDateText "Failed to create $1 directory."
+	  
+      exit 3
+    else
+      EchoDateText "Successfully created $1 directory."
+    fi
+  fi
+}
+
+# Execute Combined view for LTE, if required.
+erbscombinedview() {
+  if [[ ! -f ${ERBSCV_FLAG} ]]; then
+  
+	  LTE=`${DBISQL} @${dwhrep_connection_string} "select count(*) from dwhrep.tpactivation where techpack_name in ('DC_E_ERBSG2','DC_E_ERBS') and status = 'ACTIVE'"`
+	  dbErrCode=$?
+	  if [ $dbErrCode -ne 0 ]; then
+		EchoDateText "Could not retrieve ERBS install from REDPDB with error code: $dbErrCode"
+		
+		exit $dbErrCode
+	  else 
+		if [ `$ECHO "${LTE}" | $SED -e '1,/\-\-/d' -e '/ rows/,$d' | $SED '/^$/d' | $TR -d ' '` -eq 2 ]; then
+		  
+		  if [[ ! -z $1 ]] && [[ "$1" == "a" ]]; then
+			EchoDateText "\nExecuting erbs combined view with limited view recreation!."
+			/bin/bash ${INSTALLER_DIR}/erbscombinedview.bsh -a > /dev/null
+			if [ $? -ne 0 ]; then
+			  EchoDateText "erbscombinedview script was not successfully run. \nPlease run it manually to create combined views for ERBS
+	 and ERBSG2.
+			  \nYou can use the command below to run combined view script.
+			  \n{dcuser} # bash ${INSTALLER_DIR}/erbscombinedview.bsh"
+			   return 2
+			else
+			  EchoDateText "Combined views created successfully for ERBS and ERBSG2. \n"
+			  $TOUCH ${ERBSCV_FLAG}
+			fi
+		  else
+			EchoDateText "\nExecuting erbs combined view!."
+			/bin/bash ${INSTALLER_DIR}/erbscombinedview.bsh > /dev/null
+			if [ $? -ne 0 ]; then
+			  EchoDateText "erbscombinedview script was not successfully run. \nPlease run it manually to create combined views for ERBS
+	 and ERBSG2.
+			  \nYou can use the command below to run combined view script.
+			  \n{dcuser} # bash ${INSTALLER_DIR}/erbscombinedview.bsh"
+			  return 2
+			else
+			  EchoDateText "Combined views created successfully for ERBS and ERBSG2.\n"
+			  $TOUCH ${ERBSCV_FLAG}
+			fi
+		  fi
+		else
+		  EchoDateText "Combined view creation is not needed."
+		fi
+	  fi
+  fi
+}
+
+# Execute Combined view for WCDMA, if required.
+wcdmacombinedview() {
+  if [[ ! -f ${WCDMACV_FLAG} ]]; then
+  
+	  WCDMA=`${DBISQL} @${dwhrep_connection_string} "select count(*) from dwhrep.tpactivation where techpack_name in ('DC_E_RBSG2','DC_E_RBS') and status = 'ACTIVE'"`
+	  dbErrCode=$?
+	  if [ $dbErrCode -ne 0 ]; then
+		EchoDateText "Could not retrieve WCDMA install from REDPDB with error code: $dbErrCode"
+		
+		exit $dbErrCode
+	  else
+		if [ `$ECHO "${WCDMA}" | $SED -e '1,/\-\-/d' -e '/ rows/,$d' | $SED '/^$/d' | $TR -d ' '` -eq 2 ]; then
+		  if [[ ! -z ${1} ]] && [[ ${1} = "a" ]]; then
+			EchoDateText  "\nExecuting WCDMA combined view script for limited views."
+			/bin/bash ${INSTALLER_DIR}/WCDMACombinedViewCreation.bsh -a > /dev/null
+			if [ $? -ne 0 ]; then
+			  EchoDateText "WCDMACombinedViewCreation script was not successfully run. \nPlease run it manually to create combined views for RBS and RBSG2.
+			  \nYou can use the command below to run combined view script.
+			  \n{dcuser} # bash ${INSTALLER_DIR}/WCDMACombinedViewCreation.bsh"
+			  return 2
+			else
+			  EchoDateText "Combined views created successfully for RBS and RBSG2 limited tables.\n"
+			  $TOUCH ${WCDMACV_FLAG}
+			fi
+		  else
+			EchoDateText  "\nExecuting WCDMA combined view script"
+			/bin/bash ${INSTALLER_DIR}/WCDMACombinedViewCreation.bsh > /dev/null
+			if [ $? -ne 0 ]; then
+			  EchoDateText "WCDMACombinedViewCreation script was not successfully run. \nPlease run it manually to create combined views for RBS and RBSG2.
+			  \nYou can use the command below to run combined view script.
+			  \n{dcuser} # bash ${INSTALLER_DIR}/WCDMACombinedViewCreation.bsh"
+			  return 2
+			else
+			  EchoDateText "Combined views created successfully for RBS and RBSG2. \n"
+			  $TOUCH ${WCDMACV_FLAG}
+			fi
+		  fi
+		else
+		  EchoDateText "Combined view creation is not needed."
+		fi
+	  fi
+  fi
+}
+
+### Function: setProperty ###
+#
+#   This method is called to set property into a file.
+#
+# Arguments:
+#       $key $value $filename
+# Return Values:
+#       none
+setProperty() {
+  $NAWK -v pat="^$1=" -v value="$1=$2" '{ if ($0 ~ pat) print value; else print $0; }' $3 > $3.tmp
+  $MV $3.tmp $3
+  ioErrCode=$?
+  if [ $ioErrCode -ne 0 ]; then
+  EchoDateText "Failed to update $3."
+  
+  $RM $3.tmp
+  exit 3
+  fi
+}
+
+### Function: remote_cmd_executor ###
+#
+#Runs a command on a remote sever and returns the return value from the command
+#
+# Arguments:
+#   $1 : service name
+#   $2 : command to be ran
+# Return Values:
+#      : Return value from the command
+
+remote_cmd_executor() {
+	
+	if [ "${_installed_server_type_}" = "stats_coordinator" ]; then
+		_service_ip_address_=`$GREP $1 /etc/hosts |$NAWK '{print $1}'`
+       run_remote_cmd "${_service_ip_address_}" ". .profile; $2 " "$LOGFILE" dcuser
+	   if [ $? -ne 0 ]; then
+	     EchoDateText "$1 command execution failed. Please check the log. Exiting... "
+		 
+		 return 7
+	   fi
+
+    else
+
+		$2 >> $LOGFILE
+		if [ $? -ne 0 ]; then
+		EchoDateText "$1 command execution failed. Please check the log. Exiting... "
+		
+		return 7
+		fi
+
+    fi
+	
+}
+
+### Function: run_remote_cmd ###
+#
+#Runs a command on a remote sever and returns the return value from the command
+#
+# Arguments:
+#   $1 : hostname/ip
+#   $2 : command to be ran
+#   $3 : optional logfile
+#   $4 : optional user, defaults to root
+#   $5 : disable force tty. If set to "disable_tty", disable forcing tty.
+#        Should be disabled to run a command remotely and leave it
+#        running on the remote machine after the calling script disconnects.
+# Return Values:
+#      : Return value from the command
+
+run_remote_cmd()
+{
+        if  [ "${1}" = "" ]; then
+                EchoDateText "Error: Must provide server"
+                exit 1
+        fi
+        if  [ "${2}" = "" ]; then
+                EchoDateText "Error: Must provide next available dbfile"
+                exit 1
+        fi
+        if  [ "${3}" != "" ]; then
+                 _logfile_="${3}"
+        fi
+        if  [ "${4}" != "" ]; then
+                 _user_="${4}"
+        else
+                 _user_="root"
+        fi
+        if  [ "${5}" != "" ]; then
+                 _disable_tty_="${5}"
+        else
+                 _disable_tty_=""
+        fi
+
+         _server_="${1}"
+         _cmd_="${2}"
+        $PING $_server_ -c 3 >> /dev/null 2>&1
+        if [ $? -ne 0 ]; then
+                EchoDateText "failed to ping server $_server" 
+				
+                return 1
+
+        fi
+
+        # Default value for tty option is -t -t (unchanged):
+    _tty_value="-t -t"
+    if [ "${_disable_tty_}" = "disable_tty" ]; then
+                _tty_value=""
+    fi
+
+        $SSH ${_tty_value} -o StrictHostKeyChecking=no -o BatchMode=yes -q $_user_@$_server_ ${_cmd_}
+		
+        return $?
+}
+
+run_remote_engine()
+{
+        if [ "${_installed_server_type_}" = "stats_coordinator" ]; then
+
+           run_remote_cmd "${_engine_ip_address_}" ". .profile $1 " "$LOGFILE" dcuser
+
+        else
+
+           $1
+
+        fi
+}
+
+stop_engine_service()
+{
+  #Systemd is running
+  EchoDateText "Systemd is running. Restarting engine with Systemd scripts." 
+  EchoDateText "Stopping engine" 
+  run_remote_engine "${BIN_DIR}/engine stop" >> /dev/null 2>&1
+
+  ENGINE_STOP_STATUS=$?
+  if [ ${ENGINE_STOP_STATUS} -ne 0 ] ; then
+    EchoDateText "Engine had running sets. Force shutdown initiated." 
+    run_remote_engine "/eniq/smf/bin/eniq_service_start_stop.bsh -s engine -a clear"
+        EchoDateText "Engine status cleared" 
+        $SLEEP 10
+        run_remote_engine "${BIN_DIR}/engine -e shutdown_forceful" 1> /dev/null 2> /dev/null
+        EchoDateText "Engine forced to shutdown" 
+		
+        $SLEEP 10
+  fi
+
+  ENGINE_SMF_STATUS=`run_remote_engine "${SYSTEMCTL} -a "| ${GREP} "eniq-engine.service" | ${NAWK} '{print $3}'`
+  if [ "${ENGINE_SMF_STATUS}" != "inactive" ]; then
+        EchoDateText "Engine had running sets. Force shutdown initiated." 
+        run_remote_engine "/eniq/smf/bin/eniq_service_start_stop.bsh -s engine -a clear "
+        EchoDateText "Engine status cleared" 
+        $SLEEP 10
+        run_remote_engine "${BIN_DIR}/engine -e shutdown_forceful " 1> /dev/null 2> /dev/null
+        EchoDateText "Engine forced to shutdown" 
+		
+        $SLEEP 10
+        ENGINE_SMF_STATUS=`run_remote_engine "${SYSTEMCTL} -a "| ${GREP} "eniq-engine.service" | ${NAWK} '{print $3}'`
+        if [ "${ENGINE_SMF_STATUS}" != "inactive" ]; then
+                RETRY_COUNT=0
+                until [ "${ENGINE_SMF_STATUS}" = "active" ]
+                do
+                        if [[ $RETRY_COUNT -gt 30 ]]; then
+                                break
+                        fi
+                        $SLEEP 10
+                        ENGINE_SMF_STATUS=`run_remote_engine "${SYSTEMCTL} -a "| ${GREP} "eniq-engine.service" | ${NAWK} '{print $3}'`
+                        RETRY_COUNT=`$EXPR $RETRY_COUNT + 1`
+                        EchoDateText "Waiting for engine to go online" 
+                done
+                EchoDateText "Engine initially started" 
+                run_remote_engine "${BIN_DIR}/engine stop" 
+        fi
+  fi
+  EchoDateText "Engine stopped successfully at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+}
+
+
+start_engine_service()
+{
+  run_remote_engine "${BIN_DIR}/engine start"
+
+  ENGINE_START_STATUS=$?
+
+  if [ ${ENGINE_START_STATUS} -ne 0 ] ; then
+    EchoDateText "Engine could not be started. Aborting techpack installation." 
+	
+    exit 44
+   else
+    EchoDateText "Engine restarted succesfully" 
+ fi
+ 
+ ENGINE_SMF_STATUS=`run_remote_engine "${SYSTEMCTL} -a "| ${GREP} "eniq-engine.service" | ${NAWK} '{print $3}'`
+  RETRY_COUNT=0
+  until [ "${ENGINE_SMF_STATUS}" = "active" ]
+  do
+        if [[ $RETRY_COUNT -gt 30 ]]; then
+                                break
+        fi
+                $SLEEP 10
+                ENGINE_SMF_STATUS=`run_remote_engine "${SYSTEMCTL} -a "| ${GREP} "eniq-engine.service" | ${NAWK} '{print $3}'`
+                RETRY_COUNT=`$EXPR $RETRY_COUNT + 1`
+                EchoDateText "Waiting for engine to go online" 
+  done
+  ENGINE_INIT_STATUS=`run_remote_engine "engine status" 2>&1 | $EGREP "Priority Queue disabled|Connection to engine refused" | $WC -m | $NAWK '{print $1}'`
+  RETRY_COUNT=0
+  until [ "${ENGINE_INIT_STATUS}" = "0" ]
+  do
+        if [[ $RETRY_COUNT -gt 30 ]]; then
+                                break
+        fi
+                $SLEEP 10
+                ENGINE_INIT_STATUS=`run_remote_engine "engine status" 2>&1 | $EGREP "Priority Queue disabled|Connection to engine refused" | $WC -m | $NAWK '{print $1}'`
+                RETRY_COUNT=`$EXPR $RETRY_COUNT + 1`
+                EchoDateText "Waiting for engine to initialize properly" 
+  done
+  EchoDateText "Engine started and initialized at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+}
+
+restore_status() {
+  $ECHO "====================================================================" 
+  $ECHO "  		Ericsson Network IQ RESTORE DWHDB STATUS" 
+  $ECHO "====================================================================" 
+  $ECHO ""
+  _active_restore_process_=`$PS -e -o command | $GREP -v grep | $GREP "restore_dwhdb_database -a active"`
+  _hist_restore_process_=`$PS -e -o command | $GREP -v grep | $GREP "restore_dwhdb_database -a historical"`
+  if [[ ! -z ${_active_restore_process_} ]]; then
+    $ECHO "#-> Active restore process is ongoing."
+    if [[ -f ${ACTIVE_STAGE} ]]; then
+      _a_total_executed_=`$GREP "=executed" ${ACTIVE_STAGE} | $WC -l | $TR -d ' '`
+      _a_total_tp_=`$CAT ${ACTIVE_STAGE} | $WC -l | $TR -d ' '`
+      $ECHO "#-> ACTIVE restore status - ${_a_total_executed_} out of ${_a_total_tp_} TECHPACKs finished."
+    else
+      $ECHO "#-> Active restore is in Initialize stage only."
+    fi
+  elif [[ ! -z ${_hist_restore_process_} ]]; then
+    $ECHO "#-> Historical restore process is ongoing."
+    if [[ -f ${HIST_STAGE} ]]; then
+      _h_total_executed_=`$GREP "=executed" ${HIST_STAGE} | $WC -l | $TR -d ' '`
+      _h_total_tp_=`$CAT ${HIST_STAGE} | $WC -l | $TR -d ' '`
+      $ECHO "#-> HISTORICAL restore status - ${_h_total_executed_} out of ${_h_total_tp_} TECHPACKs finished."
+    else
+      $ECHO "#-> Historical restore is in Initialize stage only."
+    fi
+  else
+    $ECHO "#-> DWHDB RESTORE is not running."
+  fi
+  $ECHO ""
+  $ECHO "====================================================================" 
+  
+}
+
+active_procedure() {
+
+  EchoText "====================================================================" 
+  EchoText "  Ericsson Network IQ Active Restore DWHDB database " 
+  EchoText "===================================================================="  
+  
+  if [[ -f ${ACTIVE_STAGE} ]] && [[ `$GREP -i "=pending" ${ACTIVE_STAGE} | $WC -l` -ne 0 ]]; then
+    EchoDateText "Resuming the active restore from previous checkpoint!."
+  else
+    if [ ! -f ${ACTIVE_STAGE} ]; then
+      $TOUCH ${ACTIVE_STAGE}
+	  ErrCode=$?
+      if [ $ErrCode -ne 0 ]; then
+	    
+        abort_script "active" $ErrCode
+      fi
+	  EchoDateText "Active restore initated."
+	  EchoDateText "Fetching the list of TECHPACKS to be restored!."
+      ${DBISQL} @${dwhrep_connection_string} "select ta.techpack_name+'=pending' from dwhrep.dwhtechpacks as dt, dwhrep.tpactivation as ta where dt.techpack_name = ta.techpack_name and ta.status = 'ACTIVE'; OUTPUT TO '${ACTIVE_STAGE}' QUOTE ''" >> /dev/null 2>&1
+      dbErrCode=$?
+      if [ $dbErrCode -ne 0 ]; then
+        EchoDateText "Could not retrieve TECHPACK details from REDPDB with error code: $dbErrCode"
+		
+        abort_script "active" $dbErrCode
+      fi
+	else
+	  if [[ `$GREP -i "=pending" ${ACTIVE_STAGE} | $WC -l` -eq 0 ]] && [[ `$GREP -i "=executed" ${ACTIVE_STAGE} | $WC -l` -ne 0 ]]; then
+	  EchoDateText "Active restore is showing in the completed state from ${ACTIVE_STAGE} stage file!."
+	  EchoDateText "Skipping the active restore..."
+	  
+	  exit 0
+	  fi
+    fi
+	
+  fi
+  
+  #Disabling all the aggregation sets.
+
+  EchoDateText "Disabling all the aggregation sets!"
+  ${DBISQL} @${etlrep_connection_string} "update etlrep.META_SCHEDULINGS set HOLD_FLAG = 'Y' where name like 'Aggregator[_]%' and collection_set_id in (select distinct collection_set_id from etlrep.META_COLLECTION_SETS where enabled_flag ='Y')"
+
+  dbErrCode=$?
+  if [ $dbErrCode -ne 0 ]; then
+    EchoDateText "Error while disabling the Aggregation sets."
+    EchoDateText "Please execute below mentioned command manually until it is successful disable the Aggregation Sets."
+  else
+    EchoDateText "Successfully disabled the Aggregation sets."
+  fi
+
+  EchoDateText "Restarting engine before TECHPACK installation" 
+
+  stop_engine_service
+
+  start_engine_service
+
+  EchoDateText "Changing engine profile to NoLoads" 
+
+  run_remote_engine "${BIN_DIR}/engine -e changeProfile NoLoads"
+
+  NOLOADS_EXIT_STATUS=$?
+
+  if [ ${NOLOADS_EXIT_STATUS} -ne 0 ] ; then
+    EchoDateText "Engine status NoLoads could not be changed. Aborting techpack installation." 
+	
+    abort_script "active" "43"
+  else
+    EchoDateText "Engine status changed to NoLoads" 
+  fi
+
+  EchoDateText "Engine profile NoLoads changed successfully at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+
+  #Systemd is running
+  EchoDateText "Systemd is running. Setting scheduler on hold and shutting it down with Systemd scripts." 
+
+  ${BIN_DIR}/scheduler hold
+  SCHEDULER_HOLD_EXIT_STATUS=$?
+
+  if [ ${SCHEDULER_HOLD_EXIT_STATUS} -ne 0 ] ; then
+    EchoDateText "Scheduler could not be set on hold. Scheduler is not running."
+   else
+    EchoDateText "Scheduler set on hold at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+  fi
+
+  # Disable the schedule UpdateMonitoring for DWH_MONITOR
+  disableCount=0
+  UPDATE_MONITORING_STATUS=`scheduler -e disable_schedule DWH_MONITOR UpdateMonitoring`
+  until [ "${UPDATE_MONITORING_STATUS}" = "Schedule UpdateMonitoring disabled successfully. Please reload scheduler for the changes to take effect." -o "${UPDATE_MONITORING_STATUS}" = "Schedule UpdateMonitoring is already disabled." ]
+  do
+	if [ $disableCount -eq 3 ]; then
+		EchoDateText "Failed to disable set UpdateMonitoring"
+		
+		exit 1
+	fi
+    $SLEEP 10
+    UPDATE_MONITORING_STATUS=`scheduler -e disable_schedule DWH_MONITOR UpdateMonitoring`
+    EchoDateText "Disabling UpdateMonitoring"
+	disableCount=$((disableCount+1))
+  done
+  EchoDateText "Disabled UpdateMonitoring successfully at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+
+  # Disable the schedule UpdateMonitoringOnStartup for DWH_MONITOR
+  disableCount=0
+  UPDATE_MONITORING_ONSTARTUP_STATUS=`scheduler -e disable_schedule DWH_MONITOR UpdateMonitoringOnStartup`
+  until [ "${UPDATE_MONITORING_ONSTARTUP_STATUS}" = "Schedule UpdateMonitoringOnStartup disabled successfully. Please reload scheduler for the changes to take effect." -o "${UPDATE_MONITORING_ONSTARTUP_STATUS}" = "Schedule UpdateMonitoringOnStartup is already disabled." ]
+  do
+  	if [ $disableCount -eq 3 ]; then
+		EchoDateText "Failed to disable set UpdateMonitoringOnStartup"
+		
+		exit 1
+	fi
+        $SLEEP 10
+        UPDATE_MONITORING_ONSTARTUP_STATUS=`scheduler -e disable_schedule DWH_MONITOR UpdateMonitoringOnStartup`
+        EchoDateText "Disabling UpdateMonitoringOnStartup"
+		disableCount=$((disableCount+1))
+  done
+  EchoDateText "Disabled UpdateMonitoringOnStartup successfully at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+
+# Disable the schedule SessionLoader_Starter for DWH_MONITOR
+disableCount=0
+  SESSIONLOADER_STARTER_STATUS=`scheduler -e disable_schedule DWH_MONITOR SessionLoader_Starter`
+  until [ "${SESSIONLOADER_STARTER_STATUS}" = "Schedule SessionLoader_Starter disabled successfully. Please reload scheduler for the changes to take effect." -o "${SESSIONLOADER_STARTER_STATUS}" = "Schedule SessionLoader_Starter is already disabled." ]
+  do
+  	if [ $disableCount -eq 3 ]; then
+		EchoDateText "Failed to disable set SessionLoader_Starter"
+		
+		exit 1
+	fi
+        $SLEEP 10
+        SESSIONLOADER_STARTER_STATUS=`scheduler -e disable_schedule DWH_MONITOR SessionLoader_Starter`
+        EchoDateText "Disabling SessionLoader_Starter"
+		disableCount=$((disableCount+1))
+  done
+  EchoDateText "Disabled SessionLoader_Starter successfully at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+  
+  # Disable the schedule SessionLogLoader_Loader for DWH_MONITOR
+  disableCount=0
+SESSIONLOGLOADER_LOADER_STATUS=`scheduler -e disable_schedule DWH_MONITOR SessionLogLoader_Loader`
+until [ "${SESSIONLOGLOADER_LOADER_STATUS}" = "Schedule SessionLogLoader_Loader disabled successfully. Please reload scheduler for the changes to take effect." -o "${SESSIONLOGLOADER_LOADER_STATUS}" = "Schedule SessionLogLoader_Loader is already disabled." ]
+  do
+  	if [ $disableCount -eq 3 ]; then
+		EchoDateText "Failed to disable set SessionLogLoader_Loader"
+		
+		exit 1
+	fi
+        $SLEEP 10
+        SESSIONLOGLOADER_LOADER_STATUS=`scheduler -e disable_schedule DWH_MONITOR SessionLogLoader_Loader`
+        EchoDateText "Disabling SessionLogLoader_Loader"
+		disableCount=$((disableCount+1))
+  done
+EchoDateText "Disabled SessionLogLoader_Loader successfully at "`$DATE +%Y.%m.%d_%H:%M:%S`
+
+# Disable the schedule SessionLogLoader_Aggregator for DWH_MONITOR
+disableCount=0
+SESSIONLOGLOADER_AGGREGATOR_STATUS=`scheduler -e disable_schedule DWH_MONITOR SessionLogLoader_Aggregator`
+until [ "${SESSIONLOGLOADER_AGGREGATOR_STATUS}" = "Schedule SessionLogLoader_Aggregator disabled successfully. Please reload scheduler for the changes to take effect." -o "${SESSIONLOGLOADER_AGGREGATOR_STATUS}" = "Schedule SessionLogLoader_Aggregator is already disabled." ]
+  do
+  	if [ $disableCount -eq 3 ]; then
+		EchoDateText "Failed to disable set SessionLogLoader_Aggregator"
+		
+		exit 1
+	fi
+        $SLEEP 10
+        SESSIONLOGLOADER_AGGREGATOR_STATUS=`scheduler -e disable_schedule DWH_MONITOR SessionLogLoader_Aggregator`
+        EchoDateText "Disabling SessionLogLoader_Aggregator"
+		disableCount=$((disableCount+1))
+  done
+EchoDateText "Disabled SessionLogLoader_Aggregator successfully at "`$DATE +%Y.%m.%d_%H:%M:%S`
+
+# Disable the schedule SessionLogLoader_Adapter for DWH_MONITOR
+disableCount=0
+SESSIONLOGLOADER_ADAPTER_STATUS=`scheduler -e disable_schedule DWH_MONITOR SessionLogLoader_Adapter`
+until [ "${SESSIONLOGLOADER_ADAPTER_STATUS}" = "Schedule SessionLogLoader_Adapter disabled successfully. Please reload scheduler for the changes to take effect." -o "${SESSIONLOGLOADER_ADAPTER_STATUS}" = "Schedule SessionLogLoader_Adapter is already disabled." ]
+  do
+  	if [ $disableCount -eq 3 ]; then
+		EchoDateText "Failed to disable set SessionLogLoader_Adapter"
+		
+		exit 1
+	fi
+        $SLEEP 10
+        SESSIONLOGLOADER_ADAPTER_STATUS=`scheduler -e disable_schedule DWH_MONITOR SessionLogLoader_Adapter`
+        EchoDateText "Disabling SessionLogLoader_Adapter"
+		disableCount=$((disableCount+1))
+  done
+EchoDateText "Disabled SessionLogLoader_Adapter successfully at "`$DATE +%Y.%m.%d_%H:%M:%S`
+
+# Disable the schedule SessionLogLoader_Collected_Data for DWH_MONITOR
+disableCount=0
+SessionLogLoader_Collected_Data_STATUS=`scheduler -e disable_schedule DWH_MONITOR SessionLogLoader_Collected_Data`
+until [ "${SessionLogLoader_Collected_Data_STATUS}" = "Schedule SessionLogLoader_Collected_Data disabled successfully. Please reload scheduler for the changes to take effect." -o "${SessionLogLoader_Collected_Data_STATUS}" = "Schedule SessionLogLoader_Collected_Data is already disabled." ]
+  do
+  	if [ $disableCount -eq 3 ]; then
+		EchoDateText "Failed to disable set SessionLogLoader_Collected_Data"
+		
+		exit 1
+	fi
+        $SLEEP 10
+        SessionLogLoader_Collected_Data_STATUS=`scheduler -e disable_schedule DWH_MONITOR SessionLogLoader_Collected_Data`
+        EchoDateText "Disabling SessionLogLoader_Collected_Data"
+		disableCount=$((disableCount+1))
+  done
+EchoDateText "Disabled SessionLogLoader_Collected_Data successfully at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+
+# Disable the schedule DeltaViewCreation for DWH_MONITOR
+  disableCount=0
+  UPDATE_MONITORING_STATUS=`scheduler -e disable_schedule DWH_MONITOR TriggerDeltaView`
+  until [ "${UPDATE_MONITORING_STATUS}" = "Schedule TriggerDeltaView disabled successfully. Please reload scheduler for the changes to take effect." -o "${UPDATE_MONITORING_STATUS}" = "Schedule TriggerDeltaView is already disabled." ]
+  do
+	if [ $disableCount -eq 3 ]; then
+		EchoDateText "Failed to disable set DeltaViewCreation"
+		
+		exit 1
+	fi
+	
+    $SLEEP 10
+    UPDATE_MONITORING_STATUS=`scheduler -e disable_schedule DWH_MONITOR TriggerDeltaView`
+    EchoDateText "Disabling DeltaViewCreation"
+    disableCount=$((disableCount+1))    
+  done
+EchoDateText "Disabled DeltaViewCreation successfully at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+
+#Activate the scheduler
+disableActivateCount=0
+SCHEDULER_ACTIVATE=`scheduler activate | $GREP "scheduler is running OK"`
+#$SLEEP 10
+until [ "${SCHEDULER_ACTIVATE}" = "scheduler is running OK" ]
+  do
+  	if [ $disableActivateCount -eq 3 ]; then
+		EchoDateText "Failed to Activate Scheduler"
+		
+		exit 2
+	fi
+        $SLEEP 10
+        SCHEDULER_ACTIVATE=`scheduler activate | $GREP "scheduler is running OK"`
+        EchoDateText "Activating scheduler."
+        disableActivateCount=$((disableActivateCount+1))
+  done
+EchoDateText "Activated scheduler successfully at "`$DATE +%Y.%m.%d_%H:%M:%S`
+  
+CPATH="${INSTALLER_DIR}/lib/installer.jar"
+
+DIRS=`$LS ${PLATFORM_DIR}`
+
+for file in $DIRS
+do
+  if [ -d ${PLATFORM_DIR}/$file/dclib ]
+  then
+    JARS=`$LS ${PLATFORM_DIR}/$file/dclib/*.jar`
+
+    for jar in $JARS
+    do
+      CPATH="${CPATH}:${jar}"
+    done
+  fi
+done
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+ANT_OPTS="$ANT_OPTS $PF_ANT_OPTS"
+export ANT_OPTS
+
+export ANT_HOME
+
+if [[ -f ${BIN_DIR}/generate_dirchecker_sch_commands.bsh ]]; then
+EchoDateText "Running Directory_Checker set for all the TPs and Interfaces"
+bash ${BIN_DIR}/generate_dirchecker_sch_commands.bsh -f &
+fi
+
+${CD} ${INSTALLER_DIR}; ${RT_DIR}/ant/bin/ant -f ${INSTALLER_DIR}/tasks_restore_dwhdb_utils.xml -lib ${CPATH} -DbinDirectory=${BIN_DIR} -DinstallDirectory=${INSTALLER_DIR} restore | $TEE -a ${LOGFILE}
+
+_active_pending_list_=`$GREP -i "=pending" ${ACTIVE_STAGE}`
+if [[ ! -z ${_active_pending_list_} ]]; then
+  EchoDateText "Restore has failed for below mentioned TECHPACKS. Please re-trigger the restore after rectifying the error."
+  EchoText "`$ECHO "${_active_pending_list_}" | $NAWK -F"=" '{print $1}'`"
+  abort_script "active" "3"
+fi
+
+# Waiting for forked generate_dirchecker_sch_commands.bsh to complete. 
+wait 
+# re-create show_db_usage() procedure in dwhdb
+CREATE_DWHDB_USAGE="${INSTALLER_DIR}/sqlfiles/ASA_repository_create_show_dwhdb_usage.sql"
+if [ -f ${CREATE_DWHDB_USAGE} ] ; then
+  ${CD} ${INSTALLER_DIR}; ${RT_DIR}/ant/bin/ant -f ${INSTALLER_DIR}/tasks_install_utils.xml -lib ${CPATH} -Ddc.installer.dir=${INSTALLER_DIR} -Ddbname=dwh -Dsqlfile=${CREATE_DWHDB_USAGE} -Dcon_type=DBA -Ddc.conf.dir=${CONF_DIR} -Ddc.platform.dir=${PLATFORM_DIR} execute_sql | $TEE -a ${LOGFILE}
+fi
+
+# re-create check dwhdb size events
+CHECK_DWHDB_SIZE="${INSTALLER_DIR}/sqlfiles/ASA_repository_create_check_dwhdb_db_size.sql"
+if [ -f ${CHECK_DWHDB_SIZE} ] ; then
+  ${CD} ${INSTALLER_DIR}; ${RT_DIR}/ant/bin/ant -f ${INSTALLER_DIR}/tasks_install_utils.xml -lib ${CPATH} -Ddc.installer.dir=${INSTALLER_DIR} -Ddbname=dwh -Dsqlfile=${CHECK_DWHDB_SIZE} -Dcon_type=DBA -Ddc.conf.dir=${CONF_DIR} -Ddc.platform.dir=${PLATFORM_DIR} execute_sql | $TEE -a ${LOGFILE}
+fi
+
+if [ -f ${LOGFILE} ] ; then
+  SUC=`$CAT ${LOGFILE} | $GREP "BUILD SUCCESSFUL"`
+  if [ ! -z "${SUC}" ] ; then
+    EchoText "===================================="  
+    EchoText "Successfully restored Active partition"  
+    EchoText "===================================="  
+  else
+    EchoText "============================="  
+    EchoText "Active partition restore failed"  
+    EchoText "============================="
+	EchoText "Need to re-trigger the active restore once again!."
+	abort_script "active" 43
+  fi
+fi
+
+#Running ERBS Combined view if necessary!
+
+erbscombinedview "a" &
+
+wcdmacombinedview "a" &
+
+$WAIT
+
+#Enable the UpdateMonitoring in the scheduler.
+enableCount=0
+UPDATE_MONITORING_SCHEDULE=`scheduler -e enable_schedule DWH_MONITOR UpdateMonitoring`
+until [ "${UPDATE_MONITORING_SCHEDULE}" = "Schedule UpdateMonitoring enabled successfully. Please reload scheduler for the changes to take effect." -o "${UPDATE_MONITORING_SCHEDULE}" = "Schedule UpdateMonitoring is already enabled." ]
+  do
+	if [ $enableCount -eq 3 ]; then
+		EchoDateText "Failed to enable set UpdateMonitoring"
+		
+		exit 3
+	fi
+        $SLEEP 10
+        UPDATE_MONITORING_SCHEDULE=`scheduler -e enable_schedule DWH_MONITOR UpdateMonitoring`
+        EchoDateText "Enabling UpdateMonitoring"
+		enableCount=$((enableCount+1))
+  done
+EchoDateText "Enabled UpdateMonitoring successfully at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+
+#Enable the UpdateMonitoringOnStartup in the scheduler.
+enableCount=0
+UPDATE_MONITORING_ONSTARTUP_SCHEDULE=`scheduler -e enable_schedule DWH_MONITOR UpdateMonitoringOnStartup`
+until [ "${UPDATE_MONITORING_ONSTARTUP_SCHEDULE}" = "Schedule UpdateMonitoringOnStartup enabled successfully. Please reload scheduler for the changes to take effect." -o "${UPDATE_MONITORING_ONSTARTUP_SCHEDULE}" = "Schedule UpdateMonitoringOnStartup is already enabled." ]
+  do
+  	if [ $enableCount -eq 3 ]; then
+		EchoDateText "Failed to enable set UpdateMonitoringOnStartup"
+		
+		exit 3
+	fi
+        $SLEEP 10
+        UPDATE_MONITORING_ONSTARTUP_SCHEDULE=`scheduler -e enable_schedule DWH_MONITOR UpdateMonitoringOnStartup`
+        EchoDateText "Enabling UpdateMonitoringOnStartup"
+		enableCount=$((enableCount+1))
+  done
+EchoDateText "Enabled UpdateMonitoringOnStartup successfully at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+
+#Enable the SessionLoader_Starter in the scheduler.
+enableCount=0
+SESSIONLOADER_STARTER_SCHEDULE=`scheduler -e enable_schedule DWH_MONITOR SessionLoader_Starter`
+until [ "${SESSIONLOADER_STARTER_SCHEDULE}" = "Schedule SessionLoader_Starter enabled successfully. Please reload scheduler for the changes to take effect." -o "${SESSIONLOADER_STARTER_SCHEDULE}" = "Schedule SessionLoader_Starter is already enabled." ]
+  do
+  	if [ $enableCount -eq 3 ]; then
+		EchoDateText "Failed to enable set SessionLoader_Starter"
+		
+		exit 3
+	fi
+        $SLEEP 10
+        SESSIONLOADER_STARTER_SCHEDULE=`scheduler -e enable_schedule DWH_MONITOR SessionLoader_Starter`
+        EchoDateText "Enabling SessionLoader_Starter"
+		enableCount=$((enableCount+1))
+  done
+EchoDateText "Enabled SessionLoader_Starter successfully at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+
+#Enable the SessionLogLoader_Loader in the scheduler.
+enableCount=0
+SESSIONLOGLOADER_LOADER_SCHEDULE=`scheduler -e enable_schedule DWH_MONITOR SessionLogLoader_Loader`
+until [ "${SESSIONLOGLOADER_LOADER_SCHEDULE}" = "Schedule SessionLogLoader_Loader enabled successfully. Please reload scheduler for the changes to take effect." -o "${SESSIONLOGLOADER_LOADER_SCHEDULE}" = "Schedule SessionLogLoader_Loader is already enabled." ]
+  do
+  	if [ $enableCount -eq 3 ]; then
+		EchoDateText "Failed to enable set SessionLogLoader_Loader"
+		
+		exit 3
+	fi
+        $SLEEP 10
+        SESSIONLOGLOADER_LOADER_SCHEDULE=`scheduler -e enable_schedule DWH_MONITOR SessionLogLoader_Loader`
+        EchoDateText "Enabling SessionLogLoader_Loader"
+		enableCount=$((enableCount+1))
+  done
+EchoDateText "Enabled SessionLogLoader_Loader successfully at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+
+#Enable the SessionLogLoader_Aggregator in the scheduler.
+enableCount=0
+SESSIONLOGLOADER_AGGREGATOR_SCHEDULE=`scheduler -e enable_schedule DWH_MONITOR SessionLogLoader_Aggregator`
+until [ "${SESSIONLOGLOADER_AGGREGATOR_SCHEDULE}" = "Schedule SessionLogLoader_Aggregator enabled successfully. Please reload scheduler for the changes to take effect." -o "${SESSIONLOGLOADER_AGGREGATOR_SCHEDULE}" = "Schedule SessionLogLoader_Aggregator is already enabled." ]
+  do
+  	if [ $enableCount -eq 3 ]; then
+		EchoDateText "Failed to enable set SessionLogLoader_Aggregator"
+		
+		exit 3
+	fi
+        $SLEEP 10
+        SESSIONLOGLOADER_AGGREGATOR_SCHEDULE=`scheduler -e enable_schedule DWH_MONITOR SessionLogLoader_Aggregator`
+        EchoDateText "Enabling SessionLogLoader_Aggregator"
+		enableCount=$((enableCount+1))
+  done
+EchoDateText "Enabled SessionLogLoader_Aggregator successfully at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+
+#Enable the SessionLogLoader_Adapter in the scheduler.
+enableCount=0
+SESSIONLOGLOADER_ADAPTER_SCHEDULE=`scheduler -e enable_schedule DWH_MONITOR SessionLogLoader_Adapter`
+until [ "${SESSIONLOGLOADER_ADAPTER_SCHEDULE}" = "Schedule SessionLogLoader_Adapter enabled successfully. Please reload scheduler for the changes to take effect." -o "${SESSIONLOGLOADER_ADAPTER_SCHEDULE}" = "Schedule SessionLogLoader_Adapter is already enabled." ]
+  do
+  	if [ $enableCount -eq 3 ]; then
+		EchoDateText "Failed to enable set SessionLogLoader_Adapter"
+		
+		exit 3
+	fi
+        $SLEEP 10
+        SESSIONLOGLOADER_ADAPTER_SCHEDULE=`scheduler -e enable_schedule DWH_MONITOR SessionLogLoader_Adapter`
+        EchoDateText "Enabling SessionLogLoader_Adapter"
+		enableCount=$((enableCount+1))
+  done
+EchoDateText "Enabled SessionLogLoader_Adapter successfully at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+
+#Enable the SessionLogLoader_Collected_Data in the scheduler.
+enableCount=0
+SessionLogLoader_Collected_Data_SCHEDULE=`scheduler -e enable_schedule DWH_MONITOR SessionLogLoader_Collected_Data`
+until [ "${SessionLogLoader_Collected_Data_SCHEDULE}" = "Schedule SessionLogLoader_Collected_Data enabled successfully. Please reload scheduler for the changes to take effect." -o "${SessionLogLoader_Collected_Data_SCHEDULE}" = "Schedule SessionLogLoader_Collected_Data is already enabled." ]
+  do
+  	if [ $enableCount -eq 3 ]; then
+		EchoDateText "Failed to enable set SessionLogLoader_Collected_Data"
+		
+		exit 3
+	fi
+        $SLEEP 10
+        SessionLogLoader_Collected_Data_SCHEDULE=`scheduler -e enable_schedule DWH_MONITOR SessionLogLoader_Collected_Data`
+        EchoDateText "Enabling SessionLogLoader_Collected_Data"
+		enableCount=$((enableCount+1))
+  done
+EchoDateText "Enabled SessionLogLoader_Collected_Data successfully at "`${DATE} +%Y.%m.%d_%H:%M:%S` 
+
+#Activate the scheduler
+enableActivateCount=0
+SCHEDULER_ACTIVATE=`scheduler activate | $GREP "scheduler is running OK"`
+#$SLEEP 10
+until [ "${SCHEDULER_ACTIVATE}" = "scheduler is running OK" ]
+  do
+  	if [ $enableActivateCount -eq 3 ]; then
+		EchoDateText "Failed to Activate Scheduler"
+		
+		exit 4
+	fi
+        $SLEEP 10
+        SCHEDULER_ACTIVATE=`scheduler activate | $GREP "scheduler is running OK"`
+        EchoDateText "Activating scheduler."
+        enableActivateCount=$((enableActivateCount+1))
+  done
+EchoDateText "Activated scheduler successfully at "`$DATE +%Y.%m.%d_%H:%M:%S`
+
+run_remote_engine "${BIN_DIR}/engine -e changeProfile Normal"
+
+NORMAL_EXIT_STATUS=$?
+
+if [ ${NORMAL_EXIT_STATUS} -ne 0 ] ; then
+  EchoDateText "Engine status Normal could not be changed."
+  
+  exit 43
+  else
+  EchoDateText "Engine status changed to Normal" 
+fi
+
+#as part of graceful shutdown
+EchoDateText "Stopping Scheduler...." 
+
+${BIN_DIR}/scheduler stop
+
+EchoDateText "Stopping engine...." 
+
+  stop_engine_service
+  
+EchoDateText "Starting engine...." 
+  
+  start_engine_service
+  
+EchoDateText "Starting Scheduler...." 
+
+${BIN_DIR}/scheduler start
+
+EchoText "====================================================================" 
+EchoDateText "active Phase is completed successfully!."
+EchoText "====================================================================" 
+
+}
+
+execute_DWHM_INSTALL_for_HIST() {
+eachTechpack=$1
+#Check if the Teckpack has already been installed!."
+if [ -f ${HIST_STAGE} ]; then
+  $GREP "$eachTechpack=executed" ${HIST_STAGE} > /dev/null 2>&1
+  if [ $? -eq 0 ]; then
+    EchoDateText "Techpack $eachTechpack is already executed. Skipping to next one. \n"
+	
+    return
+  fi
+fi
+
+EchoDateText "Running set DWHM_Install_$eachTechpack for $eachTechpack TECHPACK"
+remote_cmd_executor "engine" "${BIN_DIR}/engine -e startAndWaitSet $eachTechpack DWHM_Install_$eachTechpack"
+
+if [ $? -ne 0 ]; then
+EchoDateText "ERROR :: StorageTimeUpdate set failed for $eachTechpack TECHPACK. \nSkipping to next TECHPACK..."
+
+else
+EchoDateText "Successfully installed the TECHPACK $eachTechpack!."
+setProperty $eachTechpack "executed" "${HIST_STAGE}"
+fi
+
+}
+ 
+historical_procedure() {
+
+  EchoText "====================================================================" 
+  EchoText "  Ericsson Network IQ Historical Restore DWHDB database " 
+  EchoText "===================================================================="  
+
+  if [[ -f ${HIST_STAGE} ]] && [[ `$GREP -i "=pending" ${HIST_STAGE} | $WC -l` -ne 0 ]]; then
+    EchoDateText "Resuming the Historical restore from previous checkpoint!."
+  else
+    if [ ! -f ${HIST_STAGE} ]; then
+      $TOUCH ${HIST_STAGE}
+	  ErrCode=$?
+      if [ $ErrCode -ne 0 ]; then
+		
+        abort_script "historical" $ErrCode
+      fi
+	  EchoDateText "Historical restore initated."
+	  EchoDateText "Fetching the list of TECHPACKS to be executed!."
+      ${DBISQL} @${dwhrep_connection_string} "select ta.techpack_name+'=pending' from dwhrep.dwhtechpacks as dt, dwhrep.tpactivation as ta where dt.techpack_name = ta.techpack_name and ta.status = 'ACTIVE' and ta.techpack_name not in ('DWH_MONITOR','DWH_BASE'); OUTPUT TO '${HIST_STAGE}' QUOTE ''" >> /dev/null 2>&1
+      dbErrCode=$?
+      if [ $dbErrCode -ne 0 ]; then
+        EchoDateText "Could not retrieve TECHPACK details from REDPDB with error code: $dbErrCode"
+		
+        exit $dbErrCode
+	  else 
+	    EchoDateText "Successfully fetched the all the features in order for the installation"  
+      fi
+    fi
+	if [[ -f ${ERBSCV_FLAG} ]]; then
+      $RM ${ERBSCV_FLAG}
+	  ErrCode=$?
+      if [ $ErrCode -ne 0 ]; then
+	    
+        abort_script "historical" $ErrCode
+      fi
+	fi
+    if [[ -f ${WCDMACV_FLAG} ]]; then
+      $RM ${WCDMACV_FLAG}
+	  ErrCode=$?
+      if [ $ErrCode -ne 0 ]; then
+	    EchoDateText "Could not retrieve TECHPACK details from REDPDB with error code: $dbErrCode"
+		
+        abort_script "historical" $ErrCode
+      fi
+	fi
+    
+  fi
+
+if [[ -f ${TOTAL_FEATURE_FILE} ]]; then
+  FEATURE_COUNT=0
+  # -u option has been introduced to have read use a different file descriptor. 
+  # 10 is just an arbitrary file number picked. 0, 1, and 2 have defined meanings, and typically opening files will start from the first available number. 10 is thus high enough to stay out of the way.
+  while read -u 10 eachFeature; do
+    if [ -z "$eachFeature" ] ; then
+      continue
+    fi
+    cxcNum=`$ECHO $eachFeature | $NAWK -F"::" '{print $1}'`
+    featureName=`$ECHO $eachFeature | $NAWK -F"::" '{print $2}'`
+    EchoText "----------------------------------------------------------------------"
+    EchoText "Starting to historical restore for feature : $cxcNum : $featureName "
+    EchoText "---------------------------------------------------------------------- \n"
+	
+    if [ -f ${HIST_STAGE} ]; then
+      TECHPACK_LIST=`${DBISQL} @${dwhrep_connection_string} "select distinct v.TECHPACK_NAME from dwhrep.versioning as v, dwhrep.tpactivation as ta where v.versionid = ta.versionid and ta.status = 'ACTIVE' and LICENSENAME like '%$cxcNum%'"`
+      dbErrCode=$?
+      if [ $dbErrCode -ne 0 ]; then
+        EchoDateText "Could not retrieve TECHPACK informations from REDPDB. Exiting with error code: $dbErrCode"
+		
+        abort_script "historical" $dbErrCode
+      else
+        TECHPACK_LIST=`$ECHO "${TECHPACK_LIST}" | $SED -e '1,/\-\-/d' -e '/ rows/,$d' | $SED '/^$/d' | $TR -d ' '`
+        if [[ ! -z "${TECHPACK_LIST}" ]]; then
+          EchoDateText "List of TECHPACKS:"
+          EchoText "${TECHPACK_LIST}"
+          #Run storageTimeUpdate action
+          erbsCombinedRequired=1
+          wcdmaCombinedRequired=1
+          for eachTechpack in $TECHPACK_LIST
+		  do
+            execute_DWHM_INSTALL_for_HIST $eachTechpack
+            if [[ "$eachTechpack" = "DC_E_ERBS" ]] || [[ "$eachTechpack" = "DC_E_ERBSG2" ]]; then
+            	erbsCombinedRequired=0
+            fi
+            
+            if [[ "$eachTechpack" = "DC_E_RBS" ]] || [[ "$eachTechpack" = "DC_E_RBSG2" ]]; then
+            	wcdmaCombinedRequired=0
+            fi
+          done
+        else
+          EchoDateText "No TECHPACKS found for this feature."
+        fi
+      fi
+    			 
+      if [ ${erbsCombinedRequired} == 0 ]; then
+        erbscombinedview
+      fi
+      
+      if [ ${wcdmaCombinedRequired} == 0 ]; then
+        wcdmacombinedview
+      fi
+
+   fi
+   
+   let FEATURE_COUNT++
+   
+   #The service restart has been done due to the inefficiency of dwhdb and dwh_reader_1 and dwh_reader_2 to clear the catalogue cache by itself.
+   if [ ${FEATURE_COUNT} -gt ${RESTART_DWHDB_FEATURE} ]; then
+	EchoDateText "${RESTART_DWHDB_FEATURE} features has been restored, restarting the dependent services. "
+	
+	if [ "${_installed_server_type_}" = "stats_coordinator" ]; then
+	  EchoDateText "Stopping dwh_reader service on dwh_reader_2 blade..."
+	  remote_cmd_executor "dwh_reader_2" "${SMF_BIN_DIR}/eniq_service_start_stop.bsh -s dwh_reader -a stop"
+	  if [ $? -ne 0 ]; then
+		EchoDateText "Failed to stop dwh_reader service on dwh_reader_2 blade. Please check the log. Exiting... "
+		abort_script "historical" "7"
+	  fi
+	  EchoDateText "Successfully stopped dwh_reader service on dwh_reader_2 blade..."
+	fi
+	
+	EchoDateText "Putting engine to NoLoads..."
+	remote_cmd_executor "engine" "${BIN_DIR}/engine -e changeProfile NoLoads"
+	if [ $? -ne 0 ]; then
+	  EchoDateText "Failed to put engine to NoLoads on engine blade. Please check the log. Exiting... "
+	  
+	  abort_script "historical" "7"
+	fi
+	  
+	if [ "${_installed_server_type_}" = "stats_coordinator" ]; then
+	  EchoDateText "Stopping the dwh_reader service on dwh_reader_1 blade..."
+	  remote_cmd_executor "dwh_reader_1" "${SMF_BIN_DIR}/eniq_service_start_stop.bsh -s dwh_reader -a stop"
+	  if [ $? -ne 0 ]; then
+		EchoDateText "Failed to stop dwh_reader service on dwh_reader_1 blade. Please check the log. Exiting... "
+		
+		abort_script "historical" "7"
+	  fi
+	  EchoDateText "Successfully stopped dwh_reader service on dwh_reader_1 blade..."
+	fi
+	
+	EchoDateText "Stopping the dwhdb service..."
+	remote_cmd_executor "dwhdb" "${BIN_DIR}/dwhdb stop"
+	if [ $? -ne 0 ]; then
+		EchoDateText "Failed to stop dwhdb service. Please check the log. Exiting... "
+		
+		abort_script "historical" "7"
+	fi
+	EchoDateText "Successfully stopped dwhdb service."
+	
+	#repdb has been put as per the NMI because they have included same in the II and upgrade.
+	EchoDateText "Stopping the repdb service..."
+	remote_cmd_executor "repdb" "${BIN_DIR}/repdb stop"
+	if [ $? -ne 0 ]; then
+		EchoDateText "Failed to stop repdb service. Please check the log. Exiting... "
+		
+		abort_script "historical" "7"
+	fi
+	EchoDateText "Successfully stopped repdb service."
+	
+	EchoDateText "Starting the repdb service..."
+	remote_cmd_executor "repdb" "${BIN_DIR}/repdb start"
+	if [ $? -ne 0 ]; then
+		EchoDateText "Failed to start repdb service on repdb blade. Please check the log. Exiting... "
+		
+		abort_script "historical" "7"
+	fi
+	EchoDateText "Successfully started repdb service."
+	
+	EchoDateText "Starting the dwhdb service..."
+	remote_cmd_executor "dwhdb" "${BIN_DIR}/dwhdb start"
+	if [ $? -ne 0 ]; then
+		EchoDateText "Failed to start dwhdb service on dwhdb blade. Please check the log. Exiting... "
+		
+		abort_script "historical" "7"
+	fi
+	EchoDateText "Successfully started dwhdb service."
+	
+	if [ "${_installed_server_type_}" = "stats_coordinator" ]; then
+	  EchoDateText "Starting the dwh_reader service on dwh_reader_1 blade..."
+	  remote_cmd_executor "dwh_reader_1" "${SMF_BIN_DIR}/eniq_service_start_stop.bsh -s dwh_reader -a start"
+	  if [ $? -ne 0 ]; then
+		EchoDateText "Failed to start dwh_reader service on dwh_reader_1 blade. Please check the log. Exiting... "
+		
+		abort_script "historical" "7"
+	  fi
+	  EchoDateText "Successfully started dwh_reader service on dwh_reader_1 blade..."
+	fi
+	
+	EchoDateText "Putting engine back to Normal..."
+	remote_cmd_executor "engine" "${BIN_DIR}/engine -e changeProfile Normal"
+	if [ $? -ne 0 ]; then
+	  EchoDateText "Failed to put engine back to Normal on engine blade. Please check the log. Exiting... "
+	  
+	  abort_script "historical" "7"
+	fi
+	
+	if [ "${_installed_server_type_}" = "stats_coordinator" ]; then
+	  EchoDateText "Starting dwh_reader service on dwh_reader_2 blade..."
+	  remote_cmd_executor "dwh_reader_2" "${SMF_BIN_DIR}/eniq_service_start_stop.bsh -s dwh_reader -a start"
+	  if [ $? -ne 0 ]; then
+		EchoDateText "Failed to start dwh_reader service on dwh_reader_2 blade. Please check the log. Exiting... "
+		
+		abort_script "historical" "7"
+	  fi
+	  EchoDateText "Successfully started dwh_reader service on dwh_reader_2 blade..."
+	fi
+	
+	FEATURE_COUNT=0
+   fi
+ 
+  done 10< ${TOTAL_FEATURE_FILE}
+fi
+_pending_list_=`$GREP -i "=pending" ${HIST_STAGE} | $NAWK -F"=" '{print $1}'`
+if [[ ! -z ${_pending_list_} ]]; then
+  EchoDateText "Below mentioned TECHPACKS are either CUSTOM TECHPACKS or Standard TECHPACK which need to be re-run."
+  EchoText "${_pending_list_}"
+  EchoDateText "Re-triggering the pending TECHPACKS..."
+  pendingErbscombinedview=1
+  pendingWcdmacombinedview=1
+  
+  for eachTechpack in $_pending_list_;	do
+        execute_DWHM_INSTALL_for_HIST $eachTechpack
+	    if [[ "$eachTechpack" = "DC_E_ERBS" ]] || [[ "$eachTechpack" = "DC_E_ERBSG2" ]]; then
+          pendingErbscombinedview=0
+        fi
+	    if [[ "$eachTechpack" = "DC_E_RBS" ]] || [[ "$eachTechpack" = "DC_E_RBSG2" ]]; then 
+          pendingWcdmacombinedview=0
+        fi
+  done
+  
+  	  if [ ${pendingErbscombinedview} == 0 ]; then
+        erbscombinedview
+      fi
+      
+      if [ ${pendingWcdmacombinedview} == 0 ]; then
+        wcdmacombinedview
+      fi
+fi
+_pending_list_=`$GREP -i "=pending" ${HIST_STAGE} | $NAWK -F"=" '{print $1}'`
+if [[ ! -z ${_pending_list_} ]]; then
+ EchoDateText "Below mentioned TECHPACKS are failed in the historical restore. Please re-trigger the post restore."
+ EchoText "${_pending_list_}"
+ abort_script "historical" 6
+else
+  EchoDateText "Historical restore is completed successful!."
+  EchoDateText "Cleaning up the stage files..."
+  if [ -f ${HIST_STAGE} ]; then
+      $RM ${HIST_STAGE}
+	  ErrCode=$?
+      if [ $ErrCode -ne 0 ]; then
+	    EchoDateText "ERROR while deleting ${HIST_STAGE} file. Please delete the ${HIST_STAGE} file manually.!"
+		
+        abort_script "historical" $ErrCode
+      fi
+  fi
+  if [ -f ${ACTIVE_STAGE} ]; then
+      $RM ${ACTIVE_STAGE}
+	  ErrCode=$?
+      if [ $ErrCode -ne 0 ]; then
+	    EchoDateText "ERROR while deleting ${ACTIVE_STAGE} file. Please delete the ${ACTIVE_STAGE} file manually.!"
+		
+        abort_script "historical" $ErrCode
+      fi
+  fi
+  if [ -f ${ERBSCV_FLAG} ]; then
+      $RM ${ERBSCV_FLAG}
+	  ErrCode=$?
+      if [ $ErrCode -ne 0 ]; then
+	    EchoDateText "ERROR while deleting ${ERBSCV_FLAG} file. Please delete the ${ERBSCV_FLAG} file manually.!"
+		
+        abort_script "historical" $ErrCode
+      fi
+  fi
+  if [ -f ${WCDMACV_FLAG} ]; then
+      $RM ${WCDMACV_FLAG}
+	  ErrCode=$?
+      if [ $ErrCode -ne 0 ]; then
+	    EchoDateText "ERROR while deleting ${ERBSCV_FLAG} file. Please delete the ${ERBSCV_FLAG} file manually.!"
+		
+        abort_script "historical" $ErrCode
+      fi
+  fi
+  EchoDateText "Successful cleaned up all the stage files.!"
+  EchoDateText "Creating the NVU directories as part of afj_manager..."
+  create_dir "/eniq/data/pmdata/NVU/DC_E_STN"
+  create_dir "/eniq/data/pmdata/NVU/DC_E_BSS"
+  create_dir "/eniq/data/pmdata/NVU/DC_E_IMS"
+  create_dir "/eniq/data/pmdata/NVU/DC_E_HSS"
+  create_dir "/eniq/data/pmdata/NVU/DC_E_MTAS"
+  create_dir "/eniq/archive/NVU/DC_E_STN/archive"
+  create_dir "/eniq/archive/NVU/DC_E_BSS/archive"
+  create_dir "/eniq/archive/NVU/DC_E_IMS/archive"
+  create_dir "/eniq/archive/NVU/DC_E_HSS/archive"
+  create_dir "/eniq/archive/NVU/DC_E_MTAS/archive"
+  EchoDateText "Triggering the UpdateFirstLoadings set..."
+  ${BIN_DIR}/engine -e startAndWaitSet "DWH_MONITOR" "UpdateFirstLoadings"
+  if [ $? -ne 0 ]; then
+    EchoDateText "ERROR :: UpdateFirstLoadings set failed... \nPlease re-trigger the UpdateFirstLoadings set from the adminUI..."
+  else
+    EchoDateText "Successfully executed the set UpdateFirstLoadings!."
+  fi
+fi
+
+#Enable the DeltaViewCreation in the scheduler.
+enableCount=0
+UPDATE_MONITORING_SCHEDULE=`scheduler -e enable_schedule DWH_MONITOR TriggerDeltaView`
+#$SLEEP 10
+until [ "${UPDATE_MONITORING_SCHEDULE}" = "Schedule TriggerDeltaView enabled successfully. Please reload scheduler for the changes to take effect." -o "${UPDATE_MONITORING_SCHEDULE}" = "Schedule TriggerDeltaView is already enabled." ]
+  do
+  	if [ $enableCount -eq 3 ]; then
+		EchoDateText "Failed to enable set DeltaViewCreation"
+		
+		exit 5
+	fi
+        $SLEEP 10
+        UPDATE_MONITORING_SCHEDULE=`scheduler -e enable_schedule DWH_MONITOR TriggerDeltaView`
+        EchoDateText "Enabling DeltaViewCreation"
+        enableCount=$((enableCount+1))
+  done
+EchoDateText "Enabled DeltaViewCreation successfully at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+
+enableActivateCount=0
+SCHEDULER_ACTIVATE=`scheduler activate | $GREP "scheduler is running OK"`
+#$SLEEP 10
+until [ "${SCHEDULER_ACTIVATE}" = "scheduler is running OK" ]
+  do
+  	if [ $enableActivateCount -eq 3 ]; then
+		EchoDateText "Failed to Activate Scheduler"
+		
+		exit 5
+	fi
+        $SLEEP 10
+        SCHEDULER_ACTIVATE=`scheduler activate | $GREP "scheduler is running OK"`
+        EchoDateText "Activating scheduler."
+        enableActivateCount=$((enableActivateCount+1))
+  done
+EchoDateText "Activated scheduler successfully at "`$DATE +%Y.%m.%d_%H:%M:%S` 
+
+}
+
+#-----MAIN--PROGRAM--STARTS--HERE-----#
+
+$CLEAR
+
+ErrCode=$?
+if [ $ErrCode -ne 0 ]; then
+  $ECHO "Aborting the restore process as the DBISQL utility is failing with error code- $ErrCode"
+  
+fi
+if [ `${ID} -un` != "dcuser" ]; then
+  EchoDateText "Please execute the restore as dcuser."
+  exit 1
+fi
+
+_engine_ip_address_=`$CAT /etc/hosts |$GREP engine |$NAWK '{print $1}'`
+if [ ! "${_engine_ip_address_}" ]; then
+    EchoDateText "Error: Could not determine ip adress on engine server"
+    exit 1
+fi
+
+_installed_server_type_=`$CAT ${ENIQ_CONF_DIR}/installed_server_type`
+
+if [ ! "${_installed_server_type_}" ]; then
+    EchoDateText "Error: Could not determine which server type this is"
+    exit 1
+fi
+
+_smf_ser_start_stop_=${SMF_BIN_DIR}/eniq_service_start_stop.bsh	
+
+ETLREPUser=`inigetpassword REP -v ETLREPUsername -f ${CONF_DIR}/niq.ini`
+ETLREPPASSWORD=`inigetpassword REP -v ETLREPPassword -f ${CONF_DIR}/niq.ini`
+DWHREPUSER=`inigetpassword REP -v DWHREPUsername -f ${CONF_DIR}/niq.ini`
+DWHREPPASSWORD=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+
+
+dwhrep_connection_string=/var/tmp/encrypt_$$.txt
+etlrep_connection_string=/var/tmp/encrypt2_$$.txt
+
+dwhrep_connection_string_decrypt="-c \"uid=${DWHREPUSER};pwd=${DWHREPPASSWORD};eng=${REP_SERVER_NAME}\" -host localhost -port $REP_PORT -nogui -onerror exit" 
+etlrep_connection_string_decrypt="-c \"uid=${ETLREPUser};pwd=${ETLREPPASSWORD};eng=${REP_SERVER_NAME}\" -host localhost -port $REP_PORT -nogui -onerror exit"
+  
+  get_encrypt_file "${dwhrep_connection_string_decrypt}" "${dwhrep_connection_string}"
+  get_encrypt_file "${etlrep_connection_string_decrypt}" "${etlrep_connection_string}"
+  
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+
+while getopts ":a:" Option
+do
+  case $Option in
+    a) ACTION=`$ECHO $OPTARG | $TR '[:upper:]' '[:lower:]'`
+       [ "${ACTION}" = "active" ] || [ "${ACTION}" = "historical" ] || [ "${ACTION}" = "status" ] || usage
+       ;;
+   \?) usage
+       exit 6
+       ;;
+  esac
+done
+
+create_dir ${RESTORE_LOG_DIR}
+
+if [ "${ACTION}" = "active" ]; then
+  LOGFILE=${RESTORE_LOG_DIR}/restore-active_`$DATE '+%Y%m%d_%H%M%S'`.log
+  active_procedure
+  
+elif [ "${ACTION}" = "historical" ]; then
+  LOGFILE=${RESTORE_LOG_DIR}/restore-historical_`$DATE '+%Y%m%d_%H%M%S'`.log
+  historical_procedure
+  
+elif [ "${ACTION}" = "status" ]; then
+  restore_status
+  
+else
+  usage
+fi
+

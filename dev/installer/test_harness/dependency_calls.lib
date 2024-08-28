@@ -1,0 +1,117 @@
+
+dep_record_file=${INSTALLER_DIR}/test_harness/dependency_record
+
+call_dependency () {
+	echo $1 >> $dep_record_file
+	eval $2
+}
+
+
+call_svcs-a () {
+	call_dependency ${FUNCNAME[0]} "$1" 
+}
+call_svcs-a_controlzoneDifferent () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_dbusersDwh () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_sybaseSetMaxPlans0 () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_change_db_users_perm-lock () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_getActiveIntefaces () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_licmgr () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_engineStatus () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_controlzone_start () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_orderer () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_disableSet () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_schedulerActivate () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_disableSet-alias () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_removeTechPacksInPriorityQueue () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_showSetsInevalutionSlots () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_showSetsInExecutionSlots () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_killRunningSets () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_repdb_backup () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_unzip_tech_pack_file () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_tech_pack_installation () {
+	call_dependency ${FUNCNAME[0]} "$1"
+	#echo "BUILD FAILED" >> ${TP_LOGFILE}
+}
+call_repdb_restore () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_engineReloadProfiles () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_engineReloadConfig () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_enableSet () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_change_db_users_perm-unlock () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_setMaxPlans20 () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+
+#EVENTS Specific
+call_controlzone_start () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_mzsh_startup_ec () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_mzsh_admin_wfgrouplist () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_mzsh_admin_wfgroupdisable () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_mzsh_admin_wfdisable () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_mzsh_admin_wfstop () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_mzsh_admin_wflist () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_ssh () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}
+call_provisioning () {
+	call_dependency ${FUNCNAME[0]} "$1"
+}

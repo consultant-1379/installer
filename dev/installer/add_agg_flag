@@ -1,0 +1,129 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : add_agg_flag
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : ENIQ script for adding AGG_FLAG to relevant tables for techpack in DWHDB database
+# Usage   : add_agg_flag
+# ********************************************************************
+
+if [ -z "${CONF_DIR}" ] ; then
+  echo "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  echo "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 2
+fi
+
+. ${CONF_DIR}/niq.rc
+
+if [ -z "${BIN_DIR}" ] ; then
+  echo "ERROR: BIN_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+if [ -z "$1" ] ; then
+	TECHPACK_NAME=ALL
+	${ECHO} ""
+	${ECHO} "======================================="
+	${ECHO} "No techpack name specified."
+	${ECHO} "This means it will be run for all relevant techpacks."
+	${ECHO} "======================================="
+	${ECHO} ""
+else
+	TECHPACK_NAME=$1
+	${ECHO} ""
+	${ECHO} "======================================="
+	${ECHO} "Running for techpack: '$TECHPACK_NAME'."
+	${ECHO} "======================================="
+	${ECHO} ""
+fi
+
+CPATH="${INSTALLER_DIR}/lib/installer.jar"
+
+DIRS=`${LS} ${PLATFORM_DIR}`
+
+for file in $DIRS
+do
+  if [ -d ${PLATFORM_DIR}/$file/dclib ]
+  then
+    JARS=`${LS} ${PLATFORM_DIR}/$file/dclib/*.jar`
+
+    for jar in $JARS
+    do
+      CPATH="${CPATH}:${jar}"
+    done
+  fi
+done
+
+TIMESTAMP=`${DATE} +%y.%m.%d_%H:%M:%S`
+
+LOGFILE=${LOG_DIR}/add_agg_flag/add_agg_flag_${TIMESTAMP}.log
+
+HSTNAME=`${HOSTNAME}`
+
+if [ ! -d ${LOG_DIR}/add_agg_flag ] ; then
+  ${MKDIR} -p ${LOG_DIR}/add_agg_flag
+fi
+
+${ECHO} "===================================="  | ${TEE} -a ${LOGFILE}
+${ECHO} "Adding AGG_FLAG to relevant tables for techpack(s): '$TECHPACK_NAME' in DWHDB database @ ${HSTNAME}" | ${TEE} -a ${LOGFILE}
+${ECHO} "===================================="  | ${TEE} -a ${LOGFILE}
+
+${ECHO} "Stopping engine" | ${TEE} -a ${LOG_FILE}
+
+${BIN_DIR}/engine stop
+
+STOP_EXIT_STATUS=$?
+
+if [ ${STOP_EXIT_STATUS} -ne 0 ] ; then
+  ${ECHO} "Engine could not be stopped. Aborting script." | ${TEE} -a ${LOG_FILE}
+  exit 43
+else
+  ${ECHO} "Engine has stopped successfully at "`${DATE} +%Y.%m.%d_%H:%M:%S` | ${TEE} -a ${LOG_FILE}
+fi
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+ANT_OPTS="$ANT_OPTS $PF_ANT_OPTS" 
+export ANT_OPTS 
+
+${CD} ${INSTALLER_DIR}; ${RT_DIR}/ant/bin/ant -f ${INSTALLER_DIR}/tasks_install_utils.xml -lib ${CPATH} -Daction=lock -DdbUser=all -DconfigurationDirectory=${CONF_DIR} change_db_users_permissions | ${TEE} -a ${LOGFILE}
+${CD} ${INSTALLER_DIR}; ${RT_DIR}/ant/bin/ant -f ${INSTALLER_DIR}/tasks_add_agg_flag_to_old_techpack.xml -lib ${CPATH} -DconfDirectory=${CONF_DIR} -DtechpackName=${TECHPACK_NAME} addAggFlag | ${TEE} -a ${LOGFILE}
+${CD} ${INSTALLER_DIR}; ${RT_DIR}/ant/bin/ant -f ${INSTALLER_DIR}/tasks_install_utils.xml -lib ${CPATH} -Daction=unlock -DdbUser=all -DconfigurationDirectory=${CONF_DIR} change_db_users_permissions | ${TEE} -a ${LOGFILE}
+
+if [ -f ${LOGFILE} ] ; then
+  SUC=`${CAT} ${LOGFILE} | ${GREP} "BUILD SUCCESSFUL"`
+  if [ ! -z "${SUC}" ] ; then
+    ${ECHO} "===================================="  | ${TEE} -a ${LOGFILE}
+    ${ECHO} "Successfully added AGG_FLAG to relevant techpacks in DWHDB database"  | ${TEE} -a ${LOGFILE}
+    ${ECHO} "===================================="  | ${TEE} -a ${LOGFILE}
+  else
+    ${ECHO} "============================="  | ${TEE} -a ${LOGFILE}
+    ${ECHO} "Adding AGG_FLAG to relevant techpacks in DWHDB database failed"  | ${TEE} -a ${LOGFILE}
+    ${ECHO} "============================="  | ${TEE} -a ${LOGFILE}
+  fi
+fi

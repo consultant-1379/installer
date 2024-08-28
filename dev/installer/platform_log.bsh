@@ -1,0 +1,262 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# Copyright (c) Ericsson Radio Systems AB 1999-2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : platform_log.sh
+# Date    : 22/10/2018
+# Purpose : Data Collection Script (Used for collecting logs from server for analysis)
+# Usage   : platform_log.sh <YYYY_MM_DD>
+#
+# ********************************************************************
+#
+#       Configuration Section
+#
+# ********************************************************************
+ENIQ_BASE_DIR=/eniq
+CONF_DIR=${ENIQ_BASE_DIR}/sw/conf
+HOSTS=/etc/hosts
+DWHDB_LOGS=/eniq/local_logs/iq
+
+if [ -s ${CONF_DIR}/niq.rc ]; then
+    . ${CONF_DIR}/niq.rc
+else
+	echo "Could not find ${CONF_DIR}/niq.rc"
+    exit 1
+fi
+
+if [ -z "${BIN_DIR}" ] ; then
+	echo "ERROR: BIN_DIR is not set"
+	exit 2
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+	echo "File ${BIN_DIR}/common_variables.lib not found"
+	exit 3
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+CURR_SERVER_TYPE=`${CAT} /eniq/installation/config/installed_server_type | $GEGREP -v '^[[:blank:]]*#' | $SED -e 's/ //g'`
+ENGINE_LOG=${LOG_DIR}/engine
+SCHEDULER_LOG=${LOG_DIR}/scheduler
+DIR=`${PWD}`
+LOG_FILE=${DIR}/platform_log.log
+
+if [ -f $LOG_FILE ];then
+	${RM} $LOG_FILE
+fi
+touch ${LOG_FILE}
+
+# ********************************************************************
+#
+#       functions
+#
+# ********************************************************************
+abort_script(){
+	${ECHO} "Script aborting..." | ${TEE} -a ${LOG_FILE}
+	${ECHO} $* | ${TEE} -a ${LOG_FILE}
+	exit $1
+}
+
+copy (){
+if [ -f $1 ]; then
+	${ECHO} "Log $1 copied" | ${TEE} -a ${LOG_FILE}
+	${CP} $1 $2
+else
+	${ECHO} "Log $1 not available" | ${TEE} -a ${LOG_FILE}
+fi
+}
+
+engine_logs(){
+	copy $ENGINE_LOG/engine-$LOG_DATE.log $LOCAL_LOG_DIR/CO
+	copy $ENGINE_LOG/error-$LOG_DATE.log $LOCAL_LOG_DIR/CO
+	copy $ENGINE_LOG/file-$LOG_DATE.log $LOCAL_LOG_DIR/CO
+	copy $ENGINE_LOG/start_engine_$NEWDATE*.log $LOCAL_LOG_DIR/CO
+	copy $ENGINE_LOG/stop_engine_$NEWDATE*.log $LOCAL_LOG_DIR/CO
+	copy $ENGINE_LOG/start_webserver_$NEWDATE*.log $LOCAL_LOG_DIR/CO
+	copy $ENGINE_LOG/stop_webserver_$NEWDATE*.log $LOCAL_LOG_DIR/CO
+}
+
+scheduler_logs(){
+	copy $SCHEDULER_LOG/scheduler-*$LOG_DATE.log $LOCAL_LOG_DIR/CO
+	copy $SCHEDULER_LOG/start_scheduler_$NEWDATE*.log $LOCAL_LOG_DIR/CO
+	copy $SCHEDULER_LOG/stop_scheduler_$NEWDATE*.log $LOCAL_LOG_DIR/CO
+	copy $SCHEDULER_LOG/error-*$LOG_DATE.log $LOCAL_LOG_DIR/CO
+}
+
+svc_logs(){
+	${ECHO} "Collecting $1 Systemd logs..." | ${TEE} -a ${LOG_FILE}
+	${JOURNALCTL} -u eniq-rmiregistry.service > /var/log/eniq-rmiregistry.log
+	${JOURNALCTL} -u licensing-sentinel.service > /var/log/licensing-sentinel.log
+	${JOURNALCTL} -u eniq-licmgr.service > /var/log/eniq-licmgr.log
+	${JOURNALCTL} -u eniq-repdb.service > /var/log/eniq-repdb.log
+	${JOURNALCTL} -u eniq-dwhdb.service > /var/log/eniq-dwhdb.log
+	${JOURNALCTL} -u eniq-webserver.service > /var/log/eniq-webserver.log
+	${JOURNALCTL} -u eniq-engine.service > /var/log/eniq-engine.log
+	${JOURNALCTL} -u eniq-scheduler.service > /var/log/eniq-scheduler.log
+	${JOURNALCTL} -u NASd.service > /var/log/NASd.log
+	${JOURNALCTL} -u NAS-online.service > /var/log/NAS-online.log
+	#${JOURNALCTL} -u ddc.service > /var/log/ddc.log
+		
+	BLADE=`${CAT} ${HOSTS} | ${GREP} -i $1 | $NAWK -F" " '{print $2}'` >> ${LOG_FILE}
+	$SCP -p root@$BLADE:/var/log/eniq-* $LOCAL_LOG_DIR/$2 >> ${LOG_FILE}
+	$SCP -p root@$BLADE:/var/log/licensing-* $LOCAL_LOG_DIR/$2 >> ${LOG_FILE}
+	$SCP -p root@$BLADE:/var/log/NAS* $LOCAL_LOG_DIR/$2 >> ${LOG_FILE}
+	#$SCP -p root@$BLADE:/var/log/ddc* $LOCAL_LOG_DIR/$2 >> ${LOG_FILE}
+}
+
+dwhdb_logs_co(){
+	${ECHO} "Collecting IQ logs from COOR..." | ${TEE} -a ${LOG_FILE}
+	LOG_DATE=${MONTH}/${DAY}
+	if ls $DWHDB_LOGS/dwhdb.iqmsg* > /dev/null 2>&1; then
+		for FILE in $DWHDB_LOGS/dwhdb.iqmsg*
+		do
+				LIST=`${CAT} $FILE | ${GREP} "$LOG_DATE " | ${WC} -l` >> ${LOG_FILE}
+				if [ $LIST != 0 ];then
+					copy $FILE $LOCAL_LOG_DIR/CO | ${TEE} -a ${LOG_FILE}
+				fi
+		done
+	fi
+}
+
+dwhdb_logs_rd(){
+	${ECHO} "Collecting IQ logs from $1 ..." | ${TEE} -a ${LOG_FILE}
+	RE=`${CAT} ${HOSTS} | ${GREP} -i $1 | $NAWK -F" " '{print $2}'` >> ${LOG_FILE}
+	$SCP -p root@$RE:$DWHDB_LOGS/$1.iqmsg* $LOCAL_LOG_DIR/$2 >> ${LOG_FILE}
+	LOG_DATE=${MONTH}/${DAY}
+	if ls $LOCAL_LOG_DIR/RE/$1.iqmsg* > /dev/null 2>&1; then
+		for FILE in $LOCAL_LOG_DIR/RE/$1.iqmsg*
+		do
+				LIST=`${CAT} $FILE | ${GREP} "$LOG_DATE " | ${WC} -l` >> ${LOG_FILE}
+				if [ $LIST == 0 ];then
+				${RM} $FILE  | ${TEE} -a ${LOG_FILE}
+				fi
+		done
+	fi
+}
+
+NASd_logs(){
+	${ECHO} "Collecting $1 NASd logs..." | ${TEE} -a ${LOG_FILE}
+	BLADE=`${CAT} ${HOSTS} | ${GREP} -i $1 | $NAWK -F" " '{print $2}'` >> ${LOG_FILE}
+	$SCP -p root@$BLADE:/eniq/local_logs/NASd/* $LOCAL_LOG_DIR/$2 >> ${LOG_FILE}
+}
+
+# ********************************************************************
+#
+# 	Main body of program
+#
+# ********************************************************************
+
+if [ ${LOGNAME} != "root" ] ; then
+    abort_script 32 "This script has to be run as 'root'. You are currently logged in as '${LOGNAME}'"
+fi
+
+LOG_DATE=$1
+YEAR=`${ECHO} $LOG_DATE | ${CUT} -d"_" -f1`
+MONTH=`${ECHO} $LOG_DATE | ${CUT} -d"_" -f2`
+if [ ${MONTH} -gt 12 ]; then
+    abort_script 40 "Not a valid Month.."
+fi
+
+DAY=`${ECHO} $LOG_DATE | ${CUT} -d"_" -f3`
+if [ $DAY -gt 31 ]; then
+    abort_script 41 "Not a valid ${LOG_DATE}..."
+fi
+
+NEWYEAR=`${DATE} --date=$YEAR-$MONTH-$DAY '+%y'`
+NEWDATE=${NEWYEAR}${MONTH}${DAY}
+
+${ECHO} "Are you ready to proceed with $LOG_DATE? (YES/no)" | ${TEE} -a ${LOG_FILE}
+read -e option
+option=`${ECHO} $option | tr "[:lower:]" "[:upper:]"`
+if [ "${option}" != "YES" ] ; then
+    abort_script 35 "Not ready to proceed..."
+fi
+
+	
+LOCAL_LOG_DIR=$DIR/$LOG_DATE
+if [ -f $LOCAL_LOG_DIR.${TAR}* ];then
+	${RM} $LOCAL_LOG_DIR.${TAR}*
+fi
+if [ -d $LOCAL_LOG_DIR ];then
+	${RM} -rf $LOCAL_LOG_DIR
+fi
+
+if [ ${CURR_SERVER_TYPE} == "eniq_stats" ] ; then
+        ${ECHO} "Single Blade"  | ${TEE} -a ${LOG_FILE}
+  		${MKDIR} -p $LOCAL_LOG_DIR
+		${MKDIR} -p $LOCAL_LOG_DIR/CO
+else
+        ${ECHO} "Multi Blade"  | ${TEE} -a ${LOG_FILE}
+  		${MKDIR} -p $LOCAL_LOG_DIR
+		${MKDIR} -p $LOCAL_LOG_DIR/CO
+		${MKDIR} -p $LOCAL_LOG_DIR/EN
+		${MKDIR} -p $LOCAL_LOG_DIR/RD1
+		${MKDIR} -p $LOCAL_LOG_DIR/RD2
+fi
+
+${ECHO} "=============Collecting engine logs=============" | ${TEE} -a ${LOG_FILE}
+engine_logs
+${ECHO} "Engine logs collected." | ${TEE} -a ${LOG_FILE}
+
+${ECHO} "=============Collecting scheduler logs=============" | ${TEE} -a ${LOG_FILE}
+scheduler_logs
+${ECHO} "Scheduler logs collected." | ${TEE} -a ${LOG_FILE}
+
+${ECHO} "=============Collecting systemd logs=============" | ${TEE} -a ${LOG_FILE}
+if [ ${CURR_SERVER_TYPE} == "eniq_stats" ]; then	
+	svc_logs dwhdb CO
+else
+	svc_logs dwhdb CO
+	svc_logs engine EN
+	svc_logs dwh_reader_1 RD1
+	svc_logs dwh_reader_2 RD2
+fi
+${ECHO} "systemd logs collected." | tee -a ${LOG_FILE}
+
+
+${ECHO} "=============Collecting IQ logs=============" | ${TEE} -a ${LOG_FILE}
+if [ ${CURR_SERVER_TYPE} == "eniq_stats" ]; then
+	dwhdb_logs_co
+else
+	dwhdb_logs_co
+	dwhdb_logs_rd dwh_reader_1 RD1
+	dwhdb_logs_rd dwh_reader_2 RD2
+fi
+${ECHO} "IQ logs collected." | ${TEE} -a ${LOG_FILE}
+
+${ECHO} "=============Collecting NASd logs=============" | ${TEE} -a ${LOG_FILE}
+if [ ${CURR_SERVER_TYPE} == "eniq_stats" ]; then
+	NASd_logs dwhdb CO
+else
+	NASd_logs dwhdb CO
+	NASd_logs engine EN
+	NASd_logs dwh_reader_1 RD1
+	NASd_logs dwh_reader_2 RD2
+fi
+${ECHO} "NASd logs collected." | ${TEE} -a ${LOG_FILE}
+
+${ECHO} "=============================================" | ${TEE} -a ${LOG_FILE}
+
+copy ${LOG_FILE} $LOCAL_LOG_DIR/
+
+${TAR} cvf $LOCAL_LOG_DIR.tar $LOCAL_LOG_DIR/ >> ${LOG_FILE}
+if [ $? != 0 ];then
+        abort_script 33 "tar operation not successfull.Please run the script again."
+else
+${ECHO} "gzip the tar. Please wait...." | ${TEE} -a ${LOG_FILE}
+${GZIP} $LOCAL_LOG_DIR.tar
+${ECHO} "After sending the $LOCAL_LOG_DIR.tar.gz to requester for analysis please remove $LOCAL_LOG_DIR.tar.gz from the server" | ${TEE} -a ${LOG_FILE}
+fi
+#${RM} -rf $LOCAL_LOG_DIR

@@ -1,0 +1,157 @@
+#!/bin/bash
+# ******************************************************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ******************************************************************************************************
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ******************************************************************************************************
+# Name    		: delete_duplicate_corrective.bsh
+# Date    		: 15/07/2020(dummy date) Last modified 10/05/2023
+# Usage  		: ./delete_duplicate_corrective.bsh 
+# Created By	        :  Soundarya
+# ******************************************************************************************************
+#
+# Command Section
+#
+# ******************************************************************************************************
+
+INSTALLER_DIR=/eniq/sw/installer
+IQ_DIR=/eniq/sybase_iq
+DATE=/usr/bin/date
+HOME_DIR=/eniq/local_logs/iq
+STARTTIMESTAMP=`$DATE '+%y%m%d_%H%M%S'`
+
+CONF_DIR=/eniq/sw/conf
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+        echo "Could not find /eniq/admin/lib/common_functions.lib"
+        exit 1
+fi
+
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $dwhdb_connection_string ]; then
+  $RM -f $dwhdb_connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $dwhdb_connection_string"
+  fi
+fi
+}
+trap remove_connection_string EXIT
+
+
+DWHDBPASSWORD=`inigetpassword DWH -v DCPassword -f ${CONF_DIR}/niq.ini`
+DWH_SERVER_NAME=`inigetpassword DWH -v ServerName -f ${CONF_DIR}/niq.ini`
+DWHDB_PORT=`inigetpassword DWH -v PortNumber -f ${CONF_DIR}/niq.ini`
+
+dwhdb_connection_string=/var/tmp/encrypt_$$.txt
+dwhdb_connection_string_decrypt="-nogui -onerror exit -c \"eng=${DWH_SERVER_NAME};links=tcpip{host=${DWH_SERVER_NAME};port=${DWHDB_PORT}};uid=dc;pwd=${DWHDBPASSWORD}\""
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+type get_encrypt_file &>/dev/null && isPresent='true' || isPresent='false'
+if [ ${isPresent} == 'true' ]; then
+  get_encrypt_file "${dwhdb_connection_string_decrypt}" "${dwhdb_connection_string}"
+  DBISQL_DWHDB="${DBISQL} @${dwhdb_connection_string}"
+else
+  DBISQL_DWHDB="${DBISQL} ${dwhdb_connection_string_decrypt}"
+fi
+
+
+#Affected Tables added in the array
+TAB=(DIM_E_LTE_EUREL DIM_E_LTE_EUCELL_CELL DIM_E_LTE_GERANCELLRELATION DIM_E_LTE_ULINTERFERENCEREP DIM_E_LTE_GIGABITETHERNET DIM_E_LTE_ENODEBFUNCTION DIM_E_LTE_UTRANCELLRELATION DIM_E_LTE_SECTORCARRIER DIM_E_LTE_BBPROCESSINGRESOURCE DIM_E_LTE_EUCELL DIM_E_LTE_PAGING DIM_E_LTE_ERBS DIM_E_LTE_FRU DIM_E_LTE_NBIOTCELL DIM_E_LTE_SITE DIM_E_LTE_SITEDST DIM_E_RAN_RBSLOCALCELL DIM_E_RAN_RBSIUBLINK DIM_E_RAN_AAL2AP DIM_E_RAN_ATMTRAFFICDESCRIPTOR DIM_E_RAN_DLCODETL DIM_E_RAN_DLPOWER DIM_E_RAN_ETHERNETSMP DIM_E_RAN_ETHERNETSP DIM_E_RAN_GSMREL DIM_E_RAN_HSDSCH DIM_E_RAN_IPINTERFACE DIM_E_RAN_IURLINK DIM_E_RAN_LAG DIM_E_RAN_RELIABLEPROGRAMUNITER DIM_E_RAN_RNCFUNCTION DIM_E_RAN_RNCIUBLINK DIM_E_RAN_RNCMODULE DIM_E_RAN_SLOT DIM_E_RAN_SUBRACK DIM_E_RAN_UCELL DIM_E_RAN_UPLINKLOAD DIM_E_RAN_UREL DIM_E_RAN_VCLTP DIM_E_RAN_RBS DIM_E_RAN_RBS_BACKOFFDL DIM_E_RAN_RBS_BACKOFFUL DIM_E_RAN_RNC DIM_E_RAN_RNC_PRBS_ASSOCIATION DIM_E_RAN_RNC_RBS_ASSOCIATION DIM_E_RAN_RXI DIM_E_RAN_SITE DIM_E_RAN_SITEDST)
+
+FDN=(EUCELLREL_FDN EUTRANCELL_FDN GERANCELLRELATION_FDN ULINTERFERENCE_FDN GIGABITETHERNET_FDN ENODEB_FDN UTRANCELLRELATION_FDN SECTORCARRIER_FDN BBPROCESSING_FDN EUTRANCELL_FDN PAGING_FDN ERBS_FDN FRU_FDN NBIOTCELL_FDN SITE_FDN SITE_FDN RBSLOCALCELL_FDN IUBLINK_FDN AAL2AP_FDN ATMTRAF_DESC_FDN UCELL_FDN UCELL_FDN ETHERNETSMP_FDN ETHERNETSP_FDN GSMRELATION_FDN HSDSCH_FDN IPINTERFACE_FDN IURLINK_FDN LAG_FDN RPU_FDN RNCFUNCTION_FDN IUBLINK_FDN RNCMODULE_FDN SLOT_FDN SUBRACK_FDN UCELL_FDN UCELL_FDN UTRANRELATION_FDN VCLTP_FDN RBS_FDN RBS_FDN RBS_FDN RNC_FDN RNC_fdn RNC_fdn RXI_FDN SITE_FDN SITE_FDN)
+
+
+tablecount=0
+
+#Creating directory to store the back up G1 data
+mkdir $HOME_DIR/G1_backup_data_${STARTTIMESTAMP}
+chmod 777 $HOME_DIR/G1_backup_data_${STARTTIMESTAMP}
+
+#Iterating the 10 affected tables to remove the Duplicate G1 entries in the Topology tables
+while [ $tablecount -lt 48 ]
+do
+			
+#Taking the back up of the  G1 entries in the Topology tables which will be deleted 
+echo "SELECT * from   ${TAB[$tablecount]} WHERE OSS_ID+${FDN[$tablecount]} IN (SELECT N.OSS_ID+N.${FDN[$tablecount]}
+	FROM  ${TAB[$tablecount]} N,${TAB[$tablecount]} L
+	WHERE
+	SUBSTRING(N.${FDN[$tablecount]}, 1, CHARINDEX(',ManagedElement',N.${FDN[$tablecount]})-1) =
+	SUBSTRING(L.${FDN[$tablecount]}, 1, CHARINDEX(',ManagedElement', L.${FDN[$tablecount]})-1)
+	AND
+	N.${FDN[$tablecount]} <> L.${FDN[$tablecount]}
+	AND
+	N.${FDN[$tablecount]} like '%,ManagedElement=1,%'
+	AND
+	L.${FDN[$tablecount]} not like '%,ManagedElement=1,%'
+	AND 
+	N.OSS_ID=L.OSS_ID
+	GROUP BY
+	N.OSS_ID,
+	N.${FDN[$tablecount]},	
+	SUBSTRING(N.${FDN[$tablecount]}, 1, CHARINDEX(',ManagedElement',N.${FDN[$tablecount]})-1))" > $INSTALLER_DIR/query1.txt
+	
+echo "Saving backup of G1 entries of  ${TAB[$tablecount]} " 
+${DBISQL_DWHDB} ${INSTALLER_DIR}/query1.txt | grep "[0-9]"  > $HOME_DIR/G1_backup_data_${STARTTIMESTAMP}/${TAB[$tablecount]}.txt
+echo "Done saving of G1 entries of ${TAB[$tablecount]} "
+echo "-----------------------------------------------"
+
+#Storing the delete query in temporary file
+ echo " DELETE FROM  ${TAB[$tablecount]} WHERE OSS_ID+${FDN[$tablecount]} IN (SELECT N.OSS_ID+N.${FDN[$tablecount]}
+	FROM  ${TAB[$tablecount]} N,${TAB[$tablecount]} L
+	WHERE
+	SUBSTRING(N.${FDN[$tablecount]}, 1, CHARINDEX(',ManagedElement',N.${FDN[$tablecount]})-1) =
+	SUBSTRING(L.${FDN[$tablecount]}, 1, CHARINDEX(',ManagedElement', L.${FDN[$tablecount]})-1)
+	AND
+	N.${FDN[$tablecount]} <> L.${FDN[$tablecount]}
+	AND
+	N.${FDN[$tablecount]} like '%,ManagedElement=1,%'
+	AND
+	L.${FDN[$tablecount]} not like '%,ManagedElement=1,%'
+	AND 
+	N.OSS_ID=L.OSS_ID
+	GROUP BY
+	N.OSS_ID,
+	N.${FDN[$tablecount]},	
+	SUBSTRING(N.${FDN[$tablecount]}, 1, CHARINDEX(',ManagedElement',N.${FDN[$tablecount]})-1))" > $INSTALLER_DIR/query.txt
+
+  
+ echo "Deleting duplicate G1 entries in  ${TAB[$tablecount]} " 
+ #Executing the query in Database
+ ${DBISQL_DWHDB} ${INSTALLER_DIR}/query.txt | grep "[0-9]"
+  
+ echo "Done deletion for ${TAB[$tablecount]} " 
+ echo "---------------------------------------------------" 
+ tablecount=`expr $tablecount + 1`
+ 
+done
+	
+#Cleanup steps
+rm -rf query.txt query1.txt

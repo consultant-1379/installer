@@ -1,0 +1,144 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2016 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied .
+#
+# ********************************************************************
+# Name    : scheduler_check.bsh
+# Purpose : Script checks when scheduler log file was last updated.
+#
+# Usage   : bash scheduler_check.bsh
+#
+# ********************************************************************
+#
+#   Command Section
+#
+# ********************************************************************
+
+AWK=/usr/bin/awk
+BASH=/usr/bin/bash
+DATE=/usr/bin/date
+ECHO=/usr/bin/echo
+GREP=/usr/bin/grep
+LS=/usr/bin/ls
+RM=/usr/bin/rm
+SVCS=/usr/bin/svcs
+TOUCH=/usr/bin/touch
+
+
+LOG_DIR=/eniq/log/sw_log
+export LOG_DIR
+
+LOGPATH=$LOG_DIR/scheduler
+export LOGPATH
+
+LOG_FILE=$LOG_DIR/scheduler/scheduler_check-`$DATE +%Y_%m_%d`.log
+export LOG_FILE
+
+INSTALLER_DIR=/eniq/sw/installer
+export INSTALLER_DIR
+
+SCRIPT_PATH=/eniq/admin/bin
+export SCRIPT_PATH
+
+SW_BIN=/eniq/sw/bin
+export SW_BIN
+
+VERSION_DIR=/eniq/admin/version
+export VERSION_DIR
+
+TEMP_DIR=/tmp
+export TEMP_DIR
+
+CONF_DIR=/eniq/sw/conf
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+        echo "Could not find /eniq/admin/lib/common_functions.lib"
+        exit 1
+fi
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $connection_string ]; then
+  $RM -f $connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string"
+  fi
+fi
+}
+
+trap remove_connection_string EXIT
+
+DWHDBPASSWORD=`inigetpassword DWH -v DCPassword -f ${CONF_DIR}/niq.ini`
+DWHDB_PORT=`inigetpassword DWH -v PortNumber -f ${CONF_DIR}/niq.ini`
+DWH_SERVER_NAME=`inigetpassword DWH -v ServerName -f ${CONF_DIR}/niq.ini`
+connection_string=/var/tmp/encrypt_$$.txt
+connection_string_decrypt="-nogui -c \"eng=${DWH_SERVER_NAME};links=tcpip{host=${DWH_SERVER_NAME};port=${DWHDB_PORT}};uid=dc;pwd=${DWHDBPASSWORD}\""
+
+get_encrypt_file "${connection_string_decrypt}" "${connection_string}"
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+execute(){
+cd $LOGPATH
+log_time=`ls -lrth scheduler-* | tail -1 | $AWK '{print $6,$7,$8,$9}'`
+log_filename=`$ECHO $log_time | cut -d " " -f4`
+log_date=`$ECHO $log_time | cut -d "-" -f2 | cut -d "." -f1 | sed 's/\_/-/g'`
+log_time=`$ECHO $log_time | cut -d " " -f3`
+
+#Determines when the Scheduler log was last modified
+	${DBISQL} @${connection_string} "select datediff(mi,'$log_date $log_time',getdate());OUTPUT TO $TEMP_DIR/timediff.txt"
+time_diff=$(head -n 1 $TEMP_DIR/timediff.txt)
+	$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : $log_filename was last updated $time_diff minutes back" >> ${LOG_FILE}
+	if [ $time_diff -ge 20 ]; then
+		$TOUCH $TEMP_DIR/temp.txt
+		$ECHO "Collecting logs before restarting engine, repdb and scheduler..." >> ${LOG_FILE}
+		$BASH ${INSTALLER_DIR}/runtime_log.bsh
+		$ECHO "Restarting engine, repdb and scheduler..." >> ${LOG_FILE}
+		$BASH ${SCRIPT_PATH}/ServiceRestart.bsh
+		$RM -rf $TEMP_DIR/temp.txt
+		$RM -rf $TEMP_DIR/timediff.txt
+	fi
+}
+
+#-------------------------------------------Execution starts here----------------------------- 
+
+engine_status=`ssh dcuser@engine  ". ~/.profile; engine status" | $GREP "engine is running OK"`
+repdb_status=`ssh dcuser@repdb  ". ~/.profile; repdb status" | $GREP "repdb is running OK"`
+scheduler_active=`ssh dcuser@scheduler  ". ~/.profile; scheduler status" | $GREP -i "active"`
+jumpstart_flag=`ssh dcuser@scheduler  ". ~/.profile; systemctl -t service | $GREP -i eniq"`
+if [ ! -e $TEMP_DIR/temp.txt ] && [ -e $VERSION_DIR/eniq_status ]; then
+	if [ "$scheduler_active" ] && [ "$engine_status" == "engine is running OK" ] && [ "$repdb_status" == "repdb is running OK" ] && [ "$jumpstart_flag" != "" ] && [ ! -e $INSTALLER_DIR/install_lockfile ]; then
+		execute
+	else
+		$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : scheduler,engine or repdb is offline. Please check their status" >> ${LOG_FILE}
+	fi
+else
+		$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Restarting of services still going on ... or jumpstart going on.. " >> ${LOG_FILE}
+fi
+

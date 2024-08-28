@@ -1,0 +1,343 @@
+#!/usr/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2017- All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied .
+#
+# ********************************************************************
+# Name    : count_repbd_dwhdb_conn.sh
+# Revision: main/at_eniq/1
+# Purpose : This script will count the most recently-prepared SQL  
+# statement for each connection to the specified database on the server. 
+# The script will save data for each min.
+#
+# Usage   : count_repbd_dwhdb_conn.sh -h <hours>
+# ********************************************************************
+# Subrata Bhowmick (subrata.bhowmick@wipro.com)
+# ********************************************************************
+. /eniq/home/dcuser/.profile
+
+DWHDB_DIR=/eniq/log/sw_log/iq/dwhdb
+
+if [ -z "${CONF_DIR}" ] ; then
+  echo "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  echo "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 2
+fi
+
+. ${CONF_DIR}/niq.rc
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+    echo "Could not find /eniq/admin/lib/common_functions.lib"
+    exit 1
+fi
+
+if [ -z "${BIN_DIR}" ] ; then
+  echo "ERROR: BIN_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+_date_=`$DATE '+%Y-%m-%d'`
+
+_day_no=`$DATE +%d`
+_time=`$DATE '+%T'`
+_time_temp="01:00:00"
+
+
+LOGSFILE=${DWHDB_DIR}/logscheck.log
+export LOGSFILE
+
+SYBASE=/eniq/sybase_iq
+export SYBASE
+
+SQLANY=/eniq/sql_anywhere
+export SQLANY
+
+
+. ${SYBASE}/IQ.sh
+
+# Internal directory variable
+
+CONF_DIR=/eniq/sw/conf
+export CONF_DIR
+
+BIN_DIR=/eniq/sw/bin
+export BIN_DIR
+
+RT_DIR=/eniq/sw/runtime
+export RT_DIR
+
+# ASN.1 library stuff
+OSS_ASN1_JAVA="${RT_DIR}/nokalva/asn1pjav/solaris.tgt/3.0"
+export OSS_ASN1_JAVA
+
+OSSINFO=${OSS_ASN1_JAVA}
+export OSSINFO
+
+#$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : $$ LogFile initialised" >> ${LOGSFILE}
+##EQEV-103319. New Rack - manage_heap script calling dbisql resulting in high semaphore consumption
+MAX_TIME=5
+PIDFILE=/eniq/home/dcuser/.count_repdb_dwhdb_connPid
+#$ECHO $$ >> ${LOGSFILE}
+if [[ ! -e $PIDFILE ]]; then
+    $TOUCH $PIDFILE
+fi
+if [ ! -f $PIDFILE ]
+then
+  #$ECHO $$ > ${LOGSFILE}
+  #$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Previous instance is running" >> ${LOGSFILE}
+  if [ $? -ne 0 ]
+  then
+    $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Failed to create PID file. count redb,dwhdb con script will not proceed." >> ${LOGSFILE}
+    exit 1
+  fi
+else
+  PID=`$CAT $PIDFILE`  
+  for procid in $PID
+  do
+	 #$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : $procid" >> ${LOGSFILE}
+     $PS -p $procid > /dev/null
+     if [ $? -eq 0 ]
+     then
+       psetime=`$PS -o etime= -p $procid|tr -d " "`
+       if [ ! -z $psetime ]
+       then
+          #$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : $psetime and $procid" >> ${LOGSFILE}
+          psmin=$($ECHO $psetime|awk -F":" '{print $1}')
+          psminint=$(($psmin+0))
+          if [ $psminint -ge $MAX_TIME ]
+          then
+             $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Count_repdb_dwhdb_conn, Previous process is already running with PID $procid for more than $MAX_TIME minutes. Killing the previous process with PID $procid" >> ${LOGSFILE}
+             $KILL -9 $procid > /dev/null
+             $ECHO "$($GREP -v $procid $PIDFILE)" > $PIDFILE
+	      else
+		     $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Count_repdb_dwhdb_conn, Previous process is already running with PID $procid for less than $MAX_TIME minutes. Exiting the current instance with PID $$" >> ${LOGSFILE}
+             $ECHO "$($GREP -v $$ $PIDFILE)" > $PIDFILE
+			 exit 1
+          fi
+       fi
+     else
+        $ECHO "$($GREP -v $procid $PIDFILE)" > $PIDFILE
+        perl -i -n -e "print if /\S/" $PIDFILE
+     fi
+  done
+  $ECHO $$ >> $PIDFILE
+  if [ $? -ne 0 ]
+  then
+    $ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Could not create PID file" >> ${LOGSFILE}
+    exit 1
+  fi
+fi
+
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $dc_connection_string ]; then
+  $RM -f $dc_connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $dc_connection_string"
+  fi
+fi
+
+if [ -f $dba_connection_string ]; then
+  $RM -f $dba_connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $dba_connection_string"
+  fi
+fi
+
+}
+trap remove_connection_string EXIT
+
+
+DCPASSWORD=`inigetpassword DWH -v DCPassword -f ${CONF_DIR}/niq.ini`
+DBAPASSWORD=`inigetpassword DB -f ${CONF_DIR}/niq.ini -v DBAPassword`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+
+dc_connection_string=/var/tmp/encrypt_$$.txt
+dba_connection_string=/var/tmp/encrypt2_$$.txt
+dc_connection_string_decrypt="-c \"UID=dc;PWD=$DCPASSWORD\" -host localhost -port 2640 -onerror exit -nogui"
+dba_connection_string_decrypt="-c \"eng=${REP_SERVER_NAME};links=tcpip{host=${REP_SERVER_NAME};port=${REP_PORT}};uid=dba;pwd=${DBAPASSWORD}\" -onerror exit -nogui"
+get_encrypt_file "${dc_connection_string_decrypt}" "${dc_connection_string}"
+get_encrypt_file "${dba_connection_string_decrypt}" "${dba_connection_string}"
+
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+
+
+
+# Path extension
+PATH=${PATH}:${OSS_ASN1_JAVA}:/usr/local/bin:${BIN_DIR}
+export PATH
+
+LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${OSS_ASN1_JAVA}/lib:${SQLANY}/lib64
+export LD_LIBRARY_PATH
+
+
+if [ -z "${CONF_DIR}" ] ; then
+  $ECHO "ERROR: CONF_DIR is not set"
+  
+  exit 1
+fi
+
+. ${CONF_DIR}/niq.rc
+
+_dir_=`$DIRNAME $0`
+SCRIPTHOME=`$CD $_dir_ 2>/dev/null && $PWD || $ECHO $_dir_`
+
+
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+CPATH="${PLATFORM_DIR}"
+
+DIRS=`$LS ${PLATFORM_DIR}`
+
+for file in ${DIRS}
+do
+  if [ -d ${PLATFORM_DIR}/${file}/dclib ]
+  then
+    JARS=`$LS ${PLATFORM_DIR}/${file}/dclib/*.jar`
+
+    for jar in ${JARS}
+    do
+      CPATH="${CPATH}:${jar}"
+    done
+  fi
+done
+
+#
+# check we are dcuser...
+#
+if [ ${LOGNAME} != "dcuser" ] ; then
+    $ECHO ""
+    $ECHO "This script has to be run as 'dcuser'. You are currently logged in as '${LOGNAME}'"
+    $ECHO "Migration script aborting..."
+	
+    exit 32
+fi
+
+#
+# log file name
+#
+HOSTNAME=`$HOSTNAME`
+LOGFILE="/var/tmp/serverspeed"$HOSTNAME".log"
+
+#Check and abort script if more than one instance of script is running
+status=`$PS -aef | $GREP $0 | $GREP -v grep |wc -l`
+if [ $status -gt 5 ]; then
+    $ECHO "[`date`] : count_repdb_dwhdb_conn.bsh  : $status processes already running.Exiting" >> $LOGFILE
+    exit 10
+fi
+#
+# check sql out-put
+#
+check_sqlout() {
+
+SQLOUTFILE=$1
+
+ERRORMSG=`$CAT $SQLOUTFILE | $GREP -v "already exists" | $EGREP -i "command not found|SQL Anywhere Error|CT-LIBRARY error"`
+ERRORCODE=`$CAT $SQLOUTFILE | $GREP -v "already exists" | $EGREP -i "command not found|SQL Anywhere Error|CT-LIBRARY error" | $WC -l | $NAWK '{print $1}'`
+
+if [ "$ERRORCODE" != 0 ]; then
+   $ECHO "Error ! $ERRORMSG"
+   $ECHO "For more error details please check the log file : $LOGFILE"
+   $CAT "Error ! " >> ${LOGFILE}
+   $CAT $SQLOUTFILE >> ${LOGFILE}
+   
+   exit 32
+fi
+}
+
+# ********************************************************************
+#
+#   Main body of program
+#
+# ********************************************************************
+#
+$ECHO "Log file : $LOGFILE " 2>&1 > ${LOGFILE}
+
+# create temporary table to keep record 
+# - if required table "dwh_repdb_count" already present it will not create again
+# - if the table is not present but script is not able to create the table it will throw an error and exit
+${DBISQL} @${dc_connection_string} /eniq/sw/bin/create_rep_dwh_temp.sql > /tmp/tablecreated.txt 
+check_sqlout /tmp/tablecreated.txt
+
+
+
+
+	# check no of repdb connection at present
+	REPDB=`${DBISQL} @${dba_connection_string} /eniq/sw/bin/count_repdb_conn.sql | $GREP 'insert into'`
+	$ECHO $REPDB >  /tmp/insertdata.sql
+	$ECHO "go" >> /tmp/insertdata.sql
+	check_sqlout /tmp/insertdata.sql
+	
+	$ECHO $REPDB >> /eniq/log/sw_log/engine/repdbCount-$_date_.log 
+
+	# check no of dwhdb connection at present
+	DWHDB=`${DBISQL} @${dba_connection_string} /eniq/sw/bin/count_dwhdb_conn.sql | $GREP 'insert into'`
+	$ECHO $DWHDB >> /tmp/insertdata.sql
+	$ECHO "go" >> /tmp/insertdata.sql
+	check_sqlout /tmp/insertdata.sql
+	
+	$ECHO $DWHDB >> /eniq/log/sw_log/engine/dwhdbCount-$_date_.log
+
+	# insert the data into temp table
+	${DBISQL} @${dc_connection_string} /tmp/insertdata.sql > /tmp/tableinserted.txt
+	if [[ !($? -eq 0) ]]; then
+		$ECHO "Unable to update dwhdb and repdb count" >> ${LOGFILE}
+	fi
+	check_sqlout /tmp/tableinserted.txt
+
+	#Deleting data older than 2 years from "DC.dwh_repdb_count"
+	if [ $_day_no -eq 07 ] || [ $_day_no -eq 14 ] || [ $_day_no -eq 21 ] || [ $_day_no -eq 28 ] && [ "$_time" == "$_time_temp" ];then
+		${DBISQL} @${dc_connection_string} "SELECT count(*) FROM DC.dwh_repdb_count WHERE EXECUTION_DATE<dateadd(year, -2, NOW());output to ${DWHDB_DIR}/count1.txt"
+		read count < ${DWHDB_DIR}/count1.txt
+		if [[ count > 0 ]];then
+			$ECHO "`$DATE '+%Y_%m_%d_%H:%M:%S'` : Data older than 2 years are deleted from DC.dwh_repdb_count" >> ${LOGSFILE}
+		fi
+		command1="DELETE FROM DC.dwh_repdb_count WHERE EXECUTION_DATE<dateadd(year, -2, NOW())"
+		${DBISQL} @${dc_connection_string} $command1
+	fi
+	
+	$RM -rf ${DWHDB_DIR}/count1.txt
+
+exit 0

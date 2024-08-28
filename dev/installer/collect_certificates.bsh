@@ -1,0 +1,205 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2020 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : collect_certificates.bsh
+# Date    : 22/07/2020
+# Purpose : Collect log files containing certificate expiry details of Windows servers(BIS/OCS/NETAN)
+# ********************************************************************
+
+ECHO=/usr/bin/echo
+
+#Handling log directory and log file.
+LOG_DIR=/eniq/log/sw_log/engine
+if [ ! -d $LOG_DIR ]; then
+        $ECHO "ERROR: $LOG_DIR not found. Aborting script. "
+        exit 3
+fi
+LOG_FILE=$LOG_DIR/collect_certificates_`date '+%Y-%m-%d'`.log
+
+if [ ! -r "/eniq/admin/lib/common_functions.lib" ] ; then
+  $ECHO "ERROR: Source file is not readable at /eniq/admin/lib/common_functions.lib. Aborting script." >> $LOG_FILE
+  exit 3
+fi
+
+. /eniq/admin/lib/common_functions.lib
+
+if [ ! -r "/eniq/sw/bin/common_variables.lib" ] ; then
+  $ECHO "ERROR: Source file is not readable at /eniq/sw/bin/common_variables.lib. Aborting script." >> $LOG_FILE
+  exit 3
+fi
+
+. /eniq/sw/bin/common_variables.lib
+
+#Determining server type
+CURR_SERVER_TYPE=`$CAT /eniq/installation/config/installed_server_type `
+
+if [ ! "${CURR_SERVER_TYPE}" ]; then
+    $ECHO "ERROR: Couldn't determine the server type. Aborting script." >> $LOG_FILE
+	exit 3
+fi
+
+#Check to see if this is running for Stats coord, if not then exit immediately
+if [ "${CURR_SERVER_TYPE}" != "stats_coordinator"  -a "${CURR_SERVER_TYPE}" != "eniq_stats"  ]; then
+		exit 0
+fi
+
+#Check and abort script if more than one instance of script is running
+status=`$PS -aef | $GREP $0 | $GREP -v grep |wc -l`
+if [ $status -gt 5 ]; then
+    $ECHO "[`date`] : collect_certificates.bsh  : $status processes already running.Exiting" >> $LOG_FILE
+    exit 1
+fi
+
+NOW=`date '+%Y-%m-%d_%H.%M.%S'`
+$ECHO "***********************************************************" >> $LOG_FILE
+$ECHO "INFO: $NOW - Certificate collection started. " >> $LOG_FILE
+
+REQUIRED_DATE=`$DATE +%Y%m%d`
+CERTIFICATE_DIR=/eniq/home/dcuser/windows_certificates
+IP_PATH=/eniq/installation/config/windows_server_conf_files
+MOUNT_DIR=/eniq/windows_certificates
+KEYSTORE_PASSWORD=`inigetpassword KEYSTOREPASS -v keyStorePassValue -f /eniq/sw/conf/niq.ini`
+
+CERTIFICATE_EXPIRY_LOG_FILE=/eniq/log/sw_log/engine/Certificate_Expiry_`date '+%Y-%m-%d'`.log
+$ECHO "Deployment::Certificate Alias::Purpose::Certificate Expiry Date::Certificate Expiry(in days)" >> $CERTIFICATE_EXPIRY_LOG_FILE
+
+if [ ! -d ${CERTIFICATE_DIR} ] ; then
+	$ECHO "INFO: $CERTIFICATE_DIR not found. Creating sub-directory windows_certificates inside directory /eniq/home/dcuser. " >> $LOG_FILE
+    $SU - dcuser -c "$MKDIR -p ${CERTIFICATE_DIR}"
+fi
+
+getWindowsDataMountedValue() {
+    IP_ADDRESS=$1
+    MOUNT_PATH=$2
+    WINDOWS_SERVER_TYPE=$3
+	REMOTE_PATH=$4
+	n=0
+    $GREP "${MOUNT_PATH}" /proc/mounts > /dev/null
+    if [ $? -eq 0 ]; then
+		$ECHO "INFO: Unmounting $MOUNT_PATH since entry was found in /proc/mounts. " >> $LOG_FILE
+        $UMOUNT -l ${MOUNT_PATH}
+    fi
+    $GREP "${MOUNT_PATH}" /etc/fstab > /dev/null
+    if [ $? -eq 0 ]; then
+        $SED "/${WINDOWS_SERVER_TYPE}/d" /etc/fstab  > /tmp/tmpfile && $MV /tmp/tmpfile /etc/fstab
+    fi
+    WINDOWS_DATA_MOUNTED=0
+    if [ -d ${MOUNT_PATH} ]; then
+        until [ $n -ge 3 ]
+		do
+			$MOUNT -t nfs ${IP_ADDRESS}:/${REMOTE_PATH} ${MOUNT_PATH} -o ro,soft,vers=3,nosuid,nodev,nordirplus
+			if [ $? -eq 0 ] ; then
+				$ECHO "INFO: Mount successful for $WINDOWS_SERVER_TYPE and mount path is $MOUNT_PATH. " >> $LOG_FILE
+				WINDOWS_DATA_MOUNTED=1
+				break
+			fi
+			$ECHO "INFO: Mount failed for $WINDOWS_SERVER_TYPE and mount path-$MOUNT_PATH. Re-trying again. " >> $LOG_FILE 
+			n=$((n+1)) 
+			sleep 300
+		done
+    else
+		$ECHO "INFO: $MOUNT_PATH not found. Creating sub-directory for $WINDOWS_SERVER_TYPE inside directory /eniq. " >> $LOG_FILE
+        $MKDIR -p ${MOUNT_PATH}
+        until [ $n -ge 3 ]
+		do
+			$MOUNT -t nfs ${IP_ADDRESS}:/${REMOTE_PATH} ${MOUNT_PATH} -o ro,soft,vers=3,nosuid,nodev,nordirplus
+			if [ $? -eq 0 ] ; then
+				$ECHO "INFO: Mount successful for $WINDOWS_SERVER_TYPE and mount path is $MOUNT_PATH. " >> $LOG_FILE
+				WINDOWS_DATA_MOUNTED=1
+				break
+			fi
+			$ECHO "INFO: Mount failed for $WINDOWS_SERVER_TYPE and mount path-$MOUNT_PATH. Re-trying again. " >> $LOG_FILE 
+			n=$((n+1)) 
+			sleep 300
+		done
+    fi
+    $ECHO ${WINDOWS_DATA_MOUNTED}
+}
+
+collectWindowsCertificates() {
+    MOUNT_SUB_DIR=$1
+	WINDOWS_SERVER_TYPE=$2
+	REMOTE_DIR=$3
+	CERTIFICATE_REMOTE_DIR=$4
+	$ECHO "INFO: Will collect windows certificate log file for $WINDOWS_SERVER_TYPE if IP available in path - $IP_PATH. " >> $LOG_FILE
+	WINDOWS_MOUNT_PATH=${MOUNT_DIR}/${MOUNT_SUB_DIR}
+	WINDOWS_SERVER_FILE=`$LS -lrt ${IP_PATH} | $GREP $WINDOWS_SERVER_TYPE | $TR -s ' ' | $CUT -d ' ' -f9`
+    if [ $WINDOWS_SERVER_TYPE == "BIS" ] || [ $WINDOWS_SERVER_TYPE == "NETAN" ]; then
+		WINDOWS_SERVER_IP_ADDRESS=`$ECHO $WINDOWS_SERVER_FILE | $AWK -F "-" '{print $2}'`
+	else
+		WINDOWS_SERVER_IP_ADDRESS=`$ECHO $WINDOWS_SERVER_FILE | $AWK -F "-" '{print $3}'`
+	fi
+	if [ -n "${WINDOWS_SERVER_IP_ADDRESS}" ]; then
+		$ECHO "INFO: IP - $WINDOWS_SERVER_IP_ADDRESS available for $WINDOWS_SERVER_TYPE. Mount path will be $WINDOWS_MOUNT_PATH. " >> $LOG_FILE
+		WINDOWS_DATA_MOUNTED=`getWindowsDataMountedValue $WINDOWS_SERVER_IP_ADDRESS $WINDOWS_MOUNT_PATH $WINDOWS_SERVER_TYPE $REMOTE_DIR`
+		if [ ${WINDOWS_DATA_MOUNTED} -eq 1 ] ; then
+			WINDOWS_CERTIFICATE_LOG_FILE=$($FIND ${WINDOWS_MOUNT_PATH}/${CERTIFICATE_REMOTE_DIR}/ -iname "System_Certificate_Expiry_*" -mtime -7 | $TAIL -1)
+			if [ -n "${WINDOWS_CERTIFICATE_LOG_FILE}" ]; then
+				$ECHO "INFO: Certificate log file found - $WINDOWS_CERTIFICATE_LOG_FILE. File will be copied to local directory.  " >> $LOG_FILE
+				if [ ! -d ${CERTIFICATE_DIR}/${WINDOWS_SERVER_FILE} ] ; then
+					$ECHO "INFO: $CERTIFICATE_DIR/$WINDOWS_SERVER_FILE not found. Creating sub-directory $WINDOWS_SERVER_FILE inside directory /eniq/home/dcuser/$CERTIFICATE_DIR. " >> $LOG_FILE
+					$SU - dcuser -c "$MKDIR -p ${CERTIFICATE_DIR}/${WINDOWS_SERVER_FILE}"
+				fi
+				$RM -f ${CERTIFICATE_DIR}/${WINDOWS_SERVER_FILE}/*.tsv
+				$CP $WINDOWS_CERTIFICATE_LOG_FILE ${CERTIFICATE_DIR}/${WINDOWS_SERVER_FILE}
+				if [ $? -eq 0 ] ; then
+					$ECHO "INFO: Certificate log file successfully copied to directory - ${CERTIFICATE_DIR}/${WINDOWS_SERVER_FILE}.  " >> $LOG_FILE
+					$CHOWN dcuser:dc5000 ${CERTIFICATE_DIR}/${WINDOWS_SERVER_FILE}/*
+					$CHMOD 755 ${CERTIFICATE_DIR}/${WINDOWS_SERVER_FILE}/*
+				fi
+			fi
+			$ECHO "INFO: Unmounting $WINDOWS_MOUNT_PATH. " >> $LOG_FILE
+            $UMOUNT -l ${WINDOWS_MOUNT_PATH} > /dev/null
+        fi
+    fi
+}
+
+displayENIQCertificates() {
+	DEPLOYMENT=$1
+	PURPOSE=$2
+	KEYSTORE=$3
+	if [[ -f ${KEYSTORE} ]]; then
+		$ECHO "INFO: Keystore file found - $KEYSTORE. Certificate expiry details will be written in $CERTIFICATE_EXPIRY_LOG_FILE." >> $LOG_FILE 
+		$KEYTOOL -list -v -keystore $KEYSTORE  -storepass $KEYSTORE_PASSWORD | $GREP Alias | $AWK '{print $3}' | while read ALIAS
+		do
+			EXPIRY_DATE_TIME=`$KEYTOOL -list -v -keystore $KEYSTORE  -storepass $KEYSTORE_PASSWORD -alias $ALIAS | $GREP 'Valid from' | $SED 's/.*until: //'`
+			EXPIRY_DATE=$(date -d "${EXPIRY_DATE_TIME}" +%d/%m/%Y)
+			EXPIRY_EPOCH=$(date -d "${EXPIRY_DATE_TIME}" +%s)
+			CURRENT_EPOCH=$(date -d now +%s)
+			EXPIRY_DAYS=$(( (EXPIRY_EPOCH - CURRENT_EPOCH) / 86400 ))
+			$ECHO "$DEPLOYMENT::$ALIAS::$PURPOSE::$EXPIRY_DATE::$EXPIRY_DAYS" >> $CERTIFICATE_EXPIRY_LOG_FILE
+		done
+	else
+		$ECHO "INFO: Keystore file not found - $KEYSTORE." >> $LOG_FILE
+	fi
+}
+
+changeLogfilePermissions() {
+	$CHOWN dcuser:dc5000 $LOG_FILE
+	$CHMOD 755 $LOG_FILE
+	$CHOWN dcuser:dc5000 $CERTIFICATE_EXPIRY_LOG_FILE
+	$CHMOD 755 $CERTIFICATE_EXPIRY_LOG_FILE
+}
+
+######MAIN PROGRAM###
+
+displayENIQCertificates "ENIQ" "AdminUI/AlarmUI" "/eniq/sw/runtime/tomcat/ssl/keystore.jks"
+displayENIQCertificates "ENIQ" "FLS/Alarms" "/eniq/sw/runtime/jdk/jre/lib/security/truststore.ts"
+collectWindowsCertificates "BIS" "BIS" "DDC_logs" "certificate_logs"
+collectWindowsCertificates "OCS/ADDS" "ADDS" "DDC_logs" "certificate_logs"
+collectWindowsCertificates "OCS/CCS" "CCS" "DDC_logs" "certificate_logs"
+collectWindowsCertificates "OCS/VDA" "VDA" "DDC_logs" "certificate_logs"
+collectWindowsCertificates "NETAN" "NETAN" "DDC" "CertificateExpiry"
+changeLogfilePermissions

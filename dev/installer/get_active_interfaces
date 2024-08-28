@@ -1,0 +1,138 @@
+#!/usr/bin/sh
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : get_active_interfaces
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : Ericsson Network IQ script for showing active interfaces
+# Usage   : get_active_interfaces [-s] | [-t techpack_name]
+# ********************************************************************
+
+### Function: usage_msg ###
+#
+#   Print out the usage message
+#
+# Arguments:
+#	none
+# Return Values:
+#	none
+usage_msg() 
+{
+echo ""
+echo "Usage: `basename $0` [-s] | [-d] | [-t techpack_name]"
+echo "options:"
+echo "-s  : Print out the names of active interfaces."
+echo "-d  : Print out the names of active interfaces with the Rsatate and the buildNumber."
+echo "-t  : Print out the names of active interfaces associated with this techpack."
+echo "No parameters  : Print out the names of all active interfaces and associated OSS name."
+}
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  echo "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 2
+fi
+
+. ${CONF_DIR}/niq.rc
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${CONF_DIR}/common_variables.lib"
+  exit 1
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+if [ -z "${CONF_DIR}" ] ; then
+  $ECHO "Environment variable CONF_DIR is not set or empty."
+  exit 1
+fi
+
+if [ -z "$PLATFORM_DIR" ] ; then
+    $ECHO "Environment variable PLATFORM_DIR is not set or empty."
+    exit 1
+fi
+
+if [ -z "$INSTALLER_DIR" ] ; then
+    $ECHO "Environment variable INSTALLER_DIR is not set or empty."
+    exit 1
+fi
+
+if [ -z "$RT_DIR" ] ; then
+    $ECHO "Environment variable RT_DIR is not set or empty."
+    exit 1
+fi
+
+while getopts "t:sd" Option
+do
+  case $Option in
+    t) TP_NAME="$OPTARG"
+       
+       if [ -z "${TP_NAME}" ]; then
+          usage_msg
+          exit 1
+       fi
+       ;;
+    s) SHOW_NAMES="true" 
+       ;;
+    d) SHOW_DETAILS="true" 
+       ;;	   
+   \?) usage_msg
+       exit 1 
+       ;;
+  esac
+done
+
+if [ -z "${SHOW_NAMES}" ]; then
+    SHOW_NAMES="false"
+fi
+
+if [ -z "${SHOW_DETAILS}" ]; then
+    SHOW_DETAILS="false"
+fi
+
+CPATH="${INSTALLER_DIR}/lib/installer.jar"
+INSTALLER_JARPATH="${CPATH}"
+
+if [ ! -r "${CPATH}" ] ; then
+  $ECHO "ERROR: Jar file "installer.jar" is not readable at ${CPATH}"
+  exit 2
+fi
+
+DIRS=`$LS ${PLATFORM_DIR}`
+
+for file in $DIRS
+do
+  if [ -d ${PLATFORM_DIR}/$file/dclib ]
+  then
+    JARS=`$LS ${PLATFORM_DIR}/$file/dclib/*.jar`
+
+    for jar in $JARS
+    do
+      CPATH="${CPATH}:${jar}"
+    done
+  fi
+done
+
+CURRENT_WORKING_DIRECTORY=`$PWD`
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+ANT_OPTS="$ANT_OPTS $PF_ANT_OPTS" 
+export ANT_OPTS 
+# Comments about the $SED command after ANT call.
+# 1. Drop out lines that do not start with [Get
+# 2. Remove all characters before ']'
+# 3. Remove all empty lines
+${RT_DIR}/ant/bin/ant -f ${INSTALLER_DIR}/tasks_install_utils.xml -lib ${CPATH} -DshowNames=${SHOW_NAMES} -DshowDetails=${SHOW_DETAILS} -DtechpackName=${TP_NAME} -DshowVersionNumbers=${SHOW_VERSION_NUMBERS} -DconfigurationDirectory=${CONF_DIR} get_active_interfaces | $SED -e '/^[^\[Get]/ d' -e 's/.*\].//' -e '/^$/ d'

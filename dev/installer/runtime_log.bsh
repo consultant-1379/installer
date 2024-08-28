@@ -1,0 +1,87 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : runtime_log.bsh
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Usage   : runtime_log.bsh
+# ********************************************************************
+
+JSTACK=/eniq/sw/runtime/jdk/bin/jstack
+NAWK=/usr/bin/nawk
+
+#Set LOG Dir
+LOG_DIR=/eniq/home/dcuser/runtime
+CONF_DIR=/eniq/sw/conf
+
+mkdir -p $LOG_DIR
+
+if [ -f $LOG_DIR/already_executed ]; then
+	exit 0
+fi
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+        echo "Could not find /eniq/admin/lib/common_functions.lib"
+        exit 1
+fi
+
+DBAPASSWORD=`inigetpassword DWH -v DBAPassword -f ${CONF_DIR}/niq.ini`
+
+is_multi=`cat /eniq/installation/config/installed_server_type`
+if [ $is_multi == "stats_coordinator" ]; then
+        server_type="multi"
+else
+        server_type="single"
+fi
+
+#Get JStack of EngineThread
+if [ $server_type == "multi" ]; then
+        ssh engine "ps -aef | grep -i ETLCEngine | grep -v grep" > $LOG_DIR/engine_thread
+        engine_pid=`cat $LOG_DIR/engine_thread | tail -1 | $NAWK -F" " '{print $2}'`
+        #echo "Engine PID is $engine_pid"
+        ssh engine "$JSTACK $engine_pid > $LOG_DIR/Engine_JStack.log"
+else
+        engine_pid=`ps -aef | grep -i ETLCEngine | grep -v grep | $NAWK -F" " '{print $2}'`
+        #echo "Engine PID is $engine_pid"
+        $JSTACK $engine_pid > $LOG_DIR/Engine_JStack.log
+fi
+
+#Get Jstack of Scheduler Thread
+scheduler_pid=`ps -aef | grep -i ETLCScheduler | grep -v grep | $NAWK -F" " '{print $2}'`
+$JSTACK $scheduler_pid > $LOG_DIR/Scheduler_JStack.log
+
+#Get ExecutionSlot details
+engine -e showSetsInExecutionSlots > $LOG_DIR/ExecutionSlots.log
+
+#Get PrioirtyQueue details
+engine -e showSetsInQueue > $LOG_DIR/SetsInQueue.log
+
+#CPU Usage
+top > $LOG_DIR/CPU_Usage.log
+
+#All Std Sybase procedures
+#isql -UDBA -P$DBAPASSWORD  -Srepdb -b <<EOF_Repdb > $LOG_DIR/REPDB_IQ_CONNECTION.log
+#sp_iqconnection
+#go
+#EOF_Repdb
+
+#isql -UDBA -P$DBAPASSWORD  -Sdwhdb -b <<EOF_Dwhdb > $LOG_DIR/DWHDB_IQ_CONNECTION.log
+#sp_iqconnection
+#go
+#EOF_Dwhdb
+
+touch $LOG_DIR/already_executed

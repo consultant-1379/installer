@@ -1,0 +1,357 @@
+#!/usr/bin/sh
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : active_interface
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : Ericsson Network IQ Interface activation script
+# Usage   : activate_interface INTERFACE_NAME OSS_NAME IN_DIR
+# Author  : Janne Berggren
+# ********************************************************************
+
+### Function: usage_msg ###
+#
+#   Print out the usage message
+#
+# Arguments:
+#	none
+# Return Values:
+#	none
+usage_msg() 
+{
+$ECHO ""
+$ECHO "Usage: `$BASENAME $0` -f <interfaces_list_file> | -o <OSS_name> -i <interface_name> | -t <techpack_name> [-n] "
+$ECHO "options:"
+$ECHO "-f  : Path to a file containing list of interfaces activated."
+$ECHO "-o  : Name of the OSS."
+$ECHO "-i  : Name of the interface to activate."
+$ECHO "-t  : Name of the techpack whose interfaces are to be activated."
+$ECHO "-n  : Activate interface only. No sets will be copied."
+# $ECHO "-s  : Create snapshots before activating interface."
+}
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 3
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  $ECHO "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 1
+fi
+
+. ${CONF_DIR}/niq.rc
+
+
+if [ ! -r "${INSTALLER_DIR}/snapshot_functions.bsh" ] ; then
+  $ECHO "ERROR: Snapshot functions file is not readable at ${INSTALLER_DIR}/snapshot_functions.bsh"
+  exit 15
+fi
+
+# Include the snapshot functions.
+. ${INSTALLER_DIR}/snapshot_functions.bsh
+
+TIMESTAMP=`$DATE +%Y.%m.%d_%H:%M:%S`
+
+MAIN_LOGFILE=${LOG_DIR}/tp_installer/${TIMESTAMP}_activate_interface.log
+
+$TOUCH ${MAIN_LOGFILE}
+
+if [ -z "${CONF_DIR}" ] ; then
+  $ECHO "Environment variable CONF_DIR is not set or empty. Interface activation aborted." | $TEE -a ${MAIN_LOGFILE}
+  exit 2
+fi
+
+if [ -z "$PLATFORM_DIR" ] ; then
+    $ECHO "Environment variable PLATFORM_DIR is not set or empty. Interface activation aborted." | $TEE -a ${MAIN_LOGFILE}
+    exit 3
+fi
+
+if [ -z "$INSTALLER_DIR" ] ; then
+    $ECHO "Environment variable INSTALLER_DIR is not set or empty. Interface activation aborted." | $TEE -a ${MAIN_LOGFILE}
+    exit 4
+fi
+
+if [ -z "$RT_DIR" ] ; then
+    $ECHO "Environment variable RT_DIR is not set or empty. Interface activation aborted." | $TEE -a ${MAIN_LOGFILE}
+    exit 5
+fi
+
+if [ -z "$ADMIN_BIN" ] ; then
+    $ECHO "Environment variable ADMIN_BIN is not set or empty. Interface activation aborted." | $TEE -a ${MAIN_LOGFILE}
+    exit 13
+fi
+
+if [ -z "$DATA_DIR" ] ; then
+    $ECHO "Environment variable DATA_DIR is not set or empty. Interface activation aborted." | $TEE -a ${MAIN_LOGFILE}
+    exit 14
+fi
+
+while getopts ":f:t:o:i:ns" Option
+do
+  case $Option in
+    f) INTF_LIST_FILE="$OPTARG" 
+       ;;
+    o) OSS_NAME="$OPTARG" 
+       ;;
+    i) INTF_NAME="$OPTARG" 
+       ;;
+    n) ACTIVATE_ONLY=true
+       ;;
+    s) CREATE_SNAPSHOTS=true
+       ;;
+    t) TP_NAME="$OPTARG"
+       
+       if [ "${TP_NAME}" = "ALL" -o "${TP_NAME}" = "all" ]; then
+          $CD ${INSTALLER_DIR}; ${INSTALLER_DIR}/get_active_interfaces >> /tmp/interfaces_${TIMESTAMP}
+       else
+          $CD ${INSTALLER_DIR}; ${INSTALLER_DIR}/get_active_interfaces -t ${TP_NAME} >> /tmp/interfaces_${TIMESTAMP}
+       fi
+       
+       INTF_LIST_FILE=/tmp/interfaces_${TIMESTAMP}
+       ;;
+   \?) usage_msg
+       exit 6 
+       ;;
+  esac
+done
+
+# Must have either list of interfaces or one interface name to install.
+if [ ! -z "${INTF_LIST_FILE}" ] ; then
+  if [ ! -f "${INTF_LIST_FILE}" ] ; then
+    $ECHO "Can't read tech pack list file ${INTF_LIST_FILE}"  | $TEE -a ${MAIN_LOGFILE}
+    exit 7
+  fi
+elif [ -z "${INTF_NAME}" ]; then
+    usage_msg
+    exit 8 
+elif [ -z "${OSS_NAME}" ]; then
+	usage_msg
+	exit 9
+fi
+
+# Check that not both the optional parameters are given as parameter.
+if [ ! -z "${INTF_LIST_FILE}" -a ! -z "${INTF_NAME}" ]; then
+    usage_msg
+    exit 10 
+fi
+
+if [ -z "${ACTIVATE_ONLY}" ]; then
+    ACTIVATE_ONLY=false
+fi
+
+if [ -z "${CREATE_SNAPSHOTS}" ]; then
+    CREATE_SNAPSHOTS=false
+fi
+
+if [ ! -d ${LOG_DIR}/tp_installer ]; then
+  $MKDIR ${LOG_DIR}/tp_installer
+fi
+
+CPATH="${INSTALLER_DIR}/lib/installer.jar"
+INSTALLER_JARPATH="${CPATH}"
+
+if [ ! -r "${CPATH}" ] ; then
+  $ECHO "ERROR: Jar file "installer.jar" is not readable at ${CPATH}" | $TEE -a ${MAIN_LOGFILE}
+  exit 11
+fi
+
+DIRS=`$LS ${PLATFORM_DIR}`
+
+for file in $DIRS
+do
+  if [ -d ${PLATFORM_DIR}/$file/dclib ]
+  then
+    JARS=`$LS ${PLATFORM_DIR}/$file/dclib/*.jar`
+
+    for jar in $JARS
+    do
+      CPATH="${CPATH}:${jar}"
+    done
+  fi
+done
+
+CURRENT_WORKING_DIRECTORY=`$PWD`
+
+#Check that no other activate_interface process is running. Simultaneous execution of activate_interface will cause trouble.
+LOCK_FILE=${CURRENT_WORKING_DIRECTORY}/install_lockfile
+if [ -f $LOCK_FILE ]; then
+  $ECHO "Another instance of tp_installer or activate_interface script is running. Please wait it to finish first and then try again. If no other instance of tp_installer script  or activate_interface is running please remove file $LOCK_FILE and try again." | $TEE -a ${MAIN_LOGFILE}
+  exit 19
+fi
+$TOUCH ${LOCK_FILE}
+
+if [ ! -z "${INTF_NAME}" ] ; then
+  $ECHO "${INTF_NAME} ${OSS_NAME}" > /tmp/intflist
+  INTF_LIST_FILE=/tmp/intflist
+fi
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+ANT_OPTS="$ANT_OPTS $PF_ANT_OPTS" 
+export ANT_OPTS 
+
+export ANT_HOME
+
+INTF_ACTIVATED=/var/tmp/FVM_OSSProgress
+
+$ECHO "Starting to activate interfaces." | $TEE -a ${MAIN_LOGFILE}
+
+$ECHO "Filtering out duplicate interface activations..." | $TEE -a ${MAIN_LOGFILE}
+
+# Filter out the duplicate interface activations from the list
+${RT_DIR}/ant/bin/ant -f tasks_install_utils.xml -lib ${CPATH} -Dfilepath=${INTF_LIST_FILE} remove_duplicate_activations
+
+  DUPLICATE_REMOVAL_EXIT_STATUS=$?
+
+  if [ $DUPLICATE_REMOVAL_EXIT_STATUS -ne 0 ] ; then
+    $ECHO "Removal of duplicate interface activations failed."
+    exit 20
+  fi
+ 
+
+$ECHO "Filtering done." | $TEE -a ${MAIN_LOGFILE}
+
+$ECHO "List of interfaces to activate:" | $TEE -a ${MAIN_LOGFILE}
+INTERFACES_TO_ACTIVATE=`$CAT ${INTF_LIST_FILE}`
+$ECHO "${INTERFACES_TO_ACTIVATE}" | $TEE -a ${MAIN_LOGFILE}
+
+if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+  $ECHO "Creating snapshots before any interface activations are done..." | $TEE -a ${MAIN_LOGFILE}
+  # Create the snapshots.
+  create_snapshots 
+
+  $ECHO "All required snapshots created." | $TEE -a ${MAIN_LOGFILE}
+fi
+
+#Creating file to enlist all the interfaces which failed to activate
+FAILED_INTF_FILE=interfaces_failed_to_activate.txt
+if [ -f ${FAILED_INTF_FILE} ] ; then
+	$RM ${FAILED_INTF_FILE} 
+fi
+$TOUCH ${FAILED_INTF_FILE}
+
+
+while read line
+do
+  INTERFACE_NAME=`$ECHO ${line} | $NAWK '{print $1}'`
+  CURRENT_OSS_NAME=`$ECHO ${line} | $NAWK '{print $2}'`
+  
+  if [ "${CURRENT_OSS_NAME}" = " " ] || [ "${CURRENT_OSS_NAME}" = "" ]
+  then
+  	$ECHO "Filtered out empty OSS name with interface ${INTERFACE_NAME} ${CURRENT_OSS_NAME}" | $TEE -a ${MAIN_LOGFILE}
+    continue
+  fi
+  
+  ACTIVATE_INTERFACE_TIMESTAMP=`$DATE +%Y.%m.%d_%H:%M:%S`
+  INTERFACE_LOGFILE=${LOG_DIR}/tp_installer/${ACTIVATE_INTERFACE_TIMESTAMP}_activate_${INTERFACE_NAME}_${CURRENT_OSS_NAME}.log
+  
+  $TOUCH ${INTERFACE_LOGFILE}
+  
+  $ECHO "Activating interface ${INTERFACE_NAME}-${CURRENT_OSS_NAME}" | $TEE -a ${MAIN_LOGFILE}
+
+  # Do the action interface activation.
+  ${RT_DIR}/ant/bin/ant -f tasks_install_utils.xml -lib ${CPATH} -logfile ${INTERFACE_LOGFILE} -Ddc.installer.dir=${INSTALLER_DIR} -Ddc.bin.dir=${BIN_DIR} -DonlyActivateInterface=${ACTIVATE_ONLY} -Dcurrent_working_directory=${CURRENT_WORKING_DIRECTORY} -DconfigurationDirectory=${CONF_DIR} -DinterfaceName=${INTERFACE_NAME} -DossName=${CURRENT_OSS_NAME} activate_interface
+
+  ACTIVATE_INTERFACE_EXIT_STATUS=$?
+
+  if [ $ACTIVATE_INTERFACE_EXIT_STATUS -ne 0 ] ; then
+    if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+      # Activate interface has failed. Restore the snapshot before the interface activation.
+      rollback_snapshots
+      # Delete the snapshots.
+      delete_snapshots 
+    fi
+    #Remove the locking file
+    $RM ${LOCK_FILE}
+	$ECHO "Interface activation failed for ${INTERFACE_NAME}, skipping this interface to activate" | $TEE -a ${MAIN_LOGFILE}
+    $ECHO "${INTERFACE_NAME}" >> ${FAILED_INTF_FILE}
+	continue
+  fi
+#Tentative Fix for EQEV-66685
+  #$CAT ${INTERFACE_LOGFILE}
+
+  if [ -f ${INTERFACE_LOGFILE} ] ; then
+    SUC=`$CAT ${INTERFACE_LOGFILE} | $GREP "BUILD SUCCESSFUL"`
+    if [ -z "${SUC}" ] ; then
+    $ECHO "Activation failed. See log ${INTERFACE_LOGFILE} for details." | $TEE -a ${MAIN_LOGFILE}
+      if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+        # Activate interface has failed. Restore the snapshot before the interface activations.
+        rollback_snapshots
+        # Delete the snapshots.
+        delete_snapshots
+      fi 
+      $ECHO "Exiting interface activation." | $TEE -a ${MAIN_LOGFILE}
+      #Remove the locking file
+      $RM ${LOCK_FILE}
+      exit 18
+    fi
+  fi
+
+  $ECHO "Interface ${INTERFACE_NAME}_${CURRENT_OSS_NAME} activated" | $TEE -a ${MAIN_LOGFILE}
+  $ECHO "${INTERFACE_NAME}::${CURRENT_OSS_NAME}" >> ${INTF_ACTIVATED}
+done < ${INTF_LIST_FILE}
+
+LOOP_EXIT_STATUS=$?
+
+if [ ${LOOP_EXIT_STATUS} -eq 66 ] ; then
+  #Remove the locking file
+  $RM ${LOCK_FILE}
+  exit 16
+else  
+  ${BIN_DIR}/engine -e refreshTransformations
+  $ECHO "Transformation cache refreshed" | $TEE -a ${MAIN_LOGFILE}
+fi
+
+# Change the slotprofile back to Normal.
+${BIN_DIR}/engine -e changeProfile Normal
+
+if [ "${CREATE_SNAPSHOTS}" = "true" ]; then
+  $ECHO "Deleting the snapshots created before interface activations." | $TEE -a ${MAIN_LOGFILE}
+  # At the end delete the snapshots.
+  delete_snapshots
+
+  $ECHO "Deleted snapshots succesfully. Interface activations finished." | $TEE -a ${MAIN_LOGFILE}
+fi
+
+#Remove the locking file
+if [ -f $LOCK_FILE ]; then
+  $RM ${LOCK_FILE}
+fi
+
+
+if [ -f /tmp/interfaces_${TIMESTAMP} ] ; then
+  $RM /tmp/interfaces_${TIMESTAMP}
+fi
+
+if [ -f ${FAILED_INTF_FILE} ] && [ -s ${FAILED_INTF_FILE} ] ; then
+        $ECHO -e "\n************************"
+        $ECHO -e "Interfaces which failed to activate.\n"
+        while read line
+        do
+            $ECHO ${line}
+        done < ${FAILED_INTF_FILE}
+        $ECHO -e "\n************************\n"
+fi
+
+#Fix for TR HT13420
+if [ ${LOOP_EXIT_STATUS} -eq 18 ] ; then
+#Remove the locking file
+  $RM ${LOCK_FILE}
+   exit 18
+fi

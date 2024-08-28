@@ -1,0 +1,334 @@
+#!/bin/bash
+# ****************************************************************************************
+# Ericsson Radio Systems AB							SCRIPT
+# ****************************************************************************************
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+#
+# ****************************************************************************************
+# Name    : platform_installer
+# Purpose : Ericsson Network IQ Platform installer script
+# Usage   : platform_installer [-v] [-f] [-m|-u] PACKAGE
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+#
+# ****************************************************************************************
+. /eniq/home/dcuser/.profile
+
+# ********************************************************************
+#
+# Configuration 
+#
+# ********************************************************************
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 3
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+
+if [ -z "${CONF_DIR}" ] ; then
+  $ECHO "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  $ECHO "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 2
+fi
+
+. ${CONF_DIR}/niq.rc
+
+export ANT_HOME
+
+VERBOSE=0
+FORCE="no"
+PACKAGE=""
+INSTALL_XML=""
+MIGRATE="no"
+CURR_DIR=$($PWD)
+HSTNAME=$($HOSTNAME)
+TIMESTAMP=$($DATE +%y.%m.%d_%H:%M:%S)
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+PATH=${RT_DIR}/java/bin:${PATH}
+export PATH
+
+# Create the classpath
+CPATH="${INSTALLER_DIR}/lib/installer.jar"
+DIRS=`$LS ${PLATFORM_DIR}`
+for file in $DIRS ; do
+	if [ -d ${PLATFORM_DIR}/$file/dclib ] ; then
+		JARS=`$LS ${PLATFORM_DIR}/$file/dclib/*.jar`
+		for jar in $JARS ; do
+			CPATH="${CPATH}:${jar}"
+		done
+	fi
+done
+
+# ********************************************************************
+#
+# Method Section
+#
+# ********************************************************************
+_echo(){
+	$ECHO ${*} | $TEE -a ${LOGFILE}
+}
+
+_debug(){
+	if [ $VERBOSE = 1 ] ; then
+		_echo ${*}
+	fi
+}
+
+getChar() {
+    expr match "$1" "\([^[:digit:]]*\)"
+}
+
+getCharRemainder() {
+    expr match "$1" "[^[:digit:]]*\(.*\)"
+}
+
+getNum() {
+    expr match "$1" "\([[:digit:]]*\)"
+}
+
+getNumRemainder() {
+    expr match "$1" "[[:digit:]]*\(.*\)"
+}
+
+# return 0 for equal
+# return 1 for oldRState > newRState
+# return 2 for oldRState < newRState
+rStateCompare() {
+    local oldRState="$1"
+	local newRState="$2"
+    local oldRStateNum="", newRStateNum="", oldRStateChar="", newRStateChar=""
+    while true; do
+        oldRStateChar=`getChar "${oldRState}"`
+        newRStateChar=`getChar "${newRState}"`
+        oldRState=`getCharRemainder "${oldRState}"`
+        newRState=`getCharRemainder "${newRState}"`
+		
+		if [[ $oldRStateChar == *"_"* ]] && [[ ! $newRStateChar == *"_"* ]]; then
+			return 1
+		elif [[ ! $oldRStateChar == *"_"* ]] && [[  $newRStateChar == *"_"* ]]; then
+			return 2
+        elif [ "${oldRStateChar}" \> "${newRStateChar}" ]; then
+            return 1
+        elif [ "${oldRStateChar}" \< "${newRStateChar}" ]; then
+            return 2
+        fi
+
+        oldRStateNum=`getNum "${oldRState}"`
+        newRStateNum=`getNum "${newRState}"`
+        oldRState=`getNumRemainder "${oldRState}"`
+        newRState=`getNumRemainder "${newRState}"`
+
+        if [ -z "${oldRStateNum}" -a -z "${newRStateNum}" ]; then
+            return 0
+        elif [ -z "${oldRStateNum}" -a -n "${newRStateNum}" ]; then
+            return 2
+        elif [ -n "${oldRStateNum}" -a -z "${newRStateNum}" ]; then
+            return 1
+        fi
+
+        if [ "${oldRStateNum}" -gt "${newRStateNum}" ]; then
+            return 1
+        elif [ "${oldRStateNum}" -lt "${newRStateNum}" ]; then
+            return 2
+        fi
+    done
+}
+
+usage() {
+   $ECHO "Usage: platform_installer [-v] [-f] [-m|-u] [PACKAGE | -x $PLATFORM_DIR/_module_/install/install.xml"
+   $ECHO "Options:"
+   $ECHO "  -v  verbose output"
+   $ECHO "  -f  skip dependency check"
+   $ECHO "  -m  This is used only when migrating the repository data from Sybase IQ to Sybase Anywhere"
+   $ECHO "  -u  This is used only when updating the repdb in Sybase IQ with the"
+   $ECHO "      intention of later performing the Migration of the data (see above, -m option)"
+   $ECHO "  -x  The install.xml file to use"
+}
+
+
+checkUser() {
+if [ `$ID -un` != "dcuser"  ] ; then
+	$ECHO "\nThis script must be executed as dcuser\n"
+	exit 3
+fi
+}
+
+# ********************************************************************
+#
+# Main Section
+#
+# ********************************************************************
+if [[ $# -lt 1 ]]; then
+	usage
+	exit 4
+fi
+
+checkUser
+
+while [ -n "$*" ] ; do
+	if [ "$1" = "-v" ] ; then
+		VERBOSE=1
+	elif [ "$1" = "-f" ] || [ "$1" = "force" ] ; then
+		FORCE="force"
+	elif [ "$1" = "-m" ] ; then
+		MIGRATE="migrate"
+	elif [ "$1" = "-u" ] || [ "$1" = "update" ] ; then
+		MIGRATE="update"	  
+	elif [ "$1" = "-help" ] ; then
+		usage
+		exit 5
+	elif [ "$1" = "-x" ] ; then
+		INSTALL_XML=$2
+		shift
+	else
+		PACKAGE=$1
+	fi
+	shift
+done
+
+if [ -z "$INSTALL_XML" ] && [ -z "${PACKAGE}" ] ; then
+	usage
+	exit 6
+fi
+
+_extract_dir_=""
+if [ "$INSTALL_XML" != "" ] ; then
+	if [ ! -f $INSTALL_XML ] ; then
+		_echo "$INSTALL_XML not found"
+		exit 7
+	fi
+	_extract_dir_=`$DIRNAME $INSTALL_XML`
+	_extract_dir_=`$DIRNAME $_extract_dir_`
+	_package_=`$BASENAME $_extract_dir_` 
+elif [ "$PACKAGE" != "" ] ; then
+	if [ ! -f ${PACKAGE} ] ; then
+		_echo "${CURR_DIR}/${PACKAGE}: No such file or directory"
+		exit 8
+	fi
+	
+	_zip_install_="-Dzip_install=true"
+	
+	if [ -d ${INSTALLER_DIR}/tmp ] ; then
+		$RM -rf ${INSTALLER_DIR}/tmp > /dev/null
+	fi
+	
+	$MKDIR -p ${INSTALLER_DIR}/tmp
+	$CP $PACKAGE ${INSTALLER_DIR}/tmp/ > /dev/null
+	$UNZIP -d ${INSTALLER_DIR}/tmp $PACKAGE > /dev/null
+	_extract_dir_=${INSTALLER_DIR}/tmp
+	_package_=$PACKAGE
+fi
+
+# Create Log file
+if [ ! -d ${LOG_DIR}/platform_installer ] ; then
+	$MKDIR -p ${LOG_DIR}/platform_installer > /dev/null
+fi
+LOGFILE=${LOG_DIR}/platform_installer/${_package_}_${TIMESTAMP}.log
+
+# Check Version
+oldVersion=""
+newVersion=""
+_vprops_=$_extract_dir_/install/version.properties
+if [ "${FORCE}" = "force" ] ; then
+	_echo "Force flag is enabled. No version check. Continue to install package. "
+elif [ ! -f ${INSTALLER_DIR}/versiondb.properties ]; then
+	_echo "${INSTALLER_DIR}/versiondb.properties file not found. Continue to install package. "
+elif [ ! -f ${_vprops_} ] ; then
+	_echo "${_vprops_} file not found. Exit installation. "
+	exit 10
+else
+	newVersion=`$GREP module.version ${_vprops_} | $CUT -d= -f2`
+	newBuild=`$GREP module.build ${_vprops_} | $CUT -d= -f2`
+	module_name=`$GREP module.name ${_vprops_}| $CUT -d= -f2`
+	newVersion="${newVersion}b${newBuild}"
+	if [ -z "${newVersion}" ] ; then
+		_echo "Not able to fetch new R-State. newRState : ${newVersion}"
+		exit 9
+	else
+		oldVersion=$($GREP module.${module_name}= ${INSTALLER_DIR}/versiondb.properties | $CUT -d= -f2)
+		if [ -z "${oldVersion}" ] ; then
+			# _echo "Not able to fetch old R-State. oldRState : ${oldVersion}"
+			_echo "Installation started..."
+		else 
+			_echo "Starting version check..."
+			rStateCompare ${newVersion} ${oldVersion}
+			returnState=$?
+			if [ ${returnState} == 0 ] ; then
+				_echo "Same version is already installed. Skipped ${module_name} installation."
+				exit 0
+			elif [ ${returnState} == 1 ] ; then
+				_echo "Lower version ${oldVersion} found. Installing new version ${newVersion}"
+			elif [ ${returnState} == 2 ]; then
+				_echo "Already higher version ${oldVersion} is installed. Skipped ${module_name} installation."
+				exit 0
+			fi
+		fi
+	fi	
+fi
+
+_debug "===================================================================="
+_debug "  	Ericsson Network IQ platform installer @ ${HSTNAME}"
+_debug "--------------------------------------------------------------------"
+_debug " 	Installing: ${PACKAGE}"
+_debug "===================================================================="
+
+_new_repo=${INSTALLER_DIR}/tmp/dclib/repository.jar
+if [ -f ${_new_repo} ] ; then
+	CPATH=${_new_repo}:${CPATH}
+	${ECHO} "Using new version of ${_new_repo}"
+fi
+
+${RT_DIR}/ant/bin/ant -f ${INSTALLER_DIR}/tasks_platform_installer.xml -lib ${CPATH} \
+	-Ddc.extract.dir=${_extract_dir_} $_zip_install_ \
+	-Dclasspath=${CPATH} -Ddc.installer.dir=${INSTALLER_DIR} -Ddc.platform.dir=${PLATFORM_DIR} \
+	-Ddc.bin.dir=${BIN_DIR} -Ddc.runtime.dir=${RT_DIR} -Ddc.conf.dir=${CONF_DIR} \
+	-Dpmdata.dir=${PMDATA_DIR} -Darchive.dir=${ARCHIVE_DIR} -Detldata.dir=${ETLDATA_DIR} \
+	-Dreference.dir=${REFERENCE_DIR} -Drejected.dir=${REJECTED_DIR} -Ddc.admin.bin=${ADMIN_BIN} \
+	-Ddc.log.dir=${LOG_DIR} -Dforceflag=${FORCE} -Dmigrateflag=${MIGRATE} -Ddc.hostname=${HSTNAME} \
+	-Deniq.hostdnsname=${HSTDNSNAME} -Dmz.home=${MZ_HOME} -Dmediation.inter=${MEDIATION_INTER} \
+	-Ddc.glassfish.dir=${GLASSFISH_DIR} -Ddc.installconf.dir=${ENIQ_CONF_DIR} | $TEE -a ${LOGFILE}
+
+if [ -f ${LOGFILE} ] ; then
+	SUC=`${CAT} ${LOGFILE} | $GREP "BUILD SUCCESSFUL"`
+	if [ ! -z "${SUC}" ] ; then
+		if [ ${MIGRATE} = "update" ] ; then
+			_echo "Successfully Updated and Unloaded all tables from repdb (Sybase IQ)"
+		elif [ ${MIGRATE} = "migrate" ] ; then
+			_echo "Successfully Created and Loaded all tables to repdb (SQL Anywhere)"
+		else
+			if [ "$PACKAGE" != "" ] ; then
+				$RM -rf $_extract_dir_
+			fi
+			_echo "Successfully installed"
+		fi
+	else
+		_echo "Installation failed"
+		exit 11
+	fi
+fi
+
+# added script to delete the passwords after installation
+sed -i '/ENGINE_DB_PASSWORD/d' /eniq/sw/platform/repository*/conf/ETLCServer.properties
+sed -i '/.password/d' /eniq/sw/platform/repository*/conf/createMetadata.properties
+
+_debug "--------------------------------------------------------------------"
+_debug " 	Installation Completed. "
+_debug "===================================================================="

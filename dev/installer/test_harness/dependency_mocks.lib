@@ -1,0 +1,220 @@
+mock_record_file=${INSTALLER_DIR}/test_harness/dependency_record
+record () {
+	echo ${1} >> $mock_record_file
+}
+
+
+call_svcs-a () {
+	record ${FUNCNAME[0]}
+	cat /eniq/sw/installer/test_harness/mock_output_svcs-a
+}
+
+call_svcs-a_controlzoneDifferent () {
+	record ${FUNCNAME[0]}
+	cat /eniq/sw/installer/test_harness/mock_output_svcs-a_controlzoneDifferent
+}
+
+call_change_db_users_perm-lock () {
+	record ${FUNCNAME[0]}
+}
+
+call_dbusersDwh () {
+	record ${FUNCNAME[0]}
+	echo sql
+}
+
+call_sybaseSetMaxPlans0 () {
+	record ${FUNCNAME[0]}
+}
+
+call_licmgr () {
+	record ${FUNCNAME[0]}
+	if [ $CURR_SERVER_TYPE==eniq_events ] ; then
+		echo "M_E_LTEEFA
+INTF_DIM_E_LTE_ERBS
+INTF_DIM_E_SGEH
+INTF_DIM_E_SGEH_3G
+EVENT_E_LTE_CFA"
+	else
+		echo "INTF_DIM_E_CN_CN
+INTF_DIM_E_CN_SITE
+INTF_DIM_E_CN_SITEDST
+INTF_DC_E_MTAS"
+	fi
+}
+
+call_getActiveIntefaces () {
+	record ${FUNCNAME[0]}
+	cat ${INSTALLER_DIR}/test_harness/mock_output_getActiveInterfaces 
+}
+
+call_engineStatus () {
+	record ${FUNCNAME[0]}
+	echo "Getting status...
+--- ETLC Server ---
+Uptime: 36 days 5 hours
+
+Priority Queue
+  Status: active
+  Size: 0
+  Poll Period: 1000
+
+Execution Profile
+  Current Profile: Normal
+  Execution Slots: 11/11
+Java VM
+  Available processors: 6
+  Free Memory: 463665416
+  Total Memory: 554041344
+  Max Memory: 3500867584
+
+Completed successfully
+
+engine is running OK
+lwp helper is running"
+}
+
+call_orderer () {
+	record ${FUNCNAME[0]}
+	if [ $CURR_SERVER_TYPE==eniq_events ] ; then
+		echo "DWH_MONITOR_R12A_b104.tpi
+DWH_BASE_R8A_b83.tpi
+GROUP_TYPE_E_R6A_b39.tpi
+DIM_E_IMSI_MSISDN_R6A_b26.tpi
+M_E_LTEEFA_R5A_b121.tpi
+EVENTS_DWH_BASE_R3A_b31.tpi
+DIM_E_IMSI_IMEI_R3A_b31.tpi
+DIM_E_SGEH_R8D_b179.tpi
+INTF_DIM_E_SGEH_3G_R3A_b15.tpi
+INTF_DIM_E_SGEH_R3A_b15.tpi
+DIM_E_LTE_R8D_b133.tpi
+DIM_E_LTE_CFA_R4B_b24.tpi
+EVENT_E_LTE_CFA_R3A_b31.tpi
+INTF_DIM_E_LTE_ERBS_R1C_b3.tpi" > $tpNameFile
+	else
+		echo "INTF_DIM_E_CN_SITEDST_R22A_b100.tpi
+DWH_BASE_R8A_b83.tpi
+INTF_DIM_E_CN_CN_R22A_b100.tpi
+DIM_E_CN_R15B_b25.tpi
+DC_E_MTAS_R5B_b209.tpi
+INTF_DC_E_MTAS_R32A_b202.tpi
+INTF_DIM_E_CN_SITE_R22A_b100.tpi" > $tpNameFile
+	fi
+	echo "************************ BUILD SUCCESSFUL *******************************" > $outputFile
+}
+
+call_disableSet () {
+	record ${FUNCNAME[0]}
+}
+
+call_disableSet-alias () {
+	record ${FUNCNAME[0]}
+}
+
+call_schedulerActivate () {
+	record ${FUNCNAME[0]}
+}
+
+call_removeTechPacksInPriorityQueue () {
+	record ${FUNCNAME[0]}
+}
+
+call_showSetsInExecutionSlots () {
+	record ${FUNCNAME[0]}
+	echo "Querying sets in execution...
++--------+-------+-------+-------+---------+----+----+------+----------+
+|TechPack|Version|SetName|SetType|StartTime|Prio|Slot|Action|Scheduling|
++--------+-------+-------+-------+---------+----+----+------+----------+
++--------+-------+-------+-------+---------+----+----+------+----------+
+Finished successfully"
+	
+}
+
+call_killRunningSets () {
+	record ${FUNCNAME[0]}
+}
+
+call_repdb_backup () {
+	record ${FUNCNAME[0]}
+}
+
+call_unzip_tech_pack_file () {
+	record ${FUNCNAME[0]}
+}
+
+call_tech_pack_installation () {
+	echo ${FUNCNAME[0]} >> $mock_record_file
+	
+	if [ "$(cat /eniq/sw/installer/test_harness/fail_function 2> /dev/null | grep "${FUNCNAME[0]}")" ] ; then
+		echo "************************ BUILD FAILED *******************************" >> ${TP_LOGFILE}
+	else
+		echo "************************ BUILD SUCCESSFUL *******************************" >> ${TP_LOGFILE}
+	fi
+}
+
+call_repdb_restore () {
+	record ${FUNCNAME[0]}
+}
+
+call_engineReloadProfiles () {
+	record ${FUNCNAME[0]}
+}
+
+call_engineReloadConfig () {
+	record ${FUNCNAME[0]}
+}
+
+call_enableSet () {
+	record ${FUNCNAME[0]}
+}
+
+call_change_db_users_perm-unlock () {
+	record ${FUNCNAME[0]}
+}
+
+call_setMaxPlans20 () {
+	record ${FUNCNAME[0]}
+}
+
+
+#EVENTS Specific
+call_controlzone_start () {
+	record ${FUNCNAME[0]}
+}
+
+call_mzsh_startup_ec () {
+	record ${FUNCNAME[0]}
+}
+
+call_mzsh_admin_wfgrouplist () {
+	record ${FUNCNAME[0]}
+	echo "======================================================================= LTEEFA_EE.WG00_LogParsing_Inter Running E true"
+}
+
+call_mzsh_admin_wfgroupdisable () {
+	record ${FUNCNAME[0]}
+}
+
+call_mzsh_admin_wfdisable () {
+	record ${FUNCNAME[0]}
+	echo "MOCK.workflow_1 (14): Already disabled (ignoring request)."
+	echo "MOCK.workflow_2 (14): Already disabled (ignoring request)."
+}
+
+call_mzsh_admin_wfstop () {
+	record ${FUNCNAME[0]}
+}
+
+call_mzsh_admin_wflist () {
+	record ${FUNCNAME[0]}
+	echo "MOCK LINE 1"
+	echo "MOCK LINE 2"
+}
+
+call_ssh () {
+	record ${FUNCNAME[0]}
+}
+
+call_provisioning () {
+	record ${FUNCNAME[0]}
+}

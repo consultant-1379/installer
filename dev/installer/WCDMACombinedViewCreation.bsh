@@ -1,0 +1,655 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : WCDMACombinedViewCreation
+# Purpose : Script to drop the existing G1 RBS view and recreate them 
+#           as a combined view on G1 and G2 partitions.
+# Usage   : bash WCDMACombinedViewCreation.bsh 
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+#
+# ********************************************************************
+#
+# Command Section
+#
+# ********************************************************************
+
+AWK=/usr/bin/awk
+CAT=/usr/bin/cat
+CHMOD=/usr/bin/chmod
+CHOWN=/usr/bin/chown
+CP=/usr/bin/cp
+CUT=/usr/bin/cut
+DATE=/usr/bin/date
+ECHO=/usr/bin/echo
+EGREP=/usr/bin/egrep
+FIND=/usr/bin/find
+GEGREP=/usr/sfw/bin/gegrep
+GREP=/usr/bin/grep
+MKDIR=/usr/bin/mkdir
+NAWK=/usr/bin/nawk
+PRINTF=/usr/bin/printf
+RM=/usr/bin/rm
+SED=/usr/bin/sed
+SU=/usr/bin/su
+TOUCH=/usr/bin/touch
+TEE=/usr/bin/tee
+UNZIP=/usr/bin/unzip
+WC=/usr/bin/wc
+
+# ********************************************************************
+#
+# Configuration 
+#
+# ********************************************************************
+
+STARTTIMESTAMP=`$DATE '+%y%m%d_%H%M%S'`
+LOGPATH=/eniq/log/sw_log/tp_installer
+INSTALLER_DIR=/eniq/sw/installer
+LOGFILE=${LOGPATH}/wcdma_combined_view_create_${STARTTIMESTAMP}.log
+RBSVIEWSQL=${INSTALLER_DIR}/wcdma_view_sql
+TMP=${INSTALLER_DIR}/temp_wcdma_view
+TEMP=${INSTALLER_DIR}/temp_wcdma
+CONF_DIR=/eniq/sw/conf
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+	. /eniq/admin/lib/common_functions.lib
+else
+	$ECHO "Could not find /eniq/admin/lib/common_functions.lib"
+	exit 1
+fi
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+    $ECHO "Unable to find Sybase environment variables"
+fi
+
+DBISQL=$(which dbisql)
+
+########################################################################
+# Function: remove_connection_string_file
+# Displays the usage message
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string_file() {
+	if [ -f $dc_connection_string ]; then 
+		$RM -rf $dc_connection_string
+		if [ $? != 0 ]; then
+		  $ECHO "Unable to delete " $dc_connection_string | $TEE -a ${LOGFILE}
+		fi
+	fi
+	
+	if [ -f $dba_connection_string ]; then 
+		$RM -rf $dba_connection_string
+		if [ $? != 0 ]; then
+		  $ECHO "Unable to delete " $dba_connection_string | $TEE -a ${LOGFILE}
+		fi
+	fi
+	
+	if [ -f $dwhrep_connection_string ]; then 
+		$RM -rf $dwhrep_connection_string
+		if [ $? != 0 ]; then
+		  $ECHO "Unable to delete " $dwhrep_connection_string | $TEE -a ${LOGFILE}
+		fi
+	fi
+}
+
+trap remove_connection_string_file EXIT
+
+DWHDBPASSWORD=`inigetpassword DWH -v DCPassword -f ${CONF_DIR}/niq.ini`
+DWHDB_PORT=`inigetpassword DWH -v PortNumber -f ${CONF_DIR}/niq.ini`
+DWH_SERVER_NAME=`inigetpassword DWH -v ServerName -f ${CONF_DIR}/niq.ini`
+DWHREPUSER=`inigetpassword REP -v DWHREPUsername -f ${CONF_DIR}/niq.ini`
+DWHREPPASSWORD=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+DBAPASSWORD=`inigetpassword DB -v DBAPassword -f ${CONF_DIR}/niq.ini`
+
+dc_connection_string_decrypt="-nogui -onerror exit -c \"eng=${DWH_SERVER_NAME};links=tcpip{host=${DWH_SERVER_NAME};port=${DWHDB_PORT}};uid=dc;pwd=${DWHDBPASSWORD}\""
+dba_connection_string_decrypt="-nogui -onerror exit -c \"eng=${DWH_SERVER_NAME};links=tcpip{host=${DWH_SERVER_NAME};port=${DWHDB_PORT}};uid=dba;pwd=${DBAPASSWORD}\""
+dwhrep_connection_string_decrypt="-nogui -c \"eng=${REP_SERVER_NAME};links=tcpip{host=${REP_SERVER_NAME};port=${REP_PORT}};uid=$DWHREPUSER;pwd=$DWHREPPASSWORD\""
+
+dc_connection_string=/var/tmp/dc_encrypt_$$.file
+dba_connection_string=/var/tmp/dba_encrypt_$$.file
+dwhrep_connection_string=/var/tmp/dwhrep_encrypt_$$.file
+
+if [ ! -x "$DBISQL" ]; then
+	_err_msg_="$DBISQL commands not found or not executable."
+	abort_script "$_err_msg_"
+fi
+
+type get_encrypt_file &>/dev/null && isPresent='true' || isPresent='false'
+if [ ${isPresent} == 'true' ]; then
+  get_encrypt_file "${dc_connection_string_decrypt}" "${dc_connection_string}"
+  get_encrypt_file "${dba_connection_string_decrypt}" "${dba_connection_string}"
+  get_encrypt_file "${dwhrep_connection_string_decrypt}" "${dwhrep_connection_string}"
+
+  DBISQL_DC="${DBISQL} @${dc_connection_string}"
+  DBISQL_DBA="${DBISQL} @${dba_connection_string}"
+  DBISQL_DWHREP="${DBISQL} @${dwhrep_connection_string}"
+else
+  DBISQL_DC="${DBISQL} ${dc_connection_string_decrypt}"
+  DBISQL_DBA="${DBISQL} ${dba_connection_string_decrypt}"
+  DBISQL_DWHREP="${DBISQL} ${dwhrep_connection_string_decrypt}"
+fi
+
+$ECHO "Execution started at " $STARTTIMESTAMP >> ${LOGFILE}
+
+if [ ! -d ${LOGPATH} ]; then
+	$MKDIR -p ${LOGPATH}
+	$CHMOD 777 ${LOGPATH}
+fi
+
+if [ ! -d ${RBSVIEWSQL} ]; then
+	$MKDIR -p ${RBSVIEWSQL}
+else
+	$RM -rf ${RBSVIEWSQL}
+	$MKDIR -p ${RBSVIEWSQL}
+	$CHMOD 777 ${RBSVIEWSQL}
+fi 
+
+if [ ! -d ${TMP} ]; then
+	$MKDIR -p ${TMP}
+	$CHMOD 777 ${TMP}
+else
+	$RM -rf ${TMP}
+	$MKDIR -p ${TMP}
+	$CHMOD 777 ${TMP}
+fi 
+
+if [ ! -d ${TEMP} ]; then
+	$MKDIR -p ${TEMP}
+	$CHMOD 777 ${TEMP}
+else
+	$RM -rf ${TEMP}
+	$MKDIR -p ${TEMP}
+	$CHMOD 777 ${TEMP}
+fi 
+
+if [[ "$1" == "-a" ]]; then
+	activeRestore="Y"
+fi
+
+# ********************************************************************
+#
+# Functions
+#
+# ********************************************************************
+
+##### Function: abort_script 
+#
+#   This will is called if the script is aborted thru an error
+#   error signal sent by the kernel such as CTRL-C or if a serious
+#   error is encountered during runtime
+#
+# Arguments:
+#       $1 - Error message from part of program (Not always used)
+# Return Values:
+#       none
+abort_script() {
+if [ "$1" ]; then
+	_err_msg_=$1
+else
+	_err_msg_="Script aborted.......\n"
+fi
+
+if [ "${LOGFILE}" ]; then
+	$ECHO "\n$_err_msg_\n"| $TEE -a ${LOGFILE}
+else
+	$ECHO "\n$_err_msg_\n"
+fi
+}
+
+##### Function: contains 
+#
+#   This will check element in array
+#
+# Arguments:
+#       $1 - element
+# Return Values:
+#       0 - Found
+#		1 - Not Found 
+contains() {
+for i in "${tableAlaises[@]}"; do	
+	if [[ ${i} == ${1} ]]; then
+		return 0;
+	else 
+		return 1;
+	fi
+done
+}
+
+##### Function: add 
+#
+#   This will add element in array
+#
+# Arguments:
+#       $1 - element
+# Return Values:
+#       None
+add() {
+contains $1
+if [[ $? -eq 0 ]]; then
+	xx=$1
+else
+	tableAlaises+=($1)
+fi
+}
+
+##### Function: createDcView 
+#
+#   This will Create DC View
+#
+# Arguments:
+#       $1 - Viewname to create 
+# Return Values:
+#       none
+createDcView() {
+viewSQL=$1
+dcViewname=$2
+
+${DBISQL_DBA} $viewSQL
+if [[ $? -eq 0 ]]; then
+	$ECHO "$($DATE '+%Y_%m_%d_%H:%M:%S') : View $dcViewname created" | $TEE -a ${log}
+	${DBISQL_DBA} "grant select on dc.$dcViewname to dcbo"
+	${DBISQL_DBA} "grant select on dc.$dcViewname to dc"
+	$ECHO "$($DATE '+%Y_%m_%d_%H:%M:%S') : SELECT permission granted for dc user on view dc.$dcViewname" | $TEE -a ${log}
+	$ECHO "$($DATE '+%Y_%m_%d_%H:%M:%S') : SELECT permission granted for dcbo user on view dc.$dcViewname" | $TEE -a ${log}
+else
+	$ECHO "$($DATE '+%Y_%m_%d_%H:%M:%S') : View dc.$dcViewname creation failed " | $TEE -a ${log}
+fi
+}
+
+##### Function: createDcpView 
+#
+#   This will Create DCPUBLIC View
+#
+# Arguments:
+#       $1 - Viewname to create 
+# Return Values:
+#       none
+createDcpView() {
+dcpViewname=$1
+
+${DBISQL_DBA} ${TMP}/${dcpViewname}_dcpublic
+if [[ $? -eq 0 ]]; then
+	$ECHO "$($DATE '+%Y_%m_%d_%H:%M:%S') : View dcpublic.$dcpViewname created." | $TEE -a ${log}
+	${DBISQL_DBA} "grant select on dcpublic.$dcpViewname to dcpublic"
+	$ECHO "$($DATE '+%Y_%m_%d_%H:%M:%S') : SELECT permission granted for dcpublic user on view dcpublic.$dcpViewname" | $TEE -a ${log}
+else
+	$ECHO "$($DATE '+%Y_%m_%d_%H:%M:%S') : View dcpublic.$dcpViewname creation failed" | $TEE -a ${log}
+fi
+}
+
+##### Function: removeView 
+#
+#   This will is called to remove a particular user view
+#
+# Arguments:
+#       $1 - Viewname to be removed
+#		$2 - User where view belongs to
+# Return Values:
+#       0 - Success
+#		1 - Failure
+removeView() {
+viewname=$1
+user=$2
+
+${DBISQL_DBA} "call dba.forceDropView('$viewname', '$user')"
+if [[ $? -eq 0 ]]; then
+	$ECHO "$($DATE '+%Y_%m_%d_%H:%M:%S') : Dropped existing $user views : $viewname" | $TEE -a ${log}
+	return 0
+else
+	$ECHO "$($DATE '+%Y_%m_%d_%H:%M:%S') : Failed to drop the view $user.$viewname. Trying again. " | $TEE -a ${log}
+	return 1
+fi
+}
+
+##### Function: dropRecreate (Sub-processes)
+#
+#   This will Drop the existing view and recreate them
+#
+# Arguments:
+#       $1 - List of views 
+#		$2 - Log file 
+# Return Values:
+#       none
+dropRecreate() {
+viewList=$1
+log=$2
+
+while IFS= read var
+do
+	sql='/eniq/sw/installer/wcdma_view_sql/'$var
+	view_tmp=`$ECHO "$sql" | $CUT -d. -f1`
+	view=`$ECHO "$view_tmp" | $CUT -d/ -f6`
+	$ECHO "\n----------------------------- $view ------------------------------------" | $TEE -a ${log}
+
+	# Check if DC view is existing and drop the view via dba.forceDropView stored procedure
+	dcCount=0
+	while [ $dcCount -lt 3 ] ; do
+		removeView $view dc
+		if [ $? == 0 ]; then
+			# Create DC view
+			createDcView $sql $view
+			dcCreateView="false"
+			break
+		else
+			dcCreateView="true"
+		fi
+		dcCount=$((dcCount+1))
+	done
+	
+	if [ $dcCreateView == "true" ]; then
+		# lock DB user
+		${INSTALLER_DIR}/change_db_users_perm.bsh -a lock -u ALL -l ${log}
+		
+		# Remove DC view
+		removeView $view dc
+		
+		# unlock DB user
+		${INSTALLER_DIR}/change_db_users_perm.bsh -a unlock -u ALL -l ${log} 2>&1
+		if [ $? -ne 0 ] ; then
+			$ECHO "$($DATE '+%Y_%m_%d_%H:%M:%S') : Failed to unlock database users..." | $TEE -a ${log}
+		fi
+		
+		# Create DC view
+		createDcView $sql $view
+	fi
+						
+	# Check if DCPUBLIC view is existing and drop the view via dba.forceDropView stored procedure
+	if [[ $view != "DIM_E_RAN_WLE_RBS" ]] && [[ $view != "DIM_E_RAN_WLE_UCELL" ]]; then	
+		${DBISQL_DBA} "execute dc.generate_combined_view_dcpublic $view;OUTPUT TO ${TEMP}/temp_rbs_view_def_dcpublic_${view}.txt" HEXADECIMAL ASIS FORMAT TEXT ;
+		$SED 's/.//;s/.$//' ${TEMP}/temp_rbs_view_def_dcpublic_${view}.txt > ${TMP}/${view}_dcpublic
+		$ECHO "where ROWSTATUS <> 'DUPLICATE' and ROWSTATUS <> 'SUSPECTED'" >> ${TMP}/${view}_dcpublic
+
+		dcpCount=0
+		while [ $dcpCount -lt 3 ] ; do
+			removeView $view dcpublic
+			if [ $? == 0 ]; then
+				# Create DCPUBLIC view
+				createDcpView $view
+				dcpCreateView="false"
+				break
+			else
+				dcpCreateView="true"
+			fi
+			dcpCount=$((dcCount+1))
+		done
+		
+		if [ $dcpCreateView == "true" ]; then
+			# lock DB user
+			${INSTALLER_DIR}/change_db_users_perm.bsh -a lock -u ALL -l ${log}
+			
+			# Remove DCPUBLIC view
+			removeView $view dcpublic
+			
+			# unlock DB user
+			${INSTALLER_DIR}/change_db_users_perm.bsh -a unlock -u ALL -l ${log} 2>&1
+			if [ $? -ne 0 ] ; then
+				$ECHO "$($DATE '+%Y_%m_%d_%H:%M:%S') : Failed to unlock database users..." | $TEE -a ${log}
+			fi
+			
+			# Create DCPUBLIC view
+			createDcpView $view
+		fi	
+	fi
+done < $viewList
+}
+
+writeCounters() {
+declare -a counterList=("${!1}")
+vname=$2
+
+size=${#counterList[@]}
+size=$((size-1)) 
+
+if [[ "$vname" == *"RAW" ]]; then
+	defaultColumns=(DATE_ID YEAR_ID MONTH_ID DAY_ID HOUR_ID DATETIME_ID MIN_ID TIMELEVEL SESSION_ID BATCH_ID PERIOD_DURATION ROWSTATUS DC_RELEASE DC_SOURCE DC_TIMEZONE DC_SUSPECTFLAG UTC_DATETIME_ID)
+elif [[ "$vname" == *"DAY" ]]; then
+	defaultColumns=(DATE_ID YEAR_ID MONTH_ID DAY_ID WEEK_ID DATACOVERAGE AGG_COUNT TIMELEVEL SESSION_ID BATCH_ID PERIOD_DURATION ROWSTATUS DC_RELEASE DC_SOURCE DC_TIMEZONE DC_SUSPECTFLAG)
+elif [[ "$vname" == *"DAYBH" ]]; then
+	defaultColumns=(DATE_ID YEAR_ID MONTH_ID DAY_ID MIN_ID BHTYPE BUSYHOUR BHCLASS TIMELEVEL SESSION_ID BATCH_ID PERIOD_DURATION ROWSTATUS DC_RELEASE DC_SOURCE DC_TIMEZONE DC_SUSPECTFLAG BH_ID OFFSET)
+fi
+#### Write the 17 default column names
+for ((total=0; total<${#defaultColumns[@]}; total++)); do
+	$PRINTF "${defaultColumns[$total]} , " >> ${RBSVIEWSQL}/$vname.sql
+done
+	
+#### Write the G1 specific counters
+for ((i=0; i< ${#counterList[@]}; i++)); do
+	### Remove any special characters
+	if [[ ${counterList[$i]} == *"*"* ]]; then
+		counter="$($ECHO ${counterList[$i]} | $SED 's/*/ /g')"
+	else
+		counter=${counterList[$i]}
+	fi
+		
+	$PRINTF "$counter " >> ${RBSVIEWSQL}/$vname.sql	
+
+	if [[ $i -ne $size ]]; then
+		$PRINTF ", " >> ${RBSVIEWSQL}/$vname.sql
+	fi
+done
+}
+
+writeToFile() {
+viewname=$1_$2
+
+#### Create statement first
+$PRINTF "create view dc.$1_$2 as" >> ${RBSVIEWSQL}/$viewname.sql
+
+${DBISQL_DWHREP} "select TABLENAME from DWHPartition where TABLENAME like '${tableAlaises[0]}_$2[_]%';OUTPUT TO ${TMP}/tempText.txt"
+$SED "s/'//g" ${TMP}/tempText.txt > ${TMP}/Db_result.txt
+
+
+partitionNames=()
+while IFS= read var
+do
+	partitionNames+=($var)
+done < ${TMP}/Db_result.txt
+
+totalPartition=${#partitionNames[@]}
+
+#### select the counters from G1 Mo
+for ((count=0; count<${totalPartition}; count++)); do
+	$PRINTF "\n\nselect " >> ${RBSVIEWSQL}/$viewname.sql
+	writeCounters g1counterList[@] ${viewname}
+	$PRINTF "from dc.${partitionNames[$count]}" >> ${RBSVIEWSQL}/$viewname.sql
+	$PRINTF " union all " >> ${RBSVIEWSQL}/$viewname.sql
+done
+
+$PRINTF "\n" >> ${RBSVIEWSQL}/$viewname.sql
+
+### Iterate over the number of partitions for G2
+${DBISQL_DWHREP} "select TABLENAME from DWHPartition where TABLENAME like '${tableAlaises[1]}_$2[_]%';OUTPUT TO ${TMP}/tempText1.txt"
+$SED "s/'//g" ${TMP}/tempText1.txt > ${TMP}/Db_result1.txt
+
+
+partitionNamesG2=()
+while IFS= read var
+do
+	partitionNamesG2+=($var)
+done < ${TMP}/Db_result1.txt
+
+totalG2Partition=${#partitionNamesG2[@]}
+
+#### select the counters from G2 Mo
+for ((count=0; count<${totalG2Partition}; count++)); do
+	$PRINTF "\n\nselect " >> ${RBSVIEWSQL}/$viewname.sql
+
+	writeCounters g2counterList[@] ${viewname}
+	$PRINTF "from dc.${partitionNamesG2[$count]}" >> ${RBSVIEWSQL}/$viewname.sql
+	total=$((totalG2Partition-1))
+	
+	if [[ $count -ne $total ]]; then
+		$PRINTF " union all " >> ${RBSVIEWSQL}/$viewname.sql
+	fi
+done
+
+$ECHO "File ${RBSVIEWSQL}/$viewname.sql created" | $TEE -a ${LOGFILE}
+}
+
+readMos() {
+## Create array to hold table aliases
+tableAlaises=()
+
+## Create two arrays for holding the counter names of G1 and G2 
+g1counterList=()
+g2counterList=()
+
+view=
+while IFS= read var
+do
+	view=DC_E_RBS_`$ECHO "$var" | cut -d, -f1`
+	newcounter=`$ECHO "$var" | cut -d, -f2`
+	g1mo=DC_E_RBS_`$ECHO "$var" | cut -d, -f3`
+	g1counter=`$ECHO "$var" | cut -d, -f4`
+	g2mo=DC_E_RBSG2_`$ECHO "$var" | cut -d, -f5`
+	g2counter=`$ECHO "$var" | cut -d, -f6`
+	
+	g2counter="$($ECHO ${g2counter} | $SED 's/;//g')"
+	
+	if [[  ${#tableAlaises[@]} -eq 0 ]]; then 	
+		tableAlaises+=($g1mo)
+		tableAlaises+=($g2mo)
+	else 
+		add $g1mo
+		add $g2mo
+	fi
+		
+	if [[ ${g1counter} == "NULL" ]]; then
+		g1counter_new="NULL*as*$newcounter"
+		g1counterList+=($g1counter_new)
+	else
+		g1counterList+=($g1counter)
+	fi
+	
+	if [ ${g2counter} == ${newcounter} ]; then
+		g2counterList+=($g2counter)
+	elif [ ${g2counter} != ${newcounter} ]; then
+		g2counter1="$g2counter*as*$newcounter"
+		g2counterList+=($g2counter1)
+	fi			
+done < $1
+
+$ECHO "Writing to file"
+if [[ ${activeRestore} == "Y" ]]; then
+	writeToFile $view "RAW"
+else
+	for type in RAW DAY DAYBH
+	do
+		writeToFile $view $type
+	done
+fi
+}
+
+# ********************************************************************
+#
+# Main Program
+#
+# ********************************************************************
+
+## Check if both RBS and RBSG2 Techpacks are available
+${DBISQL_DWHREP} "select DISTINCT TECHPACK_NAME from Versioning WHERE TECHPACK_NAME like 'DC_E_RBS%';OUTPUT TO $TEMP/check.txt"
+
+x=$($EGREP -c 'DC_E_RBS' $TEMP/check.txt)
+
+if [[ $x -eq 2 ]]; then
+	$ECHO "Reading the Configure file " | $TEE -a ${LOGFILE}
+	{
+		read
+		while IFS= read line
+		do
+			temp=`$ECHO "$line" | $CUT -d, -f1`
+			$ECHO $line >> ${TMP}/$temp.txt
+		done 
+	} < ${INSTALLER_DIR}/WCDMACombinedViewConfigFile.csv
+
+	for file in ${TMP}/*
+	do
+		$ECHO "\n------------------------`$DATE '+%Y-%m-%d %H:%M:%S': ` Reading $file -------------------"  | $TEE -a ${LOGFILE}
+		readMos $file
+	done
+
+	## Execute the generic stored procedure for dcpublic view creation
+	${DBISQL_DC} ${INSTALLER_DIR}/dcpublic_wcdma.sql
+	${DBISQL_DWHREP} ${INSTALLER_DIR}/generate_rbs_combined_view.sql
+	
+	if [[ ${activeRestore} != "Y" ]]; then
+		### Create the Busy hour Sql file
+		BHViewname="DC_E_RBS_RBSBH_RANKBH"
+		${DBISQL_DWHREP} "execute generate_rbs_combined_view 'DC_E_RBS_RBSBH:RANKBH' , 'DC_E_RBSG2_RBSG2BH:RANKBH' , 'DC_E_RBS_RBSBH_RANKBH';OUTPUT TO ${RBSVIEWSQL}/temp.sql HEXADECIMAL ASIS FORMAT TEXT"
+		$SED 's/.//;s/.$//' ${RBSVIEWSQL}/temp.sql > ${RBSVIEWSQL}/$BHViewname.sql
+		$ECHO "File ${RBSVIEWSQL}/$BHViewname.sql is created "  | $TEE -a ${LOGFILE}
+		$RM ${RBSVIEWSQL}/temp.sql
+	fi
+	
+	## Create the DIM view sql file
+	RANUCELLview="DIM_E_RAN_WLE_UCELL"
+	$ECHO "create view "DC"."DIM_E_RAN_WLE_UCELL" as " >> ${RBSVIEWSQL}/$RANUCELLview.sql
+	$ECHO "select "ucell"."LOCALCellID","ucell"."OSS_ID","ucell"."RBS_ID","ucell"."RNC_ID","ucell"."UCELL_ID","ucell"."UCELL_NAME","rbs"."managedElementType" " >> ${RBSVIEWSQL}/$RANUCELLview.sql
+	$ECHO "from "DC"."DIM_E_RAN_UCELL" as "ucell","DC"."DIM_E_RAN_RBS" as "rbs" " >> ${RBSVIEWSQL}/$RANUCELLview.sql
+	$ECHO "where "ucell"."OSS_ID" = "rbs"."OSS_ID" and "ucell"."RNC_ID" = "rbs"."RNC_ID" and "ucell"."RBS_ID" = "rbs"."RBS_ID" " >> ${RBSVIEWSQL}/$RANUCELLview.sql
+	$ECHO "and "rbs"."managedElementType" not in ( 'RadioNode' ) " >> ${RBSVIEWSQL}/$RANUCELLview.sql
+	$ECHO "File ${RBSVIEWSQL}/$RANUCELLview.sql is created "  | $TEE -a ${LOGFILE}
+	
+	RANRBSview="DIM_E_RAN_WLE_RBS"
+	$ECHO "create view "DC"."DIM_E_RAN_WLE_RBS" as" >> ${RBSVIEWSQL}/$RANRBSview.sql
+	$ECHO "select "rbs"."OSS_ID","rbs"."RBS_ID","rbs"."RNC_ID","rbs"."RBS_NAME","rnc"."RNC_NAME","rbs"."managedElementType"  " >> ${RBSVIEWSQL}/$RANRBSview.sql
+	$ECHO "from "DC"."DIM_E_RAN_RBS" as "rbs", "DC"."DIM_E_RAN_RNC" as "rnc" where "rnc"."OSS_ID" = "rbs"."OSS_ID" " >> ${RBSVIEWSQL}/$RANRBSview.sql
+	$ECHO "and "rnc"."RNC_ID" = "rbs"."RNC_ID" and "rbs"."managedElementType" not in ( 'RadioNode' ) " >> ${RBSVIEWSQL}/$RANRBSview.sql
+	$ECHO "File ${RBSVIEWSQL}/$RANRBSview.sql is created "  | $TEE -a ${LOGFILE}
+	
+	$LS ${RBSVIEWSQL} > ${TMP}/CheckCount.txt
+	
+	count=`$CAT ${TMP}/CheckCount.txt | $WC -l`
+	count=${count// /}
+	count_half=$((count/2))
+	count_half=${count_half// /}
+
+	$SED -n 1,${count_half}p ${TMP}/CheckCount.txt >> ${TMP}/thread1.txt
+	$SED -n `expr $((count_half+1))`,${count}p ${TMP}/CheckCount.txt >> ${TMP}/thread2.txt
+
+	dropRecreate ${TMP}/thread1.txt ${TMP}/Thread1Log.txt &
+	dropRecreate ${TMP}/thread2.txt ${TMP}/Thread2Log.txt &
+	
+	## wait for all the threads to complete its execution
+	wait
+	
+	$CAT ${TMP}/Thread1Log.txt ${TMP}/Thread2Log.txt >> ${LOGFILE}
+	
+	## Check the invalid views.. Recompile and enable them	
+	${DBISQL_DBA} "select U.user_name + '.' + T.table_name from sysobject O, systab T, sysuser U where T.object_id = O.object_id and T.table_name like '%[_]PP%' and U.user_id = T.creatoR and O.status = 2 and O.object_type = 2;OUTPUT TO ${TMP}/invalidViews_tmp.txt"
+	$SED s/\'//g ${TMP}/invalidViews_tmp.txt > ${TMP}/invalidViews.txt	
+	while IFS= read var
+	do
+		$ECHO "$($DATE '+%Y_%m_%d_%H:%M:%S') : Recompiling and Enabling the view $var" | $TEE -a ${LOGFILE}
+		${DBISQL_DBA} "alter view $var recompile"
+		${DBISQL_DBA} "alter view $var enable"
+	done < ${TMP}/invalidViews.txt
+else
+	$ECHO "$($DATE '+%Y_%m_%d_%H:%M:%S') : Either DC_E_RBS or DC_E_RBSG2 or both Techpack(s) is/are not installed. So skipping creation of combined views..." | $TEE -a ${LOGFILE}
+fi
+
+ENDTIMESTAMP=`$DATE '+%y%m%d_%H%M%S'`
+$ECHO "Execution ended at " $ENDTIMESTAMP >> ${LOGFILE}
+
+## Remove all the temp directories created so far
+$RM -rf ${TMP}
+$RM -rf ${TEMP}
+

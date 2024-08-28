@@ -1,0 +1,15 @@
+<!--
+     Ericsson Network IQ Restore DWHDB utility ant tasks.
+     Copyright (C) 2010 LM Ericsson Limited.  All rights reserved.
+-->
+
+<project name="tasks_restore_dwhdb_utils" default="noop">
+  <taskdef resource="net/sf/antcontrib/antlib.xml"/>
+
+  <taskdef name="RestoreDwhDatabase" classname="com.distocraft.dc5000.install.ant.RestoreDwhDatabase"/>
+  <target name="noop"/>
+
+  <target name="restore">
+    <RestoreDwhDatabase binDirectory="${binDirectory}" installDirectory="${installDirectory}"/>
+  </target>
+</project>

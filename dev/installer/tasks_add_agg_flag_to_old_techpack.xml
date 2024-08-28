@@ -1,0 +1,19 @@
+<!--
+     Ericsson Network IQ Restore DWHDB utility ant tasks.
+     Copyright (C) 2010 LM Ericsson Limited.  All rights reserved.
+-->
+
+<project name="tasks_restore_dwhdb_utils" default="noop">
+  <taskdef resource="net/sf/antcontrib/antlib.xml"/>
+
+  <taskdef name="ChangeDBUsersPermissions" classname="com.distocraft.dc5000.install.ant.ChangeDBUsersPermissions" />
+  <taskdef name="AddAggFlagToOldTechpackAntTask" classname="com.distocraft.dc5000.install.ant.AddAggFlagToOldTechpackAntTask"/>
+  <target name="noop"/>
+
+  <target name="addAggFlag">
+    <AddAggFlagToOldTechpackAntTask confDirectory="${confDirectory}" techpackName="${techpackName}"/>
+  </target>
+  <target name="change_db_users_permissions">
+    <ChangeDBUsersPermissions action="${action}" dbUser="${dbUser}" configurationDirectory="${configurationDirectory}" />
+  </target>
+</project>

@@ -1,0 +1,193 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : FFU_trigger_upgrade.bsh
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : Ericsson Network IQ ETLC
+#
+#           AdminUI uses this script to trigger feature upgrade and create flags
+# Usage   : FFU_trigger_upgrade.bsh
+# Author  : XARJSIN
+# ********************************************************************
+
+UPGRADE_FLAG=/var/tmp/FFU_FLAG_PID
+INSTALL_FLAG=/var/tmp/INSTALL_FLAG_PID
+COMMIT_FLAG=/var/tmp/FFU_COMMIT_PID
+COMMITINS_FLAG=/var/tmp/INSTALL_COMMIT_PID
+ROLLBACK_FLAG=/var/tmp/FFU_ROLLBACK_PID
+ROLLBACKINS_FLAG=/var/tmp/INSTALL_ROLLBACK_PID
+PRECHECK_FLAG=/var/tmp/PRECHECK_PID
+LOG_FOLDER=/eniq/log/sw_log/adminui/ffu_logs
+DATE_VAL=`date +"%Y_%m_%d"`
+TIMESTAMP=`date +"%Y-%m-%d %H:%M:%S"`
+LOG_FILE=${LOG_FOLDER}/ffu_trigger_log-${DATE_VAL}.log
+UPGRADE_LOG=${LOG_FOLDER}/ffu_upgrade_log-${DATE_VAL}.log
+INSTALLATION_LOG=${LOG_FOLDER}/ffu_install_log-${DATE_VAL}.log
+COMMIT_LOG=${LOG_FOLDER}/ffu_commit_log-${DATE_VAL}.log
+COMMITINS_LOG=${LOG_FOLDER}/ffu_install_commit_log-${DATE_VAL}.log
+RLBK_LOG=${LOG_FOLDER}/ffu_rollback_log-${DATE_VAL}.log
+RLBKINS_LOG=${LOG_FOLDER}/ffu_install_rollback_log-${DATE_VAL}.log
+
+MKDIR=/usr/bin/mkdir
+
+### Function: upgrade ###
+# Trigger upgrade_eniq_sw.bsh for upgrade
+# Create flag with PID of triggered process
+#
+# Arguments:
+#   feature upgrade path
+# Return Values:
+#   none
+upgrade()
+{
+	UPGRADE_PATH=$1
+	echo "$TIMESTAMP :: Upgrade triggered with path $UPGRADE_PATH" >> ${LOG_FILE}
+	/usr/bin/nohup /bin/bash /eniq/installation/core_install/bin/upgrade_eniq_sw.bsh -A upgrade_feature_only -f $UPGRADE_PATH -u >> ${UPGRADE_LOG} 2>&1 & echo $! > $UPGRADE_FLAG
+	chmod 777 $UPGRADE_FLAG
+	chown dcuser:dc5000 $UPGRADE_FLAG
+	exit 0
+}
+### Function: install ###
+# Trigger upgrade_eniq_sw.bsh for install
+# Create flag with PID of triggered process
+#
+# Arguments:
+#   feature upgrade path
+# Return Values:
+#   none
+
+install()
+{
+	UPGRADE_PATH=$1
+	echo "$TIMESTAMP :: INSTALLATION triggered with path $INSTALL_PATH" >> ${LOG_FILE}
+	/usr/bin/nohup /bin/bash /eniq/installation/core_install/bin/upgrade_eniq_sw.bsh -A upgrade_feature_only -f $UPGRADE_PATH -u >> ${INSTALLATION_LOG} 2>&1 & echo $! > $INSTALL_FLAG
+	chmod 777 $INSTALL_FLAG
+	chown dcuser:dc5000 $INSTALL_FLAG
+	exit 0
+}
+
+### Function: commitIns ###
+# Trigger upgrade_eniq_sw.bsh for post-upgrade
+# Create flag with PID of triggered installation process
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+commitIns()
+{
+	echo "$TIMESTAMP :: START COMMIT FOR INSTALL" >> ${LOG_FILE}
+	/usr/bin/nohup /bin/bash /eniq/installation/core_install/bin/upgrade_eniq_sw.bsh -A post_upgrade_feature_only -u >> ${COMMITINS_LOG} 2>&1 & echo $! > $COMMITINS_FLAG
+	chmod 777 $COMMITINS_FLAG
+	chown dcuser:dc5000 $COMMITINS_FLAG
+	exit 0
+}
+
+### Function: commit ###
+# Trigger upgrade_eniq_sw.bsh for post-upgrade
+# Create flag with PID of triggered process
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+commit()
+{
+	echo "$TIMESTAMP :: START COMMIT FOR UPGRADE" >> ${LOG_FILE}
+	/usr/bin/nohup /bin/bash /eniq/installation/core_install/bin/upgrade_eniq_sw.bsh -A post_upgrade_feature_only -u >> ${COMMIT_LOG} 2>&1 & echo $! > $COMMIT_FLAG
+	chmod 777 $COMMIT_FLAG
+	chown dcuser:dc5000 $COMMIT_FLAG
+	exit 0
+}
+
+
+### Function: rollback ###
+# Trigger upgrade_eniq_sw.bsh for rollback
+# Create flag with PID of triggered process
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+rollback()
+{
+	echo "$TIMESTAMP :: START ROLLBACK - check logs in '/eniq/local_logs/rollback/'" >> ${LOG_FILE}
+	/usr/bin/nohup /bin/bash /var/tmp/upgrade/Rollback/core_install/bin/upgrade_eniq_sw.bsh -A rollback_feature_only -u >> /dev/null 2>&1 & echo $! > $ROLLBACK_FLAG
+	chmod 777 $ROLLBACK_FLAG
+	chown dcuser:dc5000 $ROLLBACK_FLAG
+	exit 0
+}
+
+### Function: rollbackIns ###
+# Trigger upgrade_eniq_sw.bsh for rollback
+# Create flag with PID of triggered installation process
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+rollbackIns()
+{
+	echo "$TIMESTAMP :: START ROLLBACK - check logs in '/eniq/local_logs/rollback/'" >> ${LOG_FILE}
+	/usr/bin/nohup /bin/bash /var/tmp/upgrade/Rollback/core_install/bin/upgrade_eniq_sw.bsh -A rollback_feature_only -u >> /dev/null 2>&1 & echo $! > $ROLLBACKINS_FLAG
+	chmod 777 $ROLLBACKINS_FLAG
+	chown dcuser:dc5000 $ROLLBACKINS_FLAG
+	exit 0
+}
+
+### Function: precheck ###
+# Trigger eniq_checks.bsh for precheck
+# Create flag with PID of triggered precheck process
+#
+# Arguments:
+#   none
+# Return Values:
+#   none
+precheck()
+{
+	echo "$TIMESTAMP :: START PRECHECK - check logs in '/eniq/log/precheck/logs/'" >> ${LOG_FILE}
+	/usr/bin/nohup /bin/bash /eniq/installation/core_install/eniq_checks/bin/eniq_checks.bsh -u >> /dev/null 2>&1 & echo $! > $PRECHECK_FLAG
+	chmod 777 $PRECHECK_FLAG
+	chown dcuser:dc5000 $PRECHECK_FLAG
+	exit 0
+}
+
+
+### Main flow of program ###
+
+if [ ! -d $LOG_FOLDER ]; then
+	$MKDIR -m 777 $LOG_FOLDER;
+fi
+
+case $1 in
+	"-u") upgrade $2
+	;;
+	"-i") install $2
+	;;
+	"-c") commit
+	;;
+	"-r") rollback
+	;;
+	"-k") commitIns
+	;;
+	"-z") rollbackIns
+	;;
+	"-p") precheck
+	;;
+	*) echo "$TIMESTAMP :: Incorrect arguments - check if triggered manually" >> ${LOG_FILE}
+	exit 1
+	;;
+esac

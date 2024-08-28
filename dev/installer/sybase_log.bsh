@@ -1,0 +1,137 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : sybase_log.bsh
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : Script to create sybase_log
+# Usage   : sybase_log.bsh
+# ********************************************************************
+
+
+CONF_DIR=/eniq/sw/conf
+
+if [ -z "${CONF_DIR}" ] ; then
+  echo "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  echo "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 2
+fi
+
+. ${CONF_DIR}/niq.rc
+
+if [ -z "${BIN_DIR}" ] ; then
+  echo "ERROR: BIN_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+sybase_log_dir=$1
+if [ $sybase_log_dir ]; then
+   $TOUCH $sybase_log_dir/collect_sybase_log.txt
+    $ECHO "Directory used for log collector : $sybase_log_dir" | ${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+else 
+    sybase_log_dir=/eniq/local_logs/sybase_log_collector 
+    ${RM} -rf $sybase_log_dir
+     $MKDIR -p 777 $sybase_log_dir
+     if [ $? -eq 0 ]; then
+         $TOUCH  $sybase_log_dir/collect_sybase_log.txt
+         $ECHO "$sybase_log_dir created Sucessfully" | ${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+         $ECHO "Directory used for log collector : $sybase_log_dir" | ${TEE} -a $sybase_log_dir/collect_sybase_log.txt 
+    else
+         $ECHO "Failed to create $sybase_log_dir" 
+    exit 1 
+    fi
+fi
+ 
+
+$ECHO "Copying syslog and messages files to $sybase_log_dir" |${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+${CP} /var/log/syslog* $sybase_log_dir
+${CP} /var/log/messages* $sybase_log_dir
+
+$ECHO "Find out the OS version of server" |${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+${UNAME} -a >> $sybase_log_dir/os_version.txt
+version=`${CAT} $sybase_log_dir/os_version.txt`
+$ECHO "OS version of server is $version" |${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+
+$ECHO "Find out the SQL Anywhere Database version of server" |${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+${SU} - dcuser -c "dbversion /eniq/sql_anywhere/bin32/dbversion" >$sybase_log_dir/database_version.txt 2>&1
+dbversion=`${CAT} $sybase_log_dir/database_version.txt`
+$ECHO "Database version of server is $dbversion"  |${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+
+$ECHO "Copying repdb.cfg to $sybase_log_dir" |${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+${CP} /eniq/database/rep_main/repdb.cfg $sybase_log_dir
+
+$ECHO "Find out the repdb database startup script" |${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+${GREP} -i 'dbspawn' /eniq/admin/bin/repdb >>$sybase_log_dir/database_startup.txt
+startup_script=`${CAT} $sybase_log_dir/database_startup.txt`
+$ECHO "repdb database startup script is $startup_script " |${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+
+$ECHO "Find out the process id of repdb process" |${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+pid=`${PS} -ef|${GREP} dbsrv |${GREP} dcuser|$NAWK '{print $2}'`
+$ECHO "Process id is $pid" |${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+
+$ECHO "creating directory $sybase_log_dir/repdb_core" |${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+$MKDIR -p 777 $sybase_log_dir/repdb_core
+if [ $? -eq 0 ]; then
+ $ECHO "$sybase_log_dir/repdb_core created Sucessfully" |${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+else
+  $ECHO "Failed to create $sybase_log_dir/repdb_core" |${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+  exit 1
+fi
+
+$ECHO "Generating the three core files in 30 seconds interval" |${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+for i in 1 2 3
+do
+gcore -o $sybase_log_dir/repdb_core/repdb.core_`${DATE} '+%y%m%d_%H%M%S'` $pid
+${SLEEP} 30
+done
+
+$ECHO "Executed the pmap,pstack,pflags commands" |${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+# list=$sybase_log_dir/repdb_core
+# for file in `${LS} $list`
+# do
+# ${PMAP} $pid >>$sybase_log_dir/pmap$file.txt
+# ${PSTACK} $pid >>$sybase_log_dir/pstack$file.txt
+# ${PFLAGS} $pid >>$sybase_log_dir/pflags$file.txt
+# done
+
+# file_list="/usr/lib/librtld_db.so.1 /usr/lib/libC.so.5 /usr/lib/libCrun.so.1 /usr/lib/libaio.so.1 /usr/lib/libc.so.1 /usr/lib/libdl.so.1 /usr/lib/libdoor.so.1 /usr/lib/libgen.so.1 /usr/lib/libm.so.1 /usr/lib/libm.so.2 /usr/lib/libmd.so.1 /usr/lib/libmp.so.2 /usr/lib/libnsl.so.1 /usr/lib/librt.so.1 /usr/lib/libscf.so.1 /usr/lib/libsocket.so.1 /usr/lib/libthread.so.1 /usr/lib/libuutil.so.1 /usr/lib/libw.so.1  /usr/lib/libthread_db.so.1 /usr/lib/libthread_db.so"
+# for file in $file_list
+# do
+# $ECHO "Copying $file file to $sybase_log_dir" |${TEE} -a $sybase_log_dir/collect_sybase_log.txt
+# ${CP} $file $sybase_log_dir
+# done 
+
+# $ECHO "Creating the pstack log" |${TEE} -a $sybase_log_dir/collect_sybase_log.txt 
+for i in 1 2 3
+do
+${PMAP} $pid >>$sybase_log_dir/pmap_`${DATE} '+%y%m%d_%H%M%S'`
+${PSTACK} $pid >> $sybase_log_dir/pstack_`${DATE} '+%y%m%d_%H%M%S'`
+${PFLAGS} $pid >>$sybase_log_dir/pflags_`${DATE} '+%y%m%d_%H%M%S'`
+${SLEEP}  30
+done
+
+${TAR} -cvf /eniq/local_logs/sybase_log.tar $sybase_log_dir 
+ 

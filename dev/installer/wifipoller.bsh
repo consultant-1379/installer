@@ -1,0 +1,173 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : wifipoller.bsh
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+# Purpose : ericsson Network IQ  script for polling wifi node files with timestamp less than 24 hours.
+# Usage   : wifipoller.bsh
+# ********************************************************************
+
+NAWK=/usr/bin/nawk
+SYBASE=/eniq/sybase_iq
+export SYBASE
+
+SQLANY=/eniq/sql_anywhere
+export SQLANY
+
+. ${SYBASE}/IQ.sh
+
+# Internal directory variable
+
+CONF_DIR=/eniq/sw/conf
+export CONF_DIR
+
+BIN_DIR=/eniq/sw/bin
+export BIN_DIR
+
+RT_DIR=/eniq/sw/runtime
+export RT_DIR
+
+# ASN.1 library stuff
+OSS_ASN1_JAVA="${RT_DIR}/nokalva/asn1pjav/solaris.tgt/3.0"
+export OSS_ASN1_JAVA
+
+OSSINFO=${OSS_ASN1_JAVA}
+export OSSINFO
+
+# Path extension
+PATH=${PATH}:${OSS_ASN1_JAVA}:/usr/local/bin:${BIN_DIR}
+export PATH
+
+LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${OSS_ASN1_JAVA}/lib:${SQLANY}/lib64
+export LD_LIBRARY_PATH
+
+
+if [ -z "${CONF_DIR}" ] ; then
+  echo "ERROR: CONF_DIR is not set"
+  exit 1
+fi
+
+. ${CONF_DIR}/niq.rc
+
+_dir_=`/usr/bin/dirname $0`
+SCRIPTHOME=`cd $_dir_ 2>/dev/null && pwd || echo $_dir_`
+
+if [ -s $SCRIPTHOME/../lib/common_functions.lib ]; then
+    . $SCRIPTHOME/../lib/common_functions.lib
+else
+        echo "Could not find $SCRIPTHOME/../lib/common_functions.lib"
+        exit 63
+fi
+
+JAVA_HOME=${RT_DIR}/java
+export JAVA_HOME
+
+
+CPATH="${PLATFORM_DIR}"
+
+DIRS=`ls ${PLATFORM_DIR}`
+
+for file in ${DIRS}
+do
+  if [ -d ${PLATFORM_DIR}/${file}/dclib ]
+  then
+    JARS=`ls ${PLATFORM_DIR}/${file}/dclib/*.jar`
+
+    for jar in ${JARS}
+    do
+      CPATH="${CPATH}:${jar}"
+    done
+  fi
+done
+
+
+start(){
+
+wificonfig=/eniq/connectd/etc/wifi.env
+CLIwificonfig=/eniq/sw/conf/wifi.env
+
+if [ ! -f ${wificonfig} ] ; then
+	if [ ! -f ${CLIwificonfig} ] ; then
+		echo "wifi is not connected"
+		exit 100
+	fi
+fi
+
+if [ ! -d ${LOG_DIR}/engine/wifipoll ] ; then
+    mkdir ${LOG_DIR}/engine/wifipoll
+fi
+
+
+    LOGFILE=${LOG_DIR}/engine/wifipoll/start_wifipoller_`date '+%y%m%d'`.log
+    time=`date '+%Hh:%Mm:%Ss'`
+	echo -e "***********************\t \t Time : ${time} \t \t**********************************" >>${LOGFILE}
+
+  xENG=`ps -ef | grep java | grep "pname=WifiPoller" | $NAWK '{print $2}'`
+  if [ ! -z "${xENG}" ] ; then
+    echo "Killing previous wifi poller instance in PID ${xENG}" >> ${LOGFILE}
+    kill -9 ${xENG} 2>&1 | tee -a ${LOGFILE}
+    echo "Previous wifi poller killed" >> ${LOGFILE}
+  fi
+  
+
+
+echo "Starting to poll wifi node files..."
+
+
+   ${JAVA_HOME}/bin/java -d64 -Dpname="WifiPoller" -mx10M -DHEAP_SIZE=5M -Djava.util.logging.config.file=${CONF_DIR}/engineLogging.properties -Dlog4j.configuration=file:${CONF_DIR}/engine.log4j.properties -Ddc5000.config.directory=${CONF_DIR} -DCONF_DIR=${CONF_DIR} -DPMDATA_DIR=${PMDATA_DIR} -DPMDATA_WIFI_DIR=${PMDATA_WIFI_DIR} -DETLDATA_DIR=${ETLDATA_DIR} -DEVENTS_ETLDATA_DIR=${EVENTS_ETLDATA_DIR} -DLOG_DIR=${LOG_DIR} -DREJECTED_DIR=${REJECTED_DIR} -DREFERENCE_DIR=${REFERENCE_DIR} -DPLATFORM_DIR=${PLATFORM_DIR} -DARCHIVE_DIR=${ARCHIVE_DIR} -DHEAP_SIZE=${HEAP_SIZE} -server -classpath ${CPATH} com.ericsson.wifi.ewmnbi.WIFITimer wifi >> ${LOGFILE} 2>&1
+
+   if [ $? -eq 0 ] ; then
+      echo "Wifi Poller succesfully started" >> ${LOGFILE}
+           
+    else
+      echo "Wifi Poller not started " >> ${LOGFILE}
+   fi
+
+
+}
+
+stop(){
+
+    LOGFILE=${LOG_DIR}/engine/wifipoll/stop_wifipoller_`date '+%y%m%d'`.log
+    time=`date '+%Hh:%Mm:%Ss'`
+	echo -e "***********************\t \t Time : ${time} \t \t**********************************" >>${LOGFILE}
+
+
+echo "Stopping Wifi Poller" >> ${LOGFILE}
+
+xENG=`ps -ef | grep java | grep "pname=WifiPoller" | $NAWK '{print $2}'`
+  if [ ! -z "${xENG}" ] ; then
+    echo "Killing previous wifi poller instance in PID ${xENG}" >> ${LOGFILE}
+    kill -9 ${xENG} 2>&1 | tee -a ${LOGFILE}
+    echo "Previous wifi poller killed" >> ${LOGFILE}
+  fi
+
+
+exit 0
+}
+
+case "$1" in
+start)
+      start
+      ;;
+stop)
+     stop
+     ;;
+*)
+     echo "not valid argument"
+     exit 0
+     ;;
+esac

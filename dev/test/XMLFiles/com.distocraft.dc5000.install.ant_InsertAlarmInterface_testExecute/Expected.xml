@@ -1,0 +1,4 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<dataset>
+  <Alarminterface INTERFACEID="id" DESCRIPTION="descript" STATUS="stat" COLLECTION_SET_ID="1" COLLECTION_ID="1" QUEUE_NUMBER="10"/>
+</dataset>

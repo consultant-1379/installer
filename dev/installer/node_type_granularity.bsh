@@ -1,0 +1,435 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : node_type_granularity.bsh
+# Date    : 24/06/2019
+# Purpose : Populate NodeTypeGranularity Table for FLS Multi-Rop support
+# Usage   : ./node_type_granularity.bsh -p <path_to_feature_sw> | -u <path_to_feature_sw> <feature_name_list_file>
+#
+# ********************************************************************
+#
+# Command Section
+#
+# ********************************************************************
+
+ . /eniq/home/dcuser/.profile							  
+
+ENIQ_CONF_DIR=/eniq/installation/config
+CONF_DIR=/eniq/sw/conf
+NODETYPEDEFAULTGRANULARITYFILE="NodeTypeDefaultGranularity.txt"       
+TMP_DIR=/var/tmp
+HOME_DIR=/eniq/home/dcuser
+LOG_DIR=/eniq/log/sw_log/tp_installer
+NodeTechnologyFile=/eniq/sw/conf/NodeTechnologyMapping.properties
+TempNodeTechnologyFile=/var/tmp/TempNodeTechnologyMapping.txt
+
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+        echo "Could not find /eniq/admin/lib/common_functions.lib"
+        exit 1
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $connection_string ]; then
+  $RM -f $connection_string
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string"
+  fi
+fi
+}
+
+trap remove_connection_string EXIT
+
+DWHREPUSER=`inigetpassword REP -v DWHREPUsername -f ${CONF_DIR}/niq.ini`
+DWHREPPASSWORD=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+LOG_FILE=${LOG_DIR}/node_type_granularity_`$DATE '+%Y%m%d_%H%M%S'`.log 
+
+connection_string=/var/tmp/encrypt_$$.txt
+connection_string_decrypt="-c \"eng=${REP_SERVER_NAME};links=tcpip{host=${REP_SERVER_NAME};port=${REP_PORT}};uid=$DWHREPUSER;pwd=$DWHREPPASSWORD\" -onerror exit -nogui"
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+type get_encrypt_file &>/dev/null && isPresent='true' || isPresent='false'
+if [ ${isPresent} == 'true' ]; then
+  get_encrypt_file "${connection_string_decrypt}" "${connection_string}"
+  DBISQL_DWHREP="${DBISQL} @${connection_string}"
+else
+  DBISQL_DWHREP="${DBISQL} ${connection_string_decrypt}"
+fi
+
+
+create_technology_temp_table()
+{
+
+if [ -f $NodeTechnologyFile ]; then
+		
+	if [ -f $TempNodeTechnologyFile ]; then	
+		$RM $TempNodeTechnologyFile
+		if [[ $? -ne 0 ]] ; then
+			$ECHO "Cannot delete $TempNodeTechnologyFile file. Exiting.." | $TEE -a ${LOG_FILE}
+			exit 3
+		fi
+	fi
+
+	for line in `$CAT $NodeTechnologyFile`; do 
+		technology=`$ECHO $line | $CUT -d"-" -f1`
+		nodeTypes=`$ECHO $line | $CUT -d "-" -f2- | $TR ',' ' '`
+		for node in `$ECHO $nodeTypes`; do 
+			$ECHO $technology::$node >> $TempNodeTechnologyFile
+		done
+	done
+	
+	if [[ ! -s $TempNodeTechnologyFile ]]; then 
+		$ECHO "$TempNodeTechnologyFile is empty. Updating default Technology values in NodeTypeGranularity table."
+		#Drop the temp table if it already exist.
+		${DBISQL_DWHREP}  "IF EXISTS ((SELECT * FROM sys.systable where table_name='TempNodeTechnologyMapping')) 
+		BEGIN
+			Drop table TempNodeTechnologyMapping
+		END" > /dev/null 2>&1
+		if [[ $? -ne 0 ]] ; then
+			$ECHO "Could not drop the TempNodeTechnologyMapping table. Exiting.." | $TEE -a ${LOG_FILE}
+		exit 4
+		fi
+	else
+		#Drop the temp table if it already exist.
+		${DBISQL_DWHREP}  "IF EXISTS ((SELECT * FROM sys.systable where table_name='TempNodeTechnologyMapping')) 
+		BEGIN
+			Drop table TempNodeTechnologyMapping
+		END" > /dev/null 2>&1
+		if [[ $? -ne 0 ]] ; then
+			$ECHO "Could not drop the TempNodeTechnologyMapping table. Exiting.." | $TEE -a ${LOG_FILE}
+		exit 4
+		fi
+		#create temp table if it does not exist.
+		${DBISQL_DWHREP} "CREATE TABLE TempNodeTechnologyMapping (
+			TECHNOLOGY varchar(100),
+			NODE_TYPE varchar(100)
+			)" > /dev/null 2>&1
+		dbErrCode=$?
+		if [[ $dbErrCode -eq 0 ]] ; then
+			#load once the temp table is created.
+			${DBISQL_DWHREP} "set temporary option CONVERSION_ERROR = OFF;
+			LOAD TABLE TempNodeTechnologyMapping(
+			TECHNOLOGY,NODE_TYPE) from '$TempNodeTechnologyFile' 
+			ESCAPES OFF 
+			QUOTES OFF 
+			DELIMITED BY '::';" > /dev/null 2>&1
+			if [[ $? -ne 0 ]]; then
+				$ECHO "Loading table TempNodeTechnologyMapping failed. Exiting.." | $TEE -a ${LOG_FILE}
+				exit 5
+			fi
+		else
+			$ECHO "Could not create TempNodeTechnologyMapping table. Exiting.." | $TEE -a ${LOG_FILE}
+			exit 6
+		fi
+	fi	
+else
+$ECHO "$NodeTechnologyFile not found. Updating default Technology values in NodeTypeGranularity table." | $TEE -a ${LOG_FILE}
+		#Drop the temp table if it already exist.
+		${DBISQL_DWHREP}  "IF EXISTS ((SELECT * FROM sys.systable where table_name='TempNodeTechnologyMapping')) 
+		BEGIN
+			Drop table TempNodeTechnologyMapping
+		END" > /dev/null 2>&1
+		if [[ $? -ne 0 ]] ; then
+			$ECHO "Could not drop the TempNodeTechnologyMapping table. Exiting.." | $TEE -a ${LOG_FILE}
+		exit 4
+		fi
+fi
+}
+
+create_temp_table_and_populate()
+{
+DIRECTORY=${1}
+
+if [[ ! -f ${DIRECTORY}/${NODETYPEDEFAULTGRANULARITYFILE} ]] ; then
+	$ECHO "Feature File ${NODETYPEDEFAULTGRANULARITYFILE} is not available in ${DIRECTORY}. Populating NodeTypeGranularity table with default values." | $TEE -a ${LOG_FILE}
+	
+	#Drop the temp table if it already exist.
+	${DBISQL_DWHREP}  "IF EXISTS ((SELECT * FROM sys.systable where table_name='Granularity_temp')) 
+	BEGIN
+        Drop table Granularity_temp
+	END" > /dev/null 2>&1
+	if [[ $? -ne 0 ]] ; then
+		$ECHO "Could not drop the Granularity_temp table. Exiting.." | $TEE -a ${LOG_FILE}
+	exit 7
+	fi
+	
+else
+	#Drop the temp table if it already exist.
+	${DBISQL_DWHREP}  "IF EXISTS ((SELECT * FROM sys.systable where table_name='Granularity_temp')) 
+	BEGIN
+        Drop table Granularity_temp
+	END" > /dev/null 2>&1
+	if [[ $? -ne 0 ]] ; then
+		$ECHO "Could not drop the Granularity_temp table. Exiting.." | $TEE -a ${LOG_FILE}
+	exit 7
+	fi
+	#create temp table if it does not exist.
+	${DBISQL_DWHREP} "CREATE TABLE Granularity_temp (
+		NODE_TYPE varchar(100) NOT NULL,
+		DEFAULT_GRANULARITY varchar(100)
+		)" > /dev/null 2>&1
+	dbErrCode=$?
+	if [[ $dbErrCode -eq 0 ]] ; then
+		#load once the temp table is created.
+		${DBISQL_DWHREP} "set temporary option CONVERSION_ERROR = OFF;
+			LOAD TABLE Granularity_temp(
+			NODE_TYPE,DEFAULT_GRANULARITY) from '${DIRECTORY}/${NODETYPEDEFAULTGRANULARITYFILE}' 
+			ESCAPES OFF 
+			QUOTES OFF 
+			DELIMITED BY '::';" > /dev/null 2>&1
+			if [[ $? -ne 0 ]]; then
+				$ECHO "Loading table Granularity_temp failed. Exiting.." | $TEE -a ${LOG_FILE}
+				exit 8
+			fi
+	else
+		$ECHO "Could not create Granularity_temp table. Exiting.." | $TEE -a ${LOG_FILE}
+		exit 9
+	fi
+fi
+
+}
+
+create_main_table_and_populate()
+{
+#create the main table if it does not exist.
+${DBISQL_DWHREP} "IF EXISTS ((SELECT * FROM sys.systable where table_name='Granularity_temp'))
+BEGIN
+	IF not EXISTS ((SELECT * FROM sys.systable where table_name='NodeTypeGranularity'))
+	BEGIN
+		CREATE TABLE NodeTypeGranularity (
+		TECHNOLOGY varchar(100) NULL,
+		NODE_TYPE varchar(100) NOT NULL,
+		DEFAULT_GRANULARITY varchar(100) NULL,
+		CONFIGURED_GRANULARITY varchar(100) NULL
+		);
+		Insert into NodeTypeGranularity(NODE_TYPE,DEFAULT_GRANULARITY,CONFIGURED_GRANULARITY) 
+		SELECT DISTINCT (tpn.NODE_TYPE),gt.DEFAULT_GRANULARITY,gt.DEFAULT_GRANULARITY FROM TPNODEVERSION tpn INNER JOIN TPACTIVATION tpa ON tpn.TECHPACK_NAME= tpa.TECHPACK_NAME
+		LEFT JOIN Granularity_temp gt on gt.NODE_TYPE = tpn.NODE_TYPE WHERE tpn.NODE_TYPE is NOT NULL and tpn.Node_TYPE != 'NA' AND tpa.STATUS='ACTIVE' AND tpa.TYPE='PM' AND tpn.Node_TYPE not like '%Vinfra%';
+		
+		Insert into NodeTypeGranularity(NODE_TYPE,DEFAULT_GRANULARITY,CONFIGURED_GRANULARITY) 
+		SELECT DISTINCT (LEFT(tpn.node_type,(CHARINDEX ( ':', tpn.node_type ))-1)),gt.DEFAULT_GRANULARITY,gt.DEFAULT_GRANULARITY FROM TPNODEVERSION tpn INNER JOIN TPACTIVATION tpa ON tpn.TECHPACK_NAME= tpa.TECHPACK_NAME
+		LEFT JOIN Granularity_temp gt on gt.NODE_TYPE = tpn.NODE_TYPE WHERE tpn.NODE_TYPE is NOT NULL and tpn.Node_TYPE != 'NA' AND tpa.STATUS='ACTIVE' AND tpa.TYPE='PM' AND tpn.Node_TYPE like '%Vinfra%';
+	END
+	ELSE
+	BEGIN
+		Insert into NodeTypeGranularity(NODE_TYPE,DEFAULT_GRANULARITY,CONFIGURED_GRANULARITY)
+		SELECT DISTINCT(tpn.NODE_TYPE),gt.DEFAULT_GRANULARITY,gt.DEFAULT_GRANULARITY FROM TPNODEVERSION tpn INNER JOIN TPACTIVATION tpa ON tpn.TECHPACK_NAME = tpa.TECHPACK_NAME
+		LEFT JOIN Granularity_temp gt ON gt.NODE_TYPE = tpn.NODE_TYPE WHERE NOT EXISTS (SELECT NODE_TYPE FROM NodeTypeGranularity WHERE tpn.NODE_TYPE=NodeTypeGranularity.NODE_TYPE ) AND tpn.NODE_TYPE is NOT NULL AND tpn.Node_TYPE != 'NA' AND tpa.STATUS='ACTIVE' AND tpa.TYPE='PM' AND tpn.Node_TYPE not like '%Vinfra%';
+		
+		Insert into NodeTypeGranularity(NODE_TYPE,DEFAULT_GRANULARITY,CONFIGURED_GRANULARITY)
+		SELECT (LEFT(tpn.node_type,(CHARINDEX ( ':', tpn.node_type ))-1)),gt.DEFAULT_GRANULARITY,gt.DEFAULT_GRANULARITY FROM TPNODEVERSION tpn INNER JOIN TPACTIVATION tpa ON tpn.TECHPACK_NAME = tpa.TECHPACK_NAME
+		LEFT JOIN Granularity_temp gt ON gt.NODE_TYPE = tpn.NODE_TYPE WHERE NOT EXISTS (SELECT NODE_TYPE FROM NodeTypeGranularity WHERE (LEFT(tpn.node_type,(CHARINDEX ( ':', tpn.node_type ))-1))=NodeTypeGranularity.NODE_TYPE ) AND tpn.NODE_TYPE is NOT NULL AND tpn.Node_TYPE != 'NA' AND tpa.STATUS='ACTIVE' AND tpa.TYPE='PM' AND tpn.Node_TYPE like '%Vinfra%';
+	END
+END
+ELSE
+BEGIN
+	IF not EXISTS ((SELECT * FROM sys.systable where table_name='NodeTypeGranularity'))
+	BEGIN
+		CREATE TABLE NodeTypeGranularity (
+		TECHNOLOGY varchar(100) NULL,
+		NODE_TYPE varchar(100) NOT NULL,
+		DEFAULT_GRANULARITY varchar(100) NULL,
+		CONFIGURED_GRANULARITY varchar(100) NULL
+		);
+		Insert into NodeTypeGranularity(NODE_TYPE) 
+		SELECT DISTINCT (tpn.NODE_TYPE) FROM TPNODEVERSION tpn INNER JOIN TPACTIVATION tpa ON tpn.TECHPACK_NAME= tpa.TECHPACK_NAME
+		WHERE tpn.NODE_TYPE is NOT NULL and tpn.Node_TYPE != 'NA' AND tpa.STATUS='ACTIVE' AND tpa.TYPE='PM' AND tpn.Node_TYPE not like '%Vinfra%';
+		
+		Insert into NodeTypeGranularity(NODE_TYPE) 
+		SELECT DISTINCT (LEFT(tpn.node_type,(CHARINDEX ( ':', tpn.node_type ))-1)) FROM TPNODEVERSION tpn INNER JOIN TPACTIVATION tpa ON tpn.TECHPACK_NAME= tpa.TECHPACK_NAME
+		WHERE tpn.NODE_TYPE is NOT NULL and tpn.Node_TYPE != 'NA' AND tpa.STATUS='ACTIVE' AND tpa.TYPE='PM' AND tpn.Node_TYPE like '%Vinfra%';
+	END
+	ELSE
+	BEGIN
+		Insert into NodeTypeGranularity(NODE_TYPE)
+		SELECT DISTINCT(tpn.NODE_TYPE) FROM TPNODEVERSION tpn INNER JOIN TPACTIVATION tpa ON tpn.TECHPACK_NAME = tpa.TECHPACK_NAME
+		WHERE NOT EXISTS (SELECT NODE_TYPE FROM NodeTypeGranularity WHERE tpn.NODE_TYPE=NodeTypeGranularity.NODE_TYPE ) AND tpn.NODE_TYPE is NOT NULL AND tpn.Node_TYPE != 'NA' AND tpa.STATUS='ACTIVE' AND tpa.TYPE='PM' AND tpn.Node_TYPE not like '%Vinfra%';
+		
+		Insert into NodeTypeGranularity(NODE_TYPE)
+		SELECT DISTINCT (LEFT(tpn.node_type,(CHARINDEX ( ':', tpn.node_type ))-1)) FROM TPNODEVERSION tpn INNER JOIN TPACTIVATION tpa ON tpn.TECHPACK_NAME = tpa.TECHPACK_NAME
+		WHERE NOT EXISTS (SELECT NODE_TYPE FROM NodeTypeGranularity WHERE (LEFT(tpn.node_type,(CHARINDEX ( ':', tpn.node_type ))-1))=NodeTypeGranularity.NODE_TYPE ) AND tpn.NODE_TYPE is NOT NULL AND tpn.Node_TYPE != 'NA' AND tpa.STATUS='ACTIVE' AND tpa.TYPE='PM' AND tpn.Node_TYPE like '%Vinfra%';
+	END
+END" > /dev/null 2>&1
+dbErrCode=$?
+if [[ $dbErrCode -eq 0 ]] ; then
+    $ECHO "Successfully loaded data in NodeTypeGranularity Table." | $TEE -a ${LOG_FILE}
+	else
+	$ECHO "Could not load data in NodeTypeGranularity Table. Exiting.." | $TEE -a ${LOG_FILE}
+	exit 10
+fi
+}
+
+
+update_empty_granularity() 
+{
+#Setting the Default granularity and configured granularity values as 15MIN whose values are null 
+${DBISQL_DWHREP} "UPDATE NodeTypeGranularity SET DEFAULT_GRANULARITY='15MIN',CONFIGURED_GRANULARITY='15MIN' WHERE DEFAULT_GRANULARITY=NULL" > /dev/null 2>&1
+if [[ $? -eq 0 ]] ; then
+    $ECHO "Updated Granularity values successfully" | $TEE -a ${LOG_FILE}
+else
+    $ECHO "Could not update Granularity values. Exiting.." | $TEE -a ${LOG_FILE}
+	exit 11
+fi
+}
+
+update_granularity()
+{
+#Updating default and configured granularity which are changed in NodeTypeDefaultGranularity.txt file.
+
+if [[  -f ${DIRECTORY}/${NODETYPEDEFAULTGRANULARITYFILE} ]] ; then
+	${DBISQL_DWHREP} "UPDATE NodeTypeGranularity SET NodeTypeGranularity.DEFAULT_GRANULARITY = Granularity_temp.DEFAULT_GRANULARITY,NodeTypeGranularity.CONFIGURED_GRANULARITY = Granularity_temp.DEFAULT_GRANULARITY
+            FROM NodeTypeGranularity INNER JOIN Granularity_temp ON NodeTypeGranularity.NODE_TYPE = Granularity_temp.NODE_TYPE WHERE NodeTypeGranularity.DEFAULT_GRANULARITY=NodeTypeGranularity.CONFIGURED_GRANULARITY" > /dev/null 2>&1
+	${DBISQL_DWHREP} "UPDATE NodeTypeGranularity SET NodeTypeGranularity.DEFAULT_GRANULARITY = Granularity_temp.DEFAULT_GRANULARITY FROM NodeTypeGranularity INNER JOIN Granularity_temp ON NodeTypeGranularity.NODE_TYPE = Granularity_temp.NODE_TYPE
+            WHERE NodeTypeGranularity.DEFAULT_GRANULARITY!=NodeTypeGranularity.CONFIGURED_GRANULARITY" > /dev/null 2>&1
+	if [[ $? -eq 0 ]] ; then
+		$ECHO "Successfully updated the changed granularity value" | $TEE -a ${LOG_FILE}
+	else
+		$ECHO "Updating the changed granularity was unsuccessful." | $TEE -a ${LOG_FILE}
+	fi
+fi
+}
+
+update_technology_column()
+{
+#update the technology column as IMS, if technology is present as CORE for IMS related Node_Types
+${DBISQL_DWHREP} "IF EXISTS ((SELECT * FROM sys.systable where table_name='TempNodeTechnologyMapping'))
+	BEGIN
+		UPDATE NodeTypeGranularity SET NodeTypeGranularity.TECHNOLOGY = 'IMS' FROM NodeTypeGranularity INNER JOIN TempNodeTechnologyMapping ON NodeTypeGranularity.NODE_TYPE = TempNodeTechnologyMapping.NODE_TYPE where TempNodeTechnologyMapping.TECHNOLOGY='IMS'
+	END" > /dev/null 2>&1
+if [[ $? -ne 0 ]] ; then
+ 	$ECHO "Could not update the technology column with IMS correctly. Updating default values for Technology Column." | $TEE -a ${LOG_FILE}
+fi
+#update the technology column of NODETYPEGRANULARITY table.
+${DBISQL_DWHREP} "IF EXISTS ((SELECT * FROM sys.systable where table_name='TempNodeTechnologyMapping'))
+	BEGIN
+		UPDATE NodeTypeGranularity SET NodeTypeGranularity.TECHNOLOGY = TempNodeTechnologyMapping.TECHNOLOGY FROM NodeTypeGranularity INNER JOIN TempNodeTechnologyMapping ON NodeTypeGranularity.NODE_TYPE = TempNodeTechnologyMapping.NODE_TYPE where NodeTypeGranularity.TECHNOLOGY = NULL or NodeTypeGranularity.TECHNOLOGY = 'Others'
+	END" > /dev/null 2>&1
+	
+if [[ $? -eq 0 ]] ; then
+    $ECHO "Successfully updated the technology column" | $TEE -a ${LOG_FILE}
+else
+	$ECHO "Could not update the technology column correctly. Updating default values for Technology Column." | $TEE -a ${LOG_FILE}
+fi
+
+${DBISQL_DWHREP} "IF EXISTS ((SELECT * FROM TempNodeTechnologyMapping where technology='5G'))
+	BEGIN
+		UPDATE NodeTypeGranularity SET NodeTypeGranularity.TECHNOLOGY = '5G' where NodeTypeGranularity.TECHNOLOGY = 'NR'
+	END" > /dev/null 2>&1
+
+${DBISQL_DWHREP} "Insert into NODETYPEGRANULARITY(TECHNOLOGY,NODE_TYPE,DEFAULT_GRANULARITY,CONFIGURED_GRANULARITY)
+Select temp.technology as TECHNOLOGY , main.node_type as NODE_TYPE, main.default_granularity as DEFAULT_GRANULARITY, main.configured_granularity as CONFIGURED_GRANULARITY from NodeTypeGranularity main inner join TempNodeTechnologyMapping temp  on temp.node_type = main.node_type
+where temp.technology + '_' +temp.node_type  not in ( select distinct technology +'_'+node_type from nodetypegranularity)" > /dev/null 2>&1
+
+if [[ $? -ne 0 ]] ; then
+        $ECHO "Could not update the technology column correctly with default values for Technology Column." | $TEE -a ${LOG_FILE}
+fi		
+																																																											
+#update technology column as "Others" if technology not found for a given node type.
+${DBISQL_DWHREP} "UPDATE NodeTypeGranularity SET NodeTypeGranularity.TECHNOLOGY = 'OTHERS' 
+            WHERE NodeTypeGranularity.TECHNOLOGY=NULL" > /dev/null 2>&1
+
+if [[ $? -ne 0 ]] ; then
+	$ECHO "Could not update the technology column correctly with default values for Technology Column." | $TEE -a ${LOG_FILE}
+fi
+
+}
+
+trim_virtual_nodes()
+{
+#trim virtual node_types like 'vMRF:MRF,Vinfra' to 'vMRF'
+${DBISQL_DWHREP} "update NodeTypeGranularity set node_type = LEFT(node_type,(CHARINDEX ( ':', node_type ))-1) from NodeTypeGranularity where node_type like '%Vinfra%'" > /dev/null 2>&1
+	if [[ $? -ne 0 ]] ; then
+		$ECHO "Could not trim virtual node_types." | $TEE -a ${LOG_FILE}
+	fi
+
+}
+
+drop_temp_table()
+{
+#Drop both the temp tables if it already exist.
+${DBISQL_DWHREP}  "IF EXISTS ((SELECT * FROM sys.systable where table_name='Granularity_temp')) 
+BEGIN
+        Drop table Granularity_temp
+END" > /dev/null 2>&1
+
+if [[ $? -ne 0 ]] ; then
+	$ECHO "Could not clean up temp table Granularity_temp. Will be cleaned up in next run." | $TEE -a ${LOG_FILE}
+fi
+
+${DBISQL_DWHREP}  "IF EXISTS ((SELECT * FROM sys.systable where table_name='TempNodeTechnologyMapping')) 
+BEGIN
+        Drop table TempNodeTechnologyMapping
+END" > /dev/null 2>&1
+
+if [[ $? -ne 0 ]] ; then
+	$ECHO "Could not clean up temp table TempNodeTechnologyMapping. Will be cleaned up in next run." | $TEE -a ${LOG_FILE}
+fi
+
+}
+
+
+#------------------------------------------ Main body of the Script ------------------------------------------------------------
+
+if [[ $# -eq 2 ]]; then
+   if [[ $1 -eq -p ]] ; then
+        create_temp_table_and_populate $2
+		create_technology_temp_table
+        create_main_table_and_populate
+        update_empty_granularity
+        update_granularity
+		update_technology_column
+		#trim_virtual_nodes
+		drop_temp_table
+	elif [[ $1 -eq -u ]] ; then
+		create_temp_table_and_populate $2
+		update_granularity
+		drop_temp_table
+	else
+    $ECHO "Usage   : ./node_type_granularity.bsh -p <path_to_feature_sw>";
+	fi
+else
+	$ECHO "Usage   : ./node_type_granularity.bsh -p <path_to_feature_sw>";
+fi
+exit 0
+
+

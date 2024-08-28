@@ -1,0 +1,104 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2015 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ********************************************************************
+# Name    : extract_reports.bsh
+# Date    : 30/05/2016
+# Purpose : Script to extract reports 
+#			Used while upgrade
+# Usage   : ./extract_reports.bsh
+#
+# ********************************************************************
+#
+# Command Section
+#
+# ********************************************************************
+
+CHMOD=/usr/bin/chmod
+CP=/usr/bin/cp
+DATE=/usr/bin/date
+ECHO=/usr/bin/echo
+GREP=/usr/bin/grep
+LS=/usr/bin/ls
+MKDIR=/usr/bin/mkdir
+RM=/usr/bin/rm
+TOUCH=/usr/bin/touch
+UNZIP=/usr/bin/unzip
+CD=/usr/bin/cd
+
+TIMESTAMP=`date +%Y.%m.%d`
+SCRIPT_TIMESTAMP=`date +%Y.%m.%d_%H:%M:%S`
+ENIQ_REPORTS=eniq_reports
+INSTALLER_DIR=/eniq/sw/installer
+BO_REP=/eniq/sw/installer/boreports
+BO_TEMP=/eniq/sw/installer/BO_tmp
+LOG_DIR=/eniq/log/sw_log
+TMP=/tmp
+LOG_FILE=${LOG_DIR}/tp_installer/${TIMESTAMP}_extract_reports.log
+
+if [ ! -d ${BO_REP} ] ; then
+  $MKDIR -p ${BO_REP}
+  $CHMOD 777 ${BO_REP}
+  else
+  $RM -rf ${BO_REP}
+  $MKDIR -p ${BO_REP}
+  $CHMOD 777 ${BO_REP}
+fi
+
+if [ ! -d ${BO_TEMP} ] ; then
+  $MKDIR -p ${BO_TEMP}
+  $CHMOD 777 ${BO_TEMP}
+  else
+  $RM -rf ${BO_TEMP}
+  $MKDIR -p ${BO_TEMP}
+  $CHMOD 777 ${BO_TEMP}
+fi
+
+
+usage(){
+	$ECHO "Usage: extract_reports.bsh <path_to_eniq_base_sw>"
+}
+
+
+#---extracts the report packages in eniq_reports directory and unzips the template to 
+#/eniq/sw/installer/boreports
+
+report_extractor(){
+$ECHO "Copying all report packages into $BO_TEMP" >> ${LOG_FILE}
+$CP -r $1/$ENIQ_REPORTS/. $BO_TEMP
+START_TIMESTAMP=`date +%Y.%m.%d_%H:%M:%S`
+$ECHO "Extracting all report packages in $BO_TEMP into $BO_REP at $START_TIMESTAMP" >> ${LOG_FILE}
+bash $INSTALLER_DIR/extract_report_packages.bsh $BO_TEMP/reports/ $BO_REP
+if [ -e $BO_TEMP/templates/* ]; then
+$ECHO "Unzipping template into $BO_REP" >> ${LOG_FILE}
+$UNZIP $BO_TEMP/templates/* -d $BO_REP/
+fi
+END_TIMESTAMP=`date +%Y.%m.%d_%H:%M:%S`
+$ECHO "Extraction of report packages ended at $END_TIMESTAMP" >> ${LOG_FILE}
+$ECHO "-------------------------------------------------------------------------------------------------------" >> ${LOG_FILE}
+}
+
+
+#--------------Main body of the program--------------------------------
+$ECHO "Extraction of report packages started at $SCRIPT_TIMESTAMP" >> ${LOG_FILE}
+if [ $# -ne 1 ] ; then
+	usage
+else
+	ENIQ_SW_BASE=${1%/*}
+	report_extractor $ENIQ_SW_BASE
+	$RM -rf ${BO_TEMP}
+fi
+
+
+

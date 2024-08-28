@@ -1,0 +1,851 @@
+#!/bin/bash
+# ******************************************************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ******************************************************************************************************
+#
+# (c) Ericsson Radio Systems AB 2020 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+# ******************************************************************************************************
+# Name    		: manage_duplicate_topology_entries.bsh
+# Date    		: 16/07/2020
+# Usage  		: ./manage_duplicate_topology_entries.bsh
+# Created By	: ZJAGROY
+# ******************************************************************************************************
+
+# ********************************************************************
+# Importing configurations
+# ********************************************************************
+
+if [ -z "${BIN_DIR}" ] ; then
+  echo "ERROR: BIN_DIR is not set"
+  exit 2
+fi
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+  . /eniq/admin/lib/common_functions.lib
+else
+  echo "Could not find /eniq/admin/lib/common_functions.lib"
+  exit 2
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+. ${BIN_DIR}/common_variables.lib
+
+
+if [ -z "${CONF_DIR}" ] ; then
+  $ECHO "ERROR: CONF_DIR is not set"
+  exit 2
+fi
+if [ ! -r "${CONF_DIR}/niq.rc" ] ; then
+  $ECHO "ERROR: Source file is not readable at ${CONF_DIR}/niq.rc"
+  exit 2
+fi
+. ${CONF_DIR}/niq.rc
+
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+    $ECHO "Unable to find Sybase environment variables"
+fi
+
+DBISQL=$(which dbisql)
+
+IQ_DIR=/eniq/sybase_iq
+LOG_DIR=/eniq/log/sw_log/tp_installer
+BASE_DIR=/eniq/local_logs/iq/manage_duplicate_topology_entries
+HOME_DIR=/eniq/local_logs/iq/manage_duplicate_topology_entries
+
+STARTTIMESTAMP=`$DATE '+%y%m%d_%H%M%S'`
+logfile=${LOG_DIR}/manage_duplicate_topology_entries_${STARTTIMESTAMP}.log
+
+########################################################################
+# Function: remove_connection_string_file
+# Displays the usage message
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string_file() {
+	if [ -f $dc_connection_string ]; then 
+		$RM -rf $dc_connection_string
+		if [ $? != 0 ]; then
+		  $ECHO "Unable to delete " $dc_connection_string | $TEE -a ${LOGFILE}
+		fi
+	fi
+	
+	if [ -f $dwhrep_connection_string ]; then 
+		$RM -rf $dwhrep_connection_string
+		if [ $? != 0 ]; then
+		  $ECHO "Unable to delete " $dwhrep_connection_string | $TEE -a ${LOGFILE}
+		fi
+	fi
+}
+
+trap remove_connection_string_file EXIT
+
+DWHDBPASSWORD=`inigetpassword DWH -v DCPassword -f ${CONF_DIR}/niq.ini`
+DWH_SERVER_NAME=`inigetpassword DWH -v ServerName -f ${CONF_DIR}/niq.ini`
+DWHDB_PORT=`inigetpassword DWH -v PortNumber -f ${CONF_DIR}/niq.ini`
+DWHREPUSER=`inigetpassword REP -v DWHREPUsername -f ${CONF_DIR}/niq.ini`
+DWHREPPASSWORD=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+
+dc_connection_string_decrypt="-nogui -onerror exit -c \"eng=${DWH_SERVER_NAME};links=tcpip{host=${DWH_SERVER_NAME};port=${DWHDB_PORT}};uid=dc;pwd=${DWHDBPASSWORD}\""
+dwhrep_connection_string_decrypt="-nogui -onerror exit -c \"eng=${REP_SERVER_NAME};links=tcpip{host=${REP_SERVER_NAME};port=${REP_PORT}};uid=$DWHREPUSER;pwd=$DWHREPPASSWORD\""
+
+dc_connection_string=/var/tmp/dc_encrypt_$$.file
+dwhrep_connection_string=/var/tmp/dwhrep_encrypt_$$.file
+
+get_encrypt_file "${dc_connection_string_decrypt}" "${dc_connection_string}"
+get_encrypt_file "${dwhrep_connection_string_decrypt}" "${dwhrep_connection_string}"
+
+# List of topology tables
+TAB_LTE=(DIM_E_LTE_EUREL DIM_E_LTE_EUCELL_CELL DIM_E_LTE_GERANCELLRELATION DIM_E_LTE_ULINTERFERENCEREP DIM_E_LTE_GIGABITETHERNET DIM_E_LTE_ENODEBFUNCTION DIM_E_LTE_UTRANCELLRELATION DIM_E_LTE_SECTORCARRIER DIM_E_LTE_BBPROCESSINGRESOURCE DIM_E_LTE_EUCELL DIM_E_LTE_PAGING DIM_E_LTE_ERBS DIM_E_LTE_FRU DIM_E_LTE_NBIOTCELL DIM_E_LTE_SITE DIM_E_LTE_SITEDST)
+MAIN_TAB_LTE="DIM_E_LTE_ERBS"
+FDN_LTE=(EUCELLREL_FDN EUTRANCELL_FDN GERANCELLRELATION_FDN ULINTERFERENCE_FDN GIGABITETHERNET_FDN ENODEB_FDN UTRANCELLRELATION_FDN SECTORCARRIER_FDN BBPROCESSING_FDN EUTRANCELL_FDN PAGING_FDN ERBS_FDN FRU_FDN NBIOTCELL_FDN SITE_FDN SITE_FDN)
+MAIN_FDN_LTE="ERBS_FDN"
+LTE_table_count=16
+
+TAB_WCDMA=(DIM_E_RAN_RBSLOCALCELL DIM_E_RAN_RBSIUBLINK DIM_E_RAN_AAL2AP DIM_E_RAN_ATMTRAFFICDESCRIPTOR DIM_E_RAN_DLCODETL DIM_E_RAN_DLPOWER DIM_E_RAN_ETHERNETSMP DIM_E_RAN_ETHERNETSP DIM_E_RAN_GSMREL DIM_E_RAN_HSDSCH DIM_E_RAN_IPINTERFACE DIM_E_RAN_IURLINK DIM_E_RAN_LAG DIM_E_RAN_RELIABLEPROGRAMUNITER DIM_E_RAN_RNCFUNCTION DIM_E_RAN_RNCIUBLINK DIM_E_RAN_RNCMODULE DIM_E_RAN_SLOT DIM_E_RAN_SUBRACK DIM_E_RAN_UCELL DIM_E_RAN_UPLINKLOAD DIM_E_RAN_UREL DIM_E_RAN_VCLTP DIM_E_RAN_RBS DIM_E_RAN_RBS_BACKOFFDL DIM_E_RAN_RBS_BACKOFFUL DIM_E_RAN_RNC DIM_E_RAN_RNC_PRBS_ASSOCIATION DIM_E_RAN_RNC_RBS_ASSOCIATION DIM_E_RAN_RXI DIM_E_RAN_SITE DIM_E_RAN_SITEDST)
+MAIN_TAB_WCDMA="DIM_E_RAN_RBS"
+FDN_WCDMA=(RBSLOCALCELL_FDN IUBLINK_FDN AAL2AP_FDN ATMTRAF_DESC_FDN UCELL_FDN UCELL_FDN ETHERNETSMP_FDN ETHERNETSP_FDN GSMRELATION_FDN HSDSCH_FDN IPINTERFACE_FDN IURLINK_FDN LAG_FDN RPU_FDN RNCFUNCTION_FDN IUBLINK_FDN RNCMODULE_FDN SLOT_FDN SUBRACK_FDN UCELL_FDN UCELL_FDN UTRANRELATION_FDN VCLTP_FDN RBS_FDN RBS_FDN RBS_FDN RNC_FDN RNC_fdn RNC_fdn RXI_FDN SITE_FDN SITE_FDN)
+MAIN_FDN_WCDMA="RBS_FDN"
+WCDMA_table_count=32
+
+ACTION=""
+
+# ********************************************************************
+# Check current user account
+# ********************************************************************
+
+if [ `$ID -un` != "dcuser"  ] ; then
+	$ECHO "\nThis script must be executed as dcuser\n"
+	exit 1
+fi
+
+# ********************************************************************
+# Functions
+# ********************************************************************
+
+readNodeList(){
+  read -p "Enter the absolute path of the file containing the list of Node names:" node_list
+  if [ ! -s "$node_list" ]; then
+    $ECHO "Invalid file or, no node entries are available. Exiting..." | $TEE -a $logfile
+	exit 3
+  fi
+}
+
+readOssAlias(){
+  read -p "Enter the OSS Alias:" oss_alias
+  if [[ -z "$oss_alias" ]];then
+    $ECHO "OSS Alias cannot be null or empty. Exiting..." | $TEE -a $logfile
+	exit 3
+  fi
+
+  # Initializations
+  HOME_DIR=/eniq/local_logs/iq/manage_duplicate_topology_entries
+  HOME_DIR=$HOME_DIR/$oss_alias
+  migrated_LTE_nodes=$HOME_DIR/migrated_LTE_nodes.txt
+  migrated_WCDMA_nodes=$HOME_DIR/migrated_WCDMA_nodes.txt
+
+}
+
+readTechnology(){
+  read -p "Enter the Technology [LTE / WCDMA] (case sensitive):" technology
+  if [[ -z "$technology" || ( "$technology" != "LTE" && "$technology" != "WCDMA" ) ]]; then
+    $ECHO "Invalid Technology entered. Exiting..." | $TEE -a $logfile
+	exit 3
+  fi
+}
+
+backupAndDeleteDataUsingNodeName(){
+  backup_dir=$HOME_DIR/$1
+  if [ ! -d "$backup_dir" ]
+  then
+    $MKDIR -p $backup_dir
+    $CHMOD 740 $backup_dir
+  fi
+  
+  $ECHO "Technology = $technology" | $TEE -a $logfile
+  $ECHO "File containing list of Node Names = $node_list" | $TEE -a $logfile
+  
+  migrated_nodes_file=migrated_"$technology"_nodes
+  table_count="$technology"_table_count
+  count=0
+  
+  if [ ! -f "${!migrated_nodes_file}" ]; then
+    $TOUCH ${!migrated_nodes_file}
+  fi
+  
+  while [[ $count -lt ${!table_count} ]]
+  do
+    table=TAB_"$technology"[$count]
+    fdn=FDN_"$technology"[$count]
+	
+    $ECHO "Select DATANAME from DWHColumn where STORAGEID like '${!table}:%'; OUTPUT TO $backup_dir/getColumn.txt delimited  by ','" > ${backup_dir}/q1.sql
+
+    $ECHO "Getting the column names of ${!table} " | $TEE -a $logfile
+
+    $DBISQL @${dwhrep_connection_string} ${backup_dir}/q1.sql | $TEE -a $logfile
+
+    $TR -d \' < ${backup_dir}/getColumn.txt > ${backup_dir}/temp_fie.txt
+    $TR '\n' ',' < ${backup_dir}/temp_fie.txt > ${backup_dir}/getColumn.txt
+	
+    #Fetching the columnHeader from the backup files				
+    read -r columnHeader < ${backup_dir}/getColumn.txt
+    columnHeader=${columnHeader:0:(${#columnHeader}-1)}
+	
+	#Clean up
+	$RM -f ${backup_dir}/getColumn.txt ${backup_dir}/temp_fie.txt ${backup_dir}/q1.sql
+	
+	#Reading the Node details from $node_list file
+    while read line || [ -n "$line" ];           
+    do  
+      if [ "$line" != "" ]; then
+        $ECHO "UNLOAD Select $columnHeader from ${!table} WHERE (${!fdn} like '%$line%') and OSS_ID='${oss_alias}' INTO FILE '$backup_dir/$line/${!table}.txt' APPEND ON;" >> ${backup_dir}/query1.sql							
+        $ECHO "delete from ${!table} WHERE (${!fdn} like '%$line%') and OSS_ID='${oss_alias}'" >> ${backup_dir}/query2.sql	
+      fi	
+    done < $node_list  
+
+    $ECHO "Saving backup of ${!table}" | $TEE -a $logfile
+    $DBISQL @${dc_connection_string} ${backup_dir}/query1.sql | $TEE -a $logfile
+    q1=$?
+
+    $ECHO "Deleting Topology entries in  ${!table}" | $TEE -a $logfile
+    $DBISQL @${dc_connection_string} ${backup_dir}/query2.sql | $TEE -a $logfile
+    q2=$?
+	
+    #Storing the Node details from $node_list file
+    if [[ $q1 -eq 0 && $q2 -eq 0 ]];
+    then 
+      while read line || [ -n "$line" ];
+      do
+        if [ $($GREP -i -c -w "$line::${!table}::DELETED" ${!migrated_nodes_file}) -eq 0 ]; then
+          $ECHO "$line::${!table}::DELETED" >> ${!migrated_nodes_file}
+        fi
+      done < $node_list
+    else
+      $ECHO "Migration failed for ${!table} table." | $TEE -a $logfile
+    fi
+	
+    count=`expr $count + 1`
+	
+    #Cleanup steps
+    $RM -f ${backup_dir}/query1.sql ${backup_dir}/query2.sql
+	
+  done
+}
+
+deactiveDataUsingNodeName(){
+  
+  backup_dir=$HOME_DIR
+  if [ ! -d "$backup_dir" ]
+  then
+    $MKDIR -p $backup_dir
+    $CHMOD 740 $backup_dir
+  fi
+  
+  $ECHO "Technology = $technology" | $TEE -a $logfile
+  $ECHO "File containing list of Node Names = $node_list" | $TEE -a $logfile
+  
+  migrated_nodes_file=migrated_"$technology"_nodes
+  table_count="$technology"_table_count
+  count=0
+  
+  if [ ! -f "${!migrated_nodes_file}" ]; then
+    $TOUCH ${!migrated_nodes_file}
+  fi
+  
+  while [[ $count -lt ${!table_count} ]]
+  do
+    table=TAB_"$technology"[$count]
+    fdn=FDN_"$technology"[$count]
+	
+	#Reading the Node details from $node_list file
+    while read line || [ -n "$line" ];           
+    do  
+      if [ "$line" != "" ]; then
+        $ECHO "UPDATE ${!table} set STATUS='DEACTIVE' WHERE (${!fdn} like '%$line%') and OSS_ID='${oss_alias}';" >> ${backup_dir}/query1.sql								
+      fi	
+    done < $node_list  
+
+    $ECHO "Deactivating Topology entries from ${!table}" | $TEE -a $logfile
+    $DBISQL @${dc_connection_string} ${backup_dir}/query1.sql | $TEE -a $logfile
+    q1=$?
+	
+    #Storing the Node details from $node_list file
+    if [[ $q1 -eq 0 ]];
+    then 
+      while read line || [ -n "$line" ];
+      do
+        if [ $($GREP -i -c -w "$line::${!table}::DEACTIVATED" ${!migrated_nodes_file}) -eq 0 ]; then
+          $ECHO "$line::${!table}::DEACTIVATED" >> ${!migrated_nodes_file}
+        fi
+      done < $node_list
+    else
+      $ECHO "Migration failed for ${!table} table." | $TEE -a $logfile
+    fi
+	
+    count=`expr $count + 1`
+	
+    #Cleanup steps
+    $RM -f ${backup_dir}/query1.sql
+	
+  done
+}
+
+# ********************************************************************
+# Main Body
+# ********************************************************************
+
+$CLEAR
+
+$TOUCH $logfile
+
+$ECHO "Enter the action to perform."
+read -p "Enter [m - Migration / r - Rollback] (case sensitive):" action_to_perform
+ACTION=$action_to_perform
+
+#Migration
+if [ "$action_to_perform" == "m" ]; then
+  $ECHO -e "Migration mode is enabled\n" | $TEE -a $logfile
+  
+  $ECHO "Select the correct option:"
+  $ECHO "1. Migration conducted with-in the same OSS, i.e. the OSS-Alias is constant."
+  $ECHO "2. Migration is not yet conducted / Migration is done between multiple OSSs, i.e. the OSS-Alias is variant."
+  read oss_configuration_type
+  
+  if [ "$oss_configuration_type" == 1 ]; then
+    $ECHO -e "Migration is conducted with-in the same OSS. \n" | $TEE -a $logfile
+	
+	$ECHO "Enter '1' if Migration is conducted keeping the Node Name constant."
+	$ECHO "Enter '2' if Migration is conducted with a new Node Name."
+	read node_configuration_type
+	
+	if [ "$node_configuration_type" == 1 ]; then
+	  $ECHO -e "Migration is conducted with the same Node Name.\n" | $TEE -a $logfile
+	  
+	  readNodeList
+	  readOssAlias
+	  readTechnology
+	  
+	  $ECHO "Enter '1' to take a backup and delete the existing entries."
+	  $ECHO "Enter '2' to mark the entries as 'deactive'."
+	  read modification_mode
+	  
+	  if [ "$modification_mode" == 1 ]; then
+	    $ECHO -e "Existing Topology entries will be backed up to $HOME_DIR/G1_backup and then deleted.\n" | $TEE -a $logfile
+		
+		$ECHO "Start time: " `$DATE '+%y%m%d_%H%M%S'` | $TEE -a $logfile
+		$ECHO "Process : Migration with-in the same OSS keeping the Node name constant. Topology entries will be backed up and deleted." | $TEE -a $logfile
+		
+		backup_dir=$HOME_DIR/"G1_backup"
+        if [ ! -d "$backup_dir" ]
+        then
+          $MKDIR -p $backup_dir
+          $CHMOD 740 $backup_dir
+        fi
+  
+        $ECHO "Technology = $technology" | $TEE -a $logfile
+        $ECHO "File containing list of Node Names = $node_list" | $TEE -a $logfile
+  
+        migrated_nodes_file=migrated_"$technology"_nodes
+        table_count="$technology"_table_count
+		main_table=MAIN_TAB_"$technology"
+		main_fdn=MAIN_FDN_"$technology"
+        count=0
+		
+		if [ ! -f "${!migrated_nodes_file}" ]; then
+          $TOUCH ${!migrated_nodes_file}
+        fi
+		
+		while read line || [ -n "$line" ];
+        do
+		  if [ "$line" != "" ]; then
+		    $ECHO "SELECT ${!main_fdn} FROM ${!main_table} WHERE ${!main_fdn} LIKE '%$line%' AND managedElementType != 'RadioNode' AND ${!main_fdn} NOT IN (SELECT ${!main_fdn} FROM ${!main_table}_CURRENT_DC); OUTPUT TO $backup_dir/G1_FDNs.txt delimited  by '\n' QUOTE ''" > ${backup_dir}/getG1FDNs.sql | $TEE -a $logfile
+            $DBISQL @${dc_connection_string} ${backup_dir}/getG1FDNs.sql | $TEE -a $logfile
+            q1=$?
+			
+			if [[ $q1 -ne 0 ]]; then
+			  $ECHO "No entries found for $line in ${!main_table}." | $TEE -a $logfile
+			else
+			  while read entry || [ -n "$entry" ];
+              do
+                if [ "$entry" != "" ]; then
+                  while [[ $count -lt ${!table_count} ]]
+                  do
+                    table=TAB_"$technology"[$count]
+                    fdn=FDN_"$technology"[$count]
+	
+                    $ECHO "Select DATANAME from DWHColumn where STORAGEID like '${!table}:%'; OUTPUT TO $backup_dir/getColumn.txt delimited  by ','" > ${backup_dir}/q1.sql | $TEE -a $logfile
+                    $ECHO "Getting the column names of ${!table} " | $TEE -a $logfile
+                    $DBISQL @${dwhrep_connection_string} ${backup_dir}/q1.sql | $TEE -a $logfile
+
+                    $TR -d \' < ${backup_dir}/getColumn.txt > ${backup_dir}/temp_fie.txt
+                    $TR '\n' ',' < ${backup_dir}/temp_fie.txt > ${backup_dir}/getColumn.txt
+	
+                    #Fetching the columnHeader from the backup files				
+                    read -r columnHeader < ${backup_dir}/getColumn.txt
+                    columnHeader=${columnHeader:0:(${#columnHeader}-1)}
+	
+	                #Clean up
+                    $RM -f ${backup_dir}/getColumn.txt ${backup_dir}/temp_fie.txt ${backup_dir}/q1.sql
+	
+                    $ECHO "UNLOAD Select $columnHeader from ${!table} WHERE (${!fdn} like '$entry,%' or ${!fdn} like '$entry') and (${!fdn} not like '$entry,SubNetwork=%' and ${!fdn} not like '$entry,MeContext=%' and (${!fdn} not like '$entry,ManagedElement=%' or ${!fdn} like '$entry,ManagedElement=1,%' or ${!fdn} like '$entry,ManagedElement=1')) and OSS_ID='${oss_alias}' INTO FILE '$backup_dir/$line/${!table}.txt' APPEND ON;" >> ${backup_dir}/query1.sql | $TEE -a $logfile
+                    $ECHO "delete from ${!table} WHERE (${!fdn} like '$entry,%' or ${!fdn} like '$entry') and (${!fdn} not like '$entry,SubNetwork=%' and ${!fdn} not like '$entry,MeContext=%' and (${!fdn} not like '$entry,ManagedElement=%' or ${!fdn} like '$entry,ManagedElement=1,%' or ${!fdn} like '$entry,ManagedElement=1')) and OSS_ID='${oss_alias}'" >> ${backup_dir}/query2.sql | $TEE -a $logfile	
+      
+                    $ECHO "Saving backup of ${!table}" | $TEE -a $logfile
+                    $DBISQL @${dc_connection_string} ${backup_dir}/query1.sql | $TEE -a $logfile
+                    q1=$?
+
+                    $ECHO "Deleting Topology entries in  ${!table}" | $TEE -a $logfile
+                    $DBISQL @${dc_connection_string} ${backup_dir}/query2.sql | $TEE -a $logfile
+                    q2=$?
+	
+                    #Storing the Node details from $node_list file
+                    if [[ $q1 -eq 0 && $q2 -eq 0 ]];
+                    then 
+                      if [ $($GREP -i -c -w "$line::${!table}::DELETED" ${!migrated_nodes_file}) -eq 0 ]; then
+                        $ECHO "$line::${!table}::DELETED" >> ${!migrated_nodes_file}
+                      fi
+                    else
+                      $ECHO "Migration failed for ${!table} for $entry." | $TEE -a $logfile
+                    fi
+	
+                    count=`expr $count + 1`
+	
+                    #Cleanup steps
+                    $RM -f ${backup_dir}/query1.sql ${backup_dir}/query2.sql
+	
+                  done
+				  
+				  count=0
+				fi
+			  done < $backup_dir/G1_FDNs.txt
+			fi
+          fi
+
+          #Cleanup steps
+          $RM -f ${backup_dir}/G1_FDNs.txt ${backup_dir}/getG1FDNs.sql
+		done < $node_list
+		
+	  elif [ "$modification_mode" == 2 ]; then
+	    $ECHO -e "Existing Topology entries will be marked 'deactive'.\n" | $TEE -a $logfile
+		
+		$ECHO "Start time: " `$DATE '+%y%m%d_%H%M%S'` | $TEE -a $logfile
+		$ECHO "Process : Migration with-in the same OSS keeping the Node name constant. Topology entries will be marked 'deactive'" | $TEE -a $logfile
+		
+		backup_dir=$HOME_DIR/"G1_backup"
+        if [ ! -d "$backup_dir" ]
+        then
+          $MKDIR -p $backup_dir
+          $CHMOD 740 $backup_dir
+        fi
+  
+        $ECHO "Technology = $technology" | $TEE -a $logfile
+        $ECHO "File containing list of Node Names = $node_list" | $TEE -a $logfile
+  
+        migrated_nodes_file=migrated_"$technology"_nodes
+        table_count="$technology"_table_count
+		main_table=MAIN_TAB_"$technology"
+		main_fdn=MAIN_FDN_"$technology"
+        count=0
+		
+		if [ ! -f "${!migrated_nodes_file}" ]; then
+          $TOUCH ${!migrated_nodes_file}
+        fi
+		
+		while read line || [ -n "$line" ];
+        do
+		  if [ "$line" != "" ]; then
+		    $ECHO "SELECT ${!main_fdn} FROM ${!main_table} WHERE ${!main_fdn} LIKE '%$line%' AND managedElementType != 'RadioNode' AND ${!main_fdn} NOT IN (SELECT ${!main_fdn} FROM ${!main_table}_CURRENT_DC); OUTPUT TO $backup_dir/G1_FDNs.txt delimited  by '\n' QUOTE ''" > ${backup_dir}/getG1FDNs.sql | $TEE -a $logfile
+            $DBISQL @${dc_connection_string} ${backup_dir}/getG1FDNs.sql | $TEE -a $logfile
+            q1=$?
+			
+			if [[ $q1 -ne 0 ]]; then
+			  $ECHO "No entries found for $line in ${!main_table}." | $TEE -a $logfile
+			else
+			  while read entry || [ -n "$entry" ];
+              do
+                if [ "$entry" != "" ]; then
+                  while [[ $count -lt ${!table_count} ]]
+                  do
+                    table=TAB_"$technology"[$count]
+                    fdn=FDN_"$technology"[$count]
+	
+                    $ECHO "UPDATE ${!table} set STATUS='DEACTIVE' WHERE (${!fdn} like '$entry,%' or ${!fdn} like '$entry') and (${!fdn} not like '$entry,SubNetwork=%' and ${!fdn} not like '$entry,MeContext=%' and (${!fdn} not like '$entry,ManagedElement=%' or ${!fdn} like '$entry,ManagedElement=1,%' or ${!fdn} like '$entry,ManagedElement=1')) and OSS_ID='${oss_alias}'" >> ${backup_dir}/query1.sql | $TEE -a $logfile
+      
+                    $ECHO "Deactivating Topology entries from ${!table}" | $TEE -a $logfile 
+                    $DBISQL @${dc_connection_string} ${backup_dir}/query1.sql | $TEE -a $logfile
+                    q1=$?
+	
+                    #Storing the Node details from $node_list file
+                    if [[ $q1 -eq 0 ]];
+                    then 
+                      if [ $($GREP -i -c -w "$line::${!table}::DEACTIVATED" ${!migrated_nodes_file}) -eq 0 ]; then
+                        $ECHO "$line::${!table}::DEACTIVATED" >> ${!migrated_nodes_file}
+                      fi
+                    else
+                      $ECHO "Migration failed for ${!table} for $entry." | $TEE -a $logfile
+                    fi
+	
+                    count=`expr $count + 1`
+	
+                    #Cleanup steps
+                    $RM -f ${backup_dir}/query1.sql 
+	
+                  done
+				  
+				  count=0
+				fi
+			  done < $backup_dir/G1_FDNs.txt
+			fi
+          fi
+
+          #Cleanup steps
+          $RM -f ${backup_dir}/G1_FDNs.txt ${backup_dir}/getG1FDNs.sql
+		done < $node_list
+		
+	  else
+	    $ECHO "Invalid option is selected. Existing..." | $TEE -a $logfile
+		exit 3
+	  fi
+	  
+	elif [ "$node_configuration_type" == 2 ]; then
+	  $ECHO -e "Migration is conducted with a new Node Name.\n" | $TEE -a $logfile
+	  
+	  readNodeList
+	  readOssAlias
+	  readTechnology
+	  
+	  $ECHO "Enter '1' to take a backup and delete the existing entries."
+	  $ECHO "Enter '2' to mark the entries as 'deactive'."
+	  read modification_mode
+	  
+	  if [ "$modification_mode" == 1 ]; then
+	    $ECHO -e "Existing Topology entries will be backed up to $HOME_DIR/G1_backup and then deleted.\n" | $TEE -a $logfile
+		
+		$ECHO "Start time: " `$DATE '+%y%m%d_%H%M%S'` | $TEE -a $logfile
+		$ECHO "Process : Migration with-in the same OSS with a new Node name. Topology entries will be backed up and deleted." | $TEE -a $logfile
+		backupAndDeleteDataUsingNodeName "G1_backup"
+		
+	  elif [ "$modification_mode" == 2 ]; then
+	    $ECHO -e "Existing Topology entries will be marked 'deactive'.\n" | $TEE -a $logfile
+		
+		$ECHO "Start time: " `$DATE '+%y%m%d_%H%M%S'` | $TEE -a $logfile
+		$ECHO "Process : Migration with-in the same OSS with a new Node name. Topology entries will be marked 'deactive'" | $TEE -a $logfile
+		
+		deactiveDataUsingNodeName
+		
+	  else
+	    $ECHO "Invalid option is selected. Existing..." | $TEE -a $logfile
+		exit 3
+	  fi
+	else 
+	  $ECHO "Invalid Node Name configuration selected. Exiting..." | $TEE -a $logfile
+	  exit 3
+	fi
+	
+  elif [ "$oss_configuration_type" == 2 ]; then
+    $ECHO -e "Migration is not yet conducted / Migration is conducted across multiple OSSs.\n" | $TEE -a $logfile
+	
+	readNodeList
+	readOssAlias
+	readTechnology
+	  
+	$ECHO "Enter '1' to take a backup and delete the existing entries."
+	$ECHO "Enter '2' to mark the entries as 'deactive'."
+	read modification_mode
+	  
+	if [ "$modification_mode" == 1 ]; then
+	  $ECHO -e "Existing Topology entries will be backed up to $HOME_DIR/G1_backup and then deleted.\n" | $TEE -a $logfile
+		
+	  $ECHO "Start time: " `$DATE '+%y%m%d_%H%M%S'` | $TEE -a $logfile
+	  $ECHO "Process : Migration is conducted across multiple OSS. Topology entries will be backed up and deleted." | $TEE -a $logfile
+	  backupAndDeleteDataUsingNodeName "G1_backup"
+		
+	elif [ "$modification_mode" == 2 ]; then
+	  $ECHO -e "Existing Topology entries will be marked 'deactive'.\n" | $TEE -a $logfile
+		
+	  $ECHO "Start time: " `$DATE '+%y%m%d_%H%M%S'` | $TEE -a $logfile
+	  $ECHO "Process : Migration is conducted across multiple OSS. Topology entries will be marked 'deactive'" | $TEE -a $logfile
+	  deactiveDataUsingNodeName
+		
+	else
+	  $ECHO "Invalid option is selected. Existing..." | $TEE -a $logfile
+	  exit 3
+	fi
+	
+  else
+    $ECHO "Invalid OSS configuration selected. Exiting..." | $TEE -a $logfile
+	exit 3
+  fi
+
+# Rollback  
+elif [ "$action_to_perform" == "r" ]; then
+  $ECHO -e "Rollback mode is enabled\n" | $TEE -a $logfile
+  
+  # Rollback migrated nodes.
+  read -p "Do you want to perform rollback for the nodes that are already migrated? [yes/ no] (case sensitive): " rollback_migrated_nodes
+  if [ "$rollback_migrated_nodes" == "yes" ]; then
+	readNodeList
+    readOssAlias
+    readTechnology
+  
+    $ECHO "Start time: " `$DATE '+%y%m%d_%H%M%S'` | $TEE -a $logfile
+    $ECHO "Process : Performing rollback for migrated nodes. Topology entries will be backed up and deleted." | $TEE -a $logfile
+	
+	backup_dir=$HOME_DIR/"G2_backup"
+    if [ ! -d "$backup_dir" ]
+    then
+      $MKDIR -p $backup_dir
+      $CHMOD 740 $backup_dir
+    fi
+  
+    $ECHO "Technology = $technology" | $TEE -a $logfile
+    $ECHO "File containing list of Node Names = $node_list" | $TEE -a $logfile
+  
+    table_count="$technology"_table_count
+	main_table=MAIN_TAB_"$technology"
+	main_fdn=MAIN_FDN_"$technology"
+    count=0
+		
+	while read line || [ -n "$line" ];
+    do
+	  if [ "$line" != "" ]; then
+	    $ECHO "SELECT ${!main_fdn} FROM ${!main_table} WHERE ${!main_fdn} LIKE '%$line%' AND managedElementType = 'RadioNode'; OUTPUT TO $backup_dir/G2_FDNs.txt delimited  by '\n' QUOTE ''" > ${backup_dir}/getG2FDNs.sql | $TEE -a $logfile
+        $DBISQL @${dc_connection_string} ${backup_dir}/getG2FDNs.sql | $TEE -a $logfile
+        q1=$?
+			
+		if [[ $q1 -ne 0 ]]; then
+		  $ECHO "No entries found for $line in ${!main_table}." | $TEE -a $logfile
+		else
+		  while read entry || [ -n "$entry" ];
+          do
+            if [ "$entry" != "" ]; then
+              while [[ $count -lt ${!table_count} ]]
+              do
+                table=TAB_"$technology"[$count]
+                fdn=FDN_"$technology"[$count]
+	
+                $ECHO "Select DATANAME from DWHColumn where STORAGEID like '${!table}:%'; OUTPUT TO $backup_dir/getColumn.txt delimited  by ','" > ${backup_dir}/q1.sql | $TEE -a $logfile
+                $ECHO "Getting the column names of ${!table} " | $TEE -a $logfile
+                $DBISQL @${dwhrep_connection_string} ${backup_dir}/q1.sql | $TEE -a $logfile
+
+                $TR -d \' < ${backup_dir}/getColumn.txt > ${backup_dir}/temp_fie.txt
+                $TR '\n' ',' < ${backup_dir}/temp_fie.txt > ${backup_dir}/getColumn.txt
+	
+                #Fetching the columnHeader from the backup files				
+                read -r columnHeader < ${backup_dir}/getColumn.txt
+                columnHeader=${columnHeader:0:(${#columnHeader}-1)}
+	
+	            #Clean up
+                $RM -f ${backup_dir}/getColumn.txt ${backup_dir}/temp_fie.txt ${backup_dir}/q1.sql
+	
+                $ECHO "UNLOAD Select $columnHeader from ${!table} WHERE (${!fdn} like '$entry,%' or ${!fdn} like '$entry') and (${!fdn} not like '$entry,SubNetwork=%' and ${!fdn} not like '$entry,MeContext=%' and (${!fdn} not like '$entry,ManagedElement=%' or ${!fdn} like '$entry,ManagedElement=1,%' or ${!fdn} like '$entry,ManagedElement=1')) and OSS_ID='${oss_alias}' INTO FILE '$backup_dir/$line/${!table}.txt' APPEND ON;" >> ${backup_dir}/query1.sql | $TEE -a $logfile
+                $ECHO "delete from ${!table} WHERE (${!fdn} like '$entry,%' or ${!fdn} like '$entry') and (${!fdn} not like '$entry,SubNetwork=%' and ${!fdn} not like '$entry,MeContext=%' and (${!fdn} not like '$entry,ManagedElement=%' or ${!fdn} like '$entry,ManagedElement=1,%' or ${!fdn} like '$entry,ManagedElement=1')) and OSS_ID='${oss_alias}'" >> ${backup_dir}/query2.sql | $TEE -a $logfile	
+      
+                $ECHO "Saving backup of ${!table}" | $TEE -a $logfile
+                $DBISQL @${dc_connection_string} ${backup_dir}/query1.sql | $TEE -a $logfile
+                q1=$?
+
+                $ECHO "Deleting Topology entries in ${!table}" | $TEE -a $logfile
+                $DBISQL @${dc_connection_string} ${backup_dir}/query2.sql | $TEE -a $logfile
+                q2=$?
+	
+                count=`expr $count + 1`
+	
+                #Cleanup steps
+                $RM -f ${backup_dir}/query1.sql ${backup_dir}/query2.sql
+	
+              done
+			  
+			  count=0
+			fi
+		  done < $backup_dir/G2_FDNs.txt
+		fi
+      fi
+
+      #Cleanup steps
+      $RM -f ${backup_dir}/G2_FDNs.txt ${backup_dir}/getG2FDNs.sql
+	done < $node_list
+	
+  else 
+    $ECHO -e "Rollback will not be performed for any migrated nodes.\n" | $TEE -a $logfile
+  fi
+  
+  # Restore older node configurations
+  read -p "Do you want to restore to the older configuration of the nodes? [yes/ no] (case sensitive): " restore_old_nodes
+  if [ "$restore_old_nodes" == "yes" ]; then
+    readOssAlias
+	if [ ! -d "$HOME_DIR" ]
+    then
+      $ECHO "No backup found for $oss_alias. Exiting..." | $TEE -a $logfile
+	  exit 10
+    fi
+	
+	backup_dir=$HOME_DIR/"G1_backup"
+	if [ ! -d "$backup_dir" ]
+    then
+      $MKDIR -p $backup_dir
+      $CHMOD 740 $backup_dir
+    fi
+	
+    readTechnology
+	migrated_nodes_file=migrated_"$technology"_nodes
+	table_count="$technology"_table_count
+	main_table=MAIN_TAB_"$technology"
+	main_fdn=MAIN_FDN_"$technology"
+    count=0
+	
+	readNodeList
+	
+	$ECHO "Technology = $technology" | $TEE -a $logfile
+    $ECHO "File containing list of Node Names = $node_list" | $TEE -a $logfile
+	
+	while [[ $count -lt ${!table_count} ]]
+    do
+      table=TAB_"$technology"[$count]
+      fdn=FDN_"$technology"[$count]
+	
+      $ECHO "Select DATANAME from DWHColumn where STORAGEID like '${!table}:%'; OUTPUT TO $backup_dir/getColumn.txt delimited  by ','" > ${backup_dir}/q1.sql | $TEE -a $logfile
+
+      $ECHO "Getting the column names of ${!table} " | $TEE -a $logfile
+
+      $DBISQL @${dwhrep_connection_string} ${backup_dir}/q1.sql | $TEE -a $logfile
+
+      $TR -d \' < ${backup_dir}/getColumn.txt > ${backup_dir}/temp_fie.txt
+      $TR '\n' ',' < ${backup_dir}/temp_fie.txt > ${backup_dir}/getColumn.txt
+	
+      #Fetching the columnHeader from the backup files				
+      read -r columnHeader < ${backup_dir}/getColumn.txt
+      columnHeader=${columnHeader:0:(${#columnHeader}-1)}
+	
+	  #Clean up
+	  $RM -f ${backup_dir}/getColumn.txt ${backup_dir}/temp_fie.txt ${backup_dir}/q1.sql
+	
+	  #Loading back the deleted entries
+      while read line || [ -n "$line" ];           
+      do  
+        if [ "$line" != "" ]; then
+          migration_mode=`$GREP -i $line ${!migrated_nodes_file} | $HEAD -1 | $AWK -F'::' '{print $3}'`
+		
+		  if [ "$migration_mode" == "DELETED" ]; then
+		    if [ ! -f $HOME_DIR/G1_backup/$line/${!table}.txt ]; then
+		      $ECHO "Backup of ${!table} for $line not found. No configurations will be restored." | $TEE -a $logfile
+			  continue
+		    fi
+		  
+		    #Load back the data for each node from $HOME_DIR/G1_backup/$line/${!table}.txt file
+			$ECHO "LOAD TABLE ${!table}
+						($columnHeader) FROM '${HOME_DIR}/G1_backup/${line}/${!table}.txt'
+						ESCAPES OFF
+						QUOTES ON
+						DELIMITED BY ','
+						FORMAT BCP
+						IGNORE CONSTRAINT UNIQUE 1000 
+						IGNORE CONSTRAINT NULL 1000 
+						IGNORE CONSTRAINT DATA VALUE 1000
+						WITH CHECKPOINT OFF;" >> ${backup_dir}/query1.sql							
+		  fi
+        fi	
+      done < $node_list  
+
+	  if [ -f ${backup_dir}/query1.sql ]; then
+        $ECHO "Restoring pre-migration node configuration to ${!table}" | $TEE -a $logfile
+        $DBISQL @${dc_connection_string} ${backup_dir}/query1.sql | $TEE -a $logfile
+        q1=$?
+
+        #Removing the restored nodes from $migrated_nodes_file
+        if [[ $q1 -ne 0 ]]; then
+          $ECHO "Restoring failed for ${!table} table." | $TEE -a $logfile
+        fi
+	  
+	    #Cleanup steps
+        $RM -f ${backup_dir}/query1.sql 
+	
+	  fi
+	
+      count=`expr $count + 1`
+	
+    done
+	
+	#Activating the deactivated entries.
+	count=0
+    while read line || [ -n "$line" ];
+    do
+	  if [ "$line" != "" ]; then
+		 
+		migration_mode=`$GREP -i $line ${!migrated_nodes_file} | $HEAD -1 | $AWK -F'::' '{print $3}'`
+		
+		if [ "$migration_mode" == "DEACTIVATED" ]; then
+		  
+		  $ECHO "SELECT ${!main_fdn} FROM ${!main_table} WHERE ${!main_fdn} LIKE '%$line%' AND managedElementType != 'RadioNode' AND ${!main_fdn} NOT IN (SELECT ${!main_fdn} FROM ${!main_table}_CURRENT_DC); OUTPUT TO $backup_dir/G1_FDNs.txt delimited  by '\n' QUOTE ''" > ${backup_dir}/getG1FDNs.sql
+          $DBISQL @${dc_connection_string} ${backup_dir}/getG1FDNs.sql | $TEE -a $logfile
+          q1=$?
+			
+		  if [[ $q1 -ne 0 ]]; then
+		    $ECHO "No entries found for $line in ${!main_table}." | $TEE -a $logfile
+		  else
+		    while read entry || [ -n "$entry" ]
+            do
+              if [ "$entry" != "" ]; then
+                while [[ $count -lt ${!table_count} ]];
+                do
+                  table=TAB_"$technology"[$count]
+                  fdn=FDN_"$technology"[$count]
+	
+                  $ECHO "UPDATE ${!table} set STATUS='ACTIVE' WHERE (${!fdn} like '$entry,%' or ${!fdn} like '$entry') and (${!fdn} not like '$entry,SubNetwork=%' and ${!fdn} not like '$entry,MeContext=%' and (${!fdn} not like '$entry,ManagedElement=%' or ${!fdn} like '$entry,ManagedElement=1,%' or ${!fdn} like '$entry,ManagedElement=1')) and OSS_ID='${oss_alias}'" >> ${backup_dir}/query1.sql
+      
+                  $ECHO "Activating Topology entries from ${!table}" | $TEE -a $logfile
+                  $DBISQL @${dc_connection_string} ${backup_dir}/query1.sql | $TEE -a $logfile
+                  q1=$?
+	
+                  #Storing the Node details from $node_list file
+                  if [[ $q1 -eq 0 ]]; then 
+                    if [ $($GREP -i -c -w "$line::${!table}::DEACTIVATED" ${!migrated_nodes_file}) -eq 0 ]; then
+                      $ECHO "$line::${!table}::DEACTIVATED" >> ${!migrated_nodes_file}
+                    fi
+                  else
+                    $ECHO "Migration failed for ${!table} for $entry." | $TEE -a $logfile
+                  fi
+	
+                  count=`expr $count + 1`
+	
+                  #Cleanup steps
+                  $RM -f ${backup_dir}/query1.sql 
+	
+                done
+				
+				count=0
+		      fi
+			done < $backup_dir/G1_FDNs.txt
+	      fi
+        fi
+      fi
+
+      #Cleanup steps
+      $RM -f ${backup_dir}/G1_FDNs.txt ${backup_dir}/getG1FDNs.sql
+	done < $node_list
+	
+  else 
+    $ECHO "Older Node configurations will not be restored." | $TEE -a $logfile
+  fi
+  
+else 
+  $ECHO "Invalid input provided. Exiting..." | $TEE -a $logfile
+  exit 3
+fi
+
+

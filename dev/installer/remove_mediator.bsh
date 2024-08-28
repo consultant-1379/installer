@@ -1,0 +1,233 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+#
+# (c) Ericsson Radio Systems AB 2013 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used 
+# and/or copied only with the written permission from Ericsson Radio 
+# Systems AB or in accordance with the terms and conditions stipulated 
+# in the agreement/contract under which the program(s) have been 
+# supplied.
+#
+# ********************************************************************
+# Name    : remove_mediator.bsh
+# Revision: main/at_eniq/1
+# Purpose : This script will remove mediator from ENIQ Stats 
+#
+# Usage   : remove_mediator.bsh -l <LOGFILE>
+#
+# ********************************************************************
+
+# ********************************************************************
+#
+#       Configuration Section
+#
+# ********************************************************************
+VER_DB_PROPERTIES=versiondb.properties
+if [ ! "${ENIQ_BASE_DIR}" ]; then
+    ENIQ_BASE_DIR=/eniq
+fi
+ENIQ_SW_INSTALLER_DIR=${ENIQ_BASE_DIR}/sw/installer
+ENIQ_ADMIN_DIR=${ENIQ_BASE_DIR}/admin
+ENIQ_ADMIN_BIN_DIR=${ENIQ_ADMIN_DIR}/bin
+ENIQ_SW_DIR=${ENIQ_BASE_DIR}/sw
+ENIQ_SW_BIN_DIR=${ENIQ_SW_DIR}/bin
+ENIQ_SW_PF_DIR=${ENIQ_SW_DIR}/platform
+CLI_CONF_DIR=${ENIQ_SW_DIR}/conf
+ENIQ_CONF_DIR=${ENIQ_BASE_DIR}/installation/config
+ENIQ_MEDIATOR_DIR=${ENIQ_BASE_DIR}/mediator
+ENIQ_LOG_DIR=${ENIQ_BASE_DIR}/log
+
+# Source the common functions
+if [ -s ${ENIQ_ADMIN_DIR}/lib/common_functions.lib ]; then
+	. ${ENIQ_ADMIN_DIR}/lib/common_functions.lib
+else
+	_err_msg_="File ${ENIQ_ADMIN_DIR}/lib/common_functions.lib not found"
+	abort_script "${_err_msg_}"
+fi
+
+# Source the common variables for RHEL
+if [ -z "${CLI_CONF_DIR}" ] ; then
+  echo "ERROR: CLI_CONF_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${CLI_CONF_DIR}/niq.rc" ] ; then
+  echo "ERROR: Source file is not readable at ${CLI_CONF_DIR}/niq.rc"
+  exit 2
+fi
+
+. ${CLI_CONF_DIR}/niq.rc
+
+if [ -z "${BIN_DIR}" ] ; then
+  echo "ERROR: BIN_DIR is not set"
+  exit 1
+fi
+
+if [ ! -r "${BIN_DIR}/common_variables.lib" ] ; then
+  echo "ERROR: Source file is not readable at ${BIN_DIR}/common_variables.lib"
+  exit 2
+fi
+
+. ${BIN_DIR}/common_variables.lib
+
+
+# ********************************************************************
+#
+# 	Functions
+#
+# ********************************************************************
+### Function: abort_script ###
+#
+#   This will is called if the script is aborted thru an error
+#   signal sent by the kernel such as CTRL-C or if a serious
+#   error is encountered during runtime
+#
+# Arguments:
+#       $1 - Error message from part of program
+# Return Values:
+#       none
+abort_script()
+{
+_err_time_=`$DATE '+%Y-%b-%d_%H.%M.%S'`
+
+if [ "$1" ]; then
+    _err_msg_="${_err_time_} - ERROR : $1" | $TEE -a ${LOGFILE}
+else
+    _err_msg_="${_err_time_} - ERROR : Script aborted.......\n" | $TEE -a ${LOGFILE}
+fi
+
+# Clean up
+if [ -d ${TEM_DIR} ]; then
+	$RM -rf ${TEM_DIR} >> /dev/null 2>&1
+fi
+
+exit 1
+}
+
+# ********************************************************************
+#
+#   Main body of program
+#
+# ********************************************************************
+#
+# ENIQ Log Directory
+LOGFILE_DIR="${ENIQ_LOG_DIR}/upgrade"
+
+if [ ! "$2" ]; then
+	$ECHO "Using log file : ${LOGFILE_DIR}/remove_mediator.log"
+	LOGFILE=${LOGFILE_DIR}/remove_mediator.log
+else
+	$ECHO "Using log file : $2"
+	LOGFILE="$2"
+fi	
+	
+# Create a temporary Directory
+TEM_DIR=/tmp/mediator.$$
+$RM -rf ${TEM_DIR} 
+$MKDIR -p -m 777 ${TEM_DIR}
+E=${?}
+if [ "${E}" -ne "0" ] ; then
+	$ECHO "Could not create directory ${TEM_DIR}" | $TEE -a ${LOGFILE} 
+	exit ${E}
+fi
+
+# Remove mediator scripts from /eniq/admin/bin
+if [ -f ${ENIQ_ADMIN_BIN_DIR}/mediator ]; then
+	$ECHO "Removing mediator script from ${ENIQ_ADMIN_BIN_DIR}" | $TEE -a ${LOGFILE} 
+	$RM -f ${ENIQ_ADMIN_BIN_DIR}/mediator  >> /dev/null 2>&1
+fi
+
+# Remove mediator scripts from /eniq/sw/bin
+if [ -f ${ENIQ_SW_BIN_DIR}/mediator ]; then
+	$ECHO "Removing mediator script from ${ENIQ_SW_BIN_DIR}" | $TEE -a ${LOGFILE} 
+	$RM -f ${ENIQ_SW_BIN_DIR}/mediator  >> /dev/null 2>&1
+fi
+
+# Remove mediator package from /eniq/sw/platform
+if [ -d ${ENIQ_SW_PF_DIR}/mediator-R*/ ]; then
+	$ECHO "Removing mediator package from ${ENIQ_SW_PF_DIR}" | $TEE -a ${LOGFILE} 
+	$RM -rf ${ENIQ_SW_PF_DIR}/mediator-R*/ 
+	if [ $? -ne 0 ]; then
+		$ECHO "Removing failed. Checking or removing hidden files, if any." | $TEE -a ${LOGFILE} 
+		$BASH ${ENIQ_SW_BIN_DIR}/remove_hidden_files.bsh "${ENIQ_SW_PF_DIR}/mediator-R*/"
+		$SLEEP 30
+		$RM -rf ${ENIQ_SW_PF_DIR}/mediator-R*/
+		if [ -d ${ENIQ_SW_PF_DIR}/mediator-R*/ ]; then
+			_err_msg_="Failed to remove mediator platform directory. Exiting..." | $TEE -a ${LOGFILE}
+			abort_script "${_err_msg_}"
+		fi	
+	fi
+fi
+
+# Update versiondb.properties file
+if [ -f ${ENIQ_SW_INSTALLER_DIR}/${VER_DB_PROPERTIES} ]; then
+	$ECHO "Updating ${VER_DB_PROPERTIES} file"  | $TEE -a ${LOGFILE} 
+	$CAT ${ENIQ_SW_INSTALLER_DIR}/${VER_DB_PROPERTIES} | $GREP -v mediator >> ${TEM_DIR}/ver.txt
+	$RM -f ${ENIQ_SW_INSTALLER_DIR}/${VER_DB_PROPERTIES}
+	if [ -f ${TEM_DIR}/ver.txt ]; then
+		$CP ${TEM_DIR}/ver.txt ${ENIQ_SW_INSTALLER_DIR}/${VER_DB_PROPERTIES} >> /dev/null 2>&1
+		$CHOWN dcuser:dc5000 ${ENIQ_SW_INSTALLER_DIR}/${VER_DB_PROPERTIES} >> /dev/null 2>&1
+	fi
+	$RM -f ${TEM_DIR}/ver.txt >> /dev/null 2>&1
+fi
+
+# Updating /eniq/sw/conf/service_names file
+if [ -f ${CLI_CONF_DIR}/service_names ]; then
+	$ECHO "Updating ${CLI_CONF_DIR}/service_names file" | $TEE -a ${LOGFILE} 
+	$CAT ${CLI_CONF_DIR}/service_names | $GREP -v mediator > ${TEM_DIR}/ser_name.txt
+	if [ -f ${TEM_DIR}/ser_name.txt ]; then
+		$RM -f ${CLI_CONF_DIR}/service_names > /dev/null 2>&1
+		E=${?}
+		if [ "${E}" -ne "0" ] ; then
+			$ECHO "Could not delete ${CLI_CONF_DIR}/service_names file" | $TEE -a ${LOGFILE} 
+			exit ${E}
+		fi
+		$CP ${TEM_DIR}/ser_name.txt ${CLI_CONF_DIR}/service_names >> /dev/null 2>&1
+		$CHOWN dcuser:dc5000 ${CLI_CONF_DIR}/service_names >> /dev/null 2>&1
+	fi
+	$RM -f ${TEM_DIR}/ser_name.txt >> /dev/null 2>&1
+fi
+
+$ECHO "Restarting hostsync service" | $TEE -a ${LOGFILE} 
+# Restart hostsync to udpate /etc/hosts file
+${SYSTEMCTL} stop hostsync.service >> /dev/null 2>&1
+E=${?}
+if [ "${E}" -ne "0" ] ; then
+	$ECHO "Could not stop hostsync service" | $TEE -a ${LOGFILE} 
+fi
+
+sleep 10
+
+${SYSTEMCTL} start hostsync.service >> /dev/null 2>&1
+E=${?}
+if [ "${E}" -ne "0" ] ; then
+	$ECHO "Could not start hostsync service" | $TEE -a ${LOGFILE} 
+fi
+
+# Remove mediator logs from /eniq/log/sw_log/
+if [ -d ${ENIQ_LOG_DIR}/sw_log/mediator/ ]; then
+	$ECHO "Removing mediator logs from ${ENIQ_LOG_DIR}" | $TEE -a ${LOGFILE} 
+	$RM -rf ${ENIQ_LOG_DIR}/sw_log/mediator  
+fi
+
+# Removing Mediator
+if [ -d ${ENIQ_MEDIATOR_DIR} ]; then
+	$ECHO "Removing mediator directory" | $TEE -a ${LOGFILE}
+	$RM -rf ${ENIQ_MEDIATOR_DIR} >> /dev/null 2>&1
+	if [ $? -ne 0 ]; then
+		_err_msg_="Failed to remove mediator." | $TEE -a ${LOGFILE}
+		abort_script "${_err_msg_}"
+	fi
+fi	
+
+# Clean up
+if [ -d ${TEM_DIR} ]; then
+	$RM -rf ${TEM_DIR} >> /dev/null 2>&1
+fi
+
+exit 0

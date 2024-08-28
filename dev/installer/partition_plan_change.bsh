@@ -1,0 +1,688 @@
+#!/bin/bash
+# ********************************************************************
+# Ericsson Radio Systems AB                                     SCRIPT
+# ********************************************************************
+#
+# (c) Ericsson Radio Systems AB 2018 - All rights reserved.
+#
+# The copyright to the computer program(s) herein is the property
+# of Ericsson Radio Systems AB, Sweden. The programs may be used
+# and/or copied only with the written permission from Ericsson Radio
+# Systems AB or in accordance with the terms and conditions stipulated
+# in the agreement/contract under which the program(s) have been
+# supplied.
+#
+#
+# ********************************************************************
+# Name    : partition_plan_change.bsh
+# Purpose : Script to change partition plan to default or limited as part of Hardware Agnostic
+# Usage   : bash partition_plan_change.bsh <partition_plan>
+# Parameters:
+# partition_plan : default_plan/limited_plan
+# Date    : 15/07/2020(dummy date) Last modified 10/05/2023
+#
+# ********************************************************************
+#
+# Command Section
+#
+# ********************************************************************
+
+CAT=/usr/bin/cat
+CP=/usr/bin/cp
+DATE=/usr/bin/date
+ECHO=/usr/bin/echo
+EGREP=/usr/bin/egrep
+GREP=/usr/bin/grep
+LS=/usr/bin/ls
+MKDIR=/usr/bin/mkdir
+MORE=/usr/bin/more
+AWK=/usr/bin/awk
+RM=/usr/bin/rm
+SED=/usr/bin/sed
+TR=/usr/bin/tr
+TEE=/usr/bin/tee
+TOUCH=/usr/bin/touch
+WC=/usr/bin/wc
+
+# ********************************************************************
+#
+# Configuration 
+#
+# ********************************************************************
+INSTALLER_DIR=/eniq/sw/installer
+CONF_DIR=/eniq/sw/conf
+ENIQ_BACKUP_DIR=/eniq/backup
+
+CounterVolumeExpansion=$ENIQ_BACKUP_DIR/CounterVolumeExpansion
+if [[ ! -d "$CounterVolumeExpansion" ]];then
+	$MKDIR -p $CounterVolumeExpansion
+fi
+
+LOG_FILE=${CounterVolumeExpansion}/changePartitionPlan_`$DATE '+%Y%m%d_%H%M%S'`.log
+. ${CONF_DIR}/niq.rc
+
+if [ -s /eniq/admin/lib/common_functions.lib ]; then
+    . /eniq/admin/lib/common_functions.lib
+else
+	$ECHO "Could not find /eniq/admin/lib/common_functions.lib"
+	exit 6
+fi
+
+########################################################################
+# Function: remove_connection_string
+# Removes/Deletes connection string once the script terminates
+#
+# Arguments: None
+#
+# Return Values: None
+remove_connection_string()
+{
+if [ -f $connection_string_dwhrep ]; then
+  $RM -f $connection_string_dwhrep
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string_dwhrep"
+  fi
+fi
+
+if [ -f $connection_string_etlrep ]; then
+  $RM -f $connection_string_etlrep
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string_etlrep"
+  fi
+fi
+
+if [ -f $connection_string_dc ]; then
+  $RM -f $connection_string_dc
+  if [ $? != 0 ]; then
+    $ECHO "Unable to delete $connection_string_dc"
+  fi
+fi
+}
+trap remove_connection_string EXIT
+
+# Database configuration 
+ETLREPUser=`inigetpassword REP -v ETLREPUsername -f ${CONF_DIR}/niq.ini`
+ETLREPPASSWORD=`inigetpassword REP -v ETLREPPassword -f ${CONF_DIR}/niq.ini`
+DWHREPUSER=`inigetpassword REP -v DWHREPUsername -f ${CONF_DIR}/niq.ini`
+DWHREPPASSWORD=`inigetpassword REP -v DWHREPPassword -f ${CONF_DIR}/niq.ini`
+REP_PORT=`inigetpassword REP -v PortNumber -f ${CONF_DIR}/niq.ini`
+REP_SERVER_NAME=`inigetpassword REP -v ServerName -f ${CONF_DIR}/niq.ini`
+DWH_SERVER_NAME=`inigetpassword DWH -v ServerName -f ${CONF_DIR}/niq.ini`
+DWH_PORT=`inigetpassword DWH -v PortNumber -f ${CONF_DIR}/niq.ini`
+DCPASSWORD=`inigetpassword DWH -v DCPassword -f ${CONF_DIR}/niq.ini`
+
+connection_string_dwhrep=/var/tmp/encrypt_$$.txt
+connection_string_etlrep=/var/tmp/encrypt2_$$.txt
+connection_string_dc=/var/tmp/encrypt3_$$.txt
+connection_string_decrypt_dwhrep="-c \"uid=${DWHREPUSER};pwd=${DWHREPPASSWORD};eng=${REP_SERVER_NAME}\" -host localhost -port $REP_PORT -nogui -onerror exit"
+connection_string_decrypt_etlrep="-c \"uid=${ETLREPUser};pwd=${ETLREPPASSWORD};eng=${REP_SERVER_NAME}\" -host localhost -port $REP_PORT -nogui -onerror exit"
+connection_string_decrypt_dc="-c \"uid=dc;pwd=${DCPASSWORD};eng=${DWH_SERVER_NAME}\" -host localhost -port $DWH_PORT -nogui -onerror exit"
+get_encrypt_file "${connection_string_decrypt_dwhrep}" "${connection_string_dwhrep}"
+get_encrypt_file "${connection_string_decrypt_etlrep}" "${connection_string_etlrep}"
+get_encrypt_file "${connection_string_decrypt_dc}" "${connection_string_dc}"
+. /eniq/sybase_iq/IQ-*/IQ-*.sh
+ 
+sybase_env_variables_ec=$?
+if [ $sybase_env_variables_ec -ne 0 ]; then
+     $ECHO "Unable to find sybase env variables"
+fi
+
+DBISQL=$(which dbisql)
+
+
+
+#Failed flag
+FAILED_FLAG=0
+
+#Feature count
+FEATURE_COUNT=0
+
+# ********************************************************************
+#
+# Method Section
+#
+# ********************************************************************
+checkUser() {
+if [ `id -un` != "dcuser"  ] ; then
+	$ECHO "\nThis script must be executed as dcuser\n"
+	exit 1
+fi
+}
+
+EchoText() {
+   $ECHO $*
+   $ECHO `$DATE '+%Y-%m-%d %H:%M:%S': ` $* >> ${LOG_FILE}
+}
+
+abort_script() {
+	#Set failed flag.
+	FAILED_FLAG=1
+	# Remove already in progress flag
+	if [ -f ${CounterVolumeExpansion}/executionInProgress ]; then
+		$RM ${CounterVolumeExpansion}/executionInProgress 
+	fi
+	if [ "$1" ]; then
+		_err_msg_=$1
+	else
+		_err_msg_="Script aborted.......\n"
+	fi
+	
+	if [ "${LOG_FILE}" ]; then
+		EchoText "\n$_err_msg_\n" 
+		cleanup
+		exit 8
+	else
+		$ECHO "\n$_err_msg_\n"
+		cleanup
+		exit 8
+	fi
+}
+
+usage_msg() {
+	$ECHO "bash partition_plan_change.bsh <partition_plan>"
+	$ECHO "Parameters:"
+	$ECHO "partition_plan : default_plan/limited_plan"
+}
+
+cleanup() {
+	EchoText "Cleaning up files before exit..." 
+	
+	# Unlock dcbo and dcpublic users
+	$ECHO "Unlocking dcbo and dcpublic users..." | tee -a ${LOG_FILE}
+	${INSTALLER_DIR}/change_db_users_perm.bsh -a unlock -u ALL -l ${LOG_FILE} 2>&1
+	if [ $? -ne 0 ] ; then
+		$ECHO "Failed to unlock database users.." | tee -a ${LOG_FILE}
+		exit 99
+	fi
+	
+	if [ -f $CounterVolumeExpansion/finalListOfTp.txt ]; then
+		$RM $CounterVolumeExpansion/finalListOfTp.txt
+	fi
+	
+	# Remove already in progress flag
+	if [ -f ${CounterVolumeExpansion}/executionInProgress ]; then
+		$RM ${CounterVolumeExpansion}/executionInProgress 
+	fi
+
+	if [ $FAILED_FLAG -eq 0 ]; then
+		EchoText "\n~~~~~~~~~~Migration has been completed successfully.~~~~~~~~~~\n"
+
+		if [ -f $CounterVolumeExpansion/listOfTp.txt ]; then
+			$RM ${CounterVolumeExpansion}/listOfTp.txt
+		fi		
+		if [ -f ${CounterVolumeExpansion}/features_installed ]; then
+			$RM ${CounterVolumeExpansion}/features_installed
+		fi		
+		if [ -f ${CounterVolumeExpansion}/feature_list ]; then
+			$RM ${CounterVolumeExpansion}/feature_list
+		fi		
+		if [ -f ${CounterVolumeExpansion}/alreadyExecutedTPList.txt ]; then
+			$RM ${CounterVolumeExpansion}/alreadyExecutedTPList.txt
+		fi		
+		if [ -f ${CounterVolumeExpansion}/lockFile_migration ]; then
+			$RM ${CounterVolumeExpansion}/lockFile_migration
+		fi
+
+	else 
+		EchoText "\nThere are failed migration. Please check log at $LOG_FILE \n"
+	fi
+
+	####--------delete temp table--------######
+	${DBISQL} @${connection_string_dwhrep} "drop table if exists PartitionPlan_temp" >/dev/null
+	
+	if [[ $erbscombinedview_flag -eq 1 ]];then
+		EchoText "Please check the erbscombinedview logs. Request you to re-run the erbscombinedview.bsh script manually in case of any failure."
+	fi
+	
+	if [[ $wcdmacombinedview_flag -eq 1 ]];then
+		EchoText "Please check the WCDMAcombinedview logs. Request you to re-run the WCDMACombinedViewCreation.bsh script manually in case of any failure."
+	fi
+	
+	if [[ "$_error_lte_" != "" ]];then
+		EchoText "WARNING : $_error_lte_"
+	fi
+	
+	if [[ "$_error_wcdma_" != "" ]];then
+		EchoText "WARNING : $_error_wcdma_"
+	fi
+
+	#Restart dwhdb to eject catalogue cache at end. 
+	
+	restartDwhDB
+}
+
+restore() {
+	######--------truncate PartitionPlan table--------######
+	${DBISQL} @${connection_string_dwhrep} "truncate table PartitionPlan" >/dev/null
+	
+	######--------restore PartitionPlan table--------######
+	${DBISQL} @${connection_string_dwhrep} "LOAD TABLE dwhrep.PartitionPlan(PARTITIONPLAN,DEFAULTSTORAGETIME,DEFAULTPARTITIONSIZE,MAXSTORAGETIME,PARTITIONTYPE) from '${CounterVolumeExpansion}/PartitionPlan_backup.txt'" >/dev/null
+	
+	######--------truncate TypeActivation table--------######
+	${DBISQL} @${connection_string_dwhrep} "truncate table TypeActivation" >/dev/null
+	
+	######--------restore TypeActivation table--------######
+	${DBISQL} @${connection_string_dwhrep} "LOAD TABLE dwhrep.TypeActivation(TECHPACK_NAME,STATUS,TYPENAME,TABLELEVEL,STORAGETIME,TYPE,PARTITIONPLAN) from '${CounterVolumeExpansion}/TypeActivation_backup.txt'" >/dev/null
+	exit 0;
+}
+
+checkDeployment() {
+######--------check for deployment type and counter volume supported--------######
+if [[ -s /eniq/installation/config/extra_params/deployment && -s /eniq/installation/config/lun_map.ini ]];then
+	deployment=`$CAT /eniq/installation/config/extra_params/deployment`
+	mainDBs=`$CAT /eniq/installation/config/lun_map.ini | $GREP -i MainDB | $WC -l`
+
+	EchoText "Deployment : $deployment		MainDB : $mainDBs"
+else 
+	abort_script "could not find deployment file"
+fi
+
+if [[ "$deployment" != "large" || $mainDBs -lt 21 ]];then
+	EchoText "This script should be used only for large deployment. EXITING...."
+	exit 2;
+fi
+}
+
+backupToFile() {
+	table_name=$1
+	
+	if [[ -s "${CounterVolumeExpansion}/${table_name}_backup.txt" ]];then
+		EchoText "backup file already exists...NOT taking backup again"
+	else
+		EchoText "Taking backup of ${table_name} into ${CounterVolumeExpansion}/${table_name}_backup.txt file"
+		${DBISQL} @${connection_string_dwhrep} "select * from ${table_name};output to ${CounterVolumeExpansion}/${table_name}_backup.txt" > /dev/null
+	fi	
+}
+
+backupToTable() {
+	table_name=$1
+	EchoText "Taking backup of ${table_name} into ${table_name}_backup table if NOT already available"
+	${DBISQL} @${connection_string_dwhrep} "IF NOT EXISTS (SELECT 1 FROM sysobjects WHERE  name = '${table_name}_backup')
+	select * INTO ${table_name}_backup from ${table_name}" > /dev/null
+}
+
+execute_StorageTimeUpdate() {
+eachTechpack=$1
+
+#Check if this TP is already executed
+if [ -f ${CounterVolumeExpansion}/alreadyExecutedTPList.txt ]; then 
+	$GREP "$eachTechpack-Executed" ${CounterVolumeExpansion}/alreadyExecutedTPList.txt > /dev/null 2>&1
+	if [ $? -eq 0 ]; then
+		EchoText "TP $eachTechpack is already executed. Skipping to next one. \n"
+		return
+	fi
+fi
+
+EchoText "Starting to migrate $eachTechpack. \n"
+
+#Remove all views of that TP
+EchoText "Removing all view of $eachTechpack. After migration, views will be created. \n"
+${DBISQL} @${connection_string_dwhrep} "select distinct(p.storageid) from dwhrep.DWHPartition p, dwhrep.DWHType t, dwhrep.TPActivation a where t.STORAGEID = p.STORAGEID and t.TECHPACK_NAME = a.TECHPACK_NAME and t.TABLELEVEL <> 'PLAIN' and a.STATUS = 'ACTIVE' and a.TECHPACK_NAME = '$eachTechpack';output to ${CounterVolumeExpansion}/viewList.txt" > /dev/null 2>&1
+	
+if [ -s ${CounterVolumeExpansion}/viewList.txt ]; then 
+	$CAT ${CounterVolumeExpansion}/viewList.txt | $SED "s/\'//g" | $SED "s/:/_/g" > ${CounterVolumeExpansion}/OverallViewList.txt
+	
+	if [ $eachTechpack == "DC_E_ERBSG2" ]; then 
+		EchoText "Processing ERBSG2, hence removing combined view of ERBS. "
+		$CAT ${CounterVolumeExpansion}/OverallViewList.txt | $SED "s/G2_/_/g" >> ${CounterVolumeExpansion}/OverallViewList.txt
+	fi
+	
+	if [ $eachTechpack == "DC_E_RBSG2" ]; then 
+		EchoText "Processing RBSG2, hence removing combined view of RBS. "
+		${DBISQL} @${connection_string_dwhrep} "select distinct(p.storageid) from dwhrep.DWHPartition p, dwhrep.DWHType t, dwhrep.TPActivation a where t.STORAGEID = p.STORAGEID and t.TECHPACK_NAME = a.TECHPACK_NAME and t.TABLELEVEL <> 'PLAIN' and a.STATUS = 'ACTIVE' and a.TECHPACK_NAME = 'DC_E_RBS';output to ${CounterVolumeExpansion}/viewList.txt" > /dev/null 2>&1
+		$CAT ${CounterVolumeExpansion}/viewList.txt | $SED "s/\'//g" | $SED "s/:/_/g" >> ${CounterVolumeExpansion}/OverallViewList.txt
+	fi
+	
+	EchoText "Starting to parse and drop views "
+	AllViewList=""	
+	while read viewLine ; do
+		AllViewList="$AllViewList$viewLine,"
+	done < ${CounterVolumeExpansion}/OverallViewList.txt
+	AllViewList="${AllViewList::-1}"
+	
+	${DBISQL} @${connection_string_dc} "call dba.forceDropViewList('$AllViewList');"
+	if [ $? -ne 0 ];then
+		abort_script "WARNING :: Unable to drop view. Exiting"
+	else
+		EchoText "All views have been successfully dropped. "
+		$RM ${CounterVolumeExpansion}/viewList.txt
+		$RM ${CounterVolumeExpansion}/OverallViewList.txt
+	fi
+else
+	EchoText "There is no content in file to drop view. Continue without view drop. "
+fi
+	
+EchoText "Running DWHM_StorageTimeUpdate for $eachTechpack "
+${BIN_DIR}/engine -e startAndWaitSet $eachTechpack DWHM_StorageTimeUpdate_$eachTechpack
+if [ $? -ne 0 ]; then
+	FAILED_FLAG=1
+	abort_script "WARNING :: Execution not successful. \nExiting..."
+else
+	EchoText "Execution is successful. \n"
+	
+	#Create a file to identify it is already executed. 
+	echo "$eachTechpack-Executed" >> ${CounterVolumeExpansion}/alreadyExecutedTPList.txt
+fi
+
+}
+
+adjustFeatureList() {
+
+# Execute Combined view for LTE, if required.
+if [ "$1" = "CXC4010777" ];then
+	EchoText "\nExecuting erbs combined view script"
+	bash ${INSTALLER_DIR}/erbscombinedview.bsh > /dev/null
+	if [[ $? -ne 0 ]];then
+		erbscombinedview_flag=1
+		_error_lte_="erbscombinedview script was not successfully run. \nPlease run it manually to create combined views for ERBS and ERBSG2.
+					\nYou can use the command below to run combined view script.
+					\n{dcuser} # bash ${INSTALLER_DIR}/erbscombinedview.bsh"
+	else
+		EchoText "Combined views created successfully for ERBS and ERBSG2 \n"
+	fi
+fi
+
+# Execute Combined view for WCDMA, if required.
+if [ "$1" = "CXC4010586" ];then
+	EchoText "\nExecuting WCDMA combined view script"
+	bash ${INSTALLER_DIR}/WCDMACombinedViewCreation.bsh > /dev/null
+	if [[ $? -ne 0 ]];then
+		wcdmacombinedview_flag=1
+		_error_wcdma_="WCDMACombinedViewCreation script was not successfully run. \nPlease run it manually to create combined views for RBS and RBSG2.
+						  \nYou can use the command below to run combined view script.
+						  \n{dcuser} # bash ${INSTALLER_DIR}/WCDMACombinedViewCreation.bsh"
+	else
+		EchoText "Combined views created successfully for RBS and RBSG2 \n"
+	fi
+fi
+
+$CAT ${CounterVolumeExpansion}/feature_list | $GREP -v $1 > ${CounterVolumeExpansion}/tempFeatures
+$CAT ${CounterVolumeExpansion}/tempFeatures > ${CounterVolumeExpansion}/feature_list
+$RM ${CounterVolumeExpansion}/tempFeatures
+
+#Increase Feature count
+let FEATURE_COUNT++
+
+if [ ${FEATURE_COUNT} -gt 10 ]; then
+	EchoText "Migrated 10 features, restarting DWHDB service. "
+
+	restartDwhDB
+	FEATURE_COUNT=0
+fi
+}
+
+restartDwhDB() {
+	EchoText "\nRestarting dwhdb service.... \n"
+	dwhdb restart
+	if [ $? -ne 0 ]; then
+		EchoText "DWHDB restart failed. Please check the log. Exiting... "
+		# Remove already in progress flag
+		if [ -f ${CounterVolumeExpansion}/executionInProgress ]; then
+			$RM ${CounterVolumeExpansion}/executionInProgress 
+		fi
+		exit 7
+	fi
+}
+
+continueFromLastExecution() {
+
+# Lock the dcbo and dcpublic user's from the dwh database during the partition change.
+${INSTALLER_DIR}/change_db_users_perm.bsh -a lock -u ALL -l ${LOG_FILE}
+
+if [ -f ${CounterVolumeExpansion}/feature_list ]; then
+	EchoText "There is an incomplete feature list file. Continue from last run... "
+	$CAT ${CounterVolumeExpansion}/feature_list > ${CounterVolumeExpansion}/features_installed
+fi
+
+if [ ! -f ${CounterVolumeExpansion}/features_installed ]; then
+    $CP /eniq/admin/managed_oss/total_feature_install_list ${CounterVolumeExpansion}/features_installed 
+	$CP /eniq/admin/managed_oss/total_feature_install_list ${CounterVolumeExpansion}/feature_list
+fi
+
+while read eachFeature; do
+	if [ -z "$eachFeature" ] ; then
+		continue
+	fi
+	
+	cxcNum=`$ECHO $eachFeature | $AWK -F"::" '{print $1}'`
+	featureName=`$ECHO $eachFeature | $AWK -F"::" '{print $2}'`
+	EchoText "----------------------------------------------------------------------"
+	EchoText "Starting to migrate feature : $cxcNum : $featureName "
+	EchoText "---------------------------------------------------------------------- \n"
+	
+	if [ -f $CounterVolumeExpansion/${cxcNum}.txt ]; then
+		$CAT $CounterVolumeExpansion/${cxcNum}.txt > $CounterVolumeExpansion/finalListOfTp.txt
+		
+		#Run StorageTimeUpdate
+		while read eachTechpack ; do
+			execute_StorageTimeUpdate $eachTechpack
+			if [ $FAILED_FLAG -eq 0 ]; then
+				$CAT $CounterVolumeExpansion/${cxcNum}.txt | $GREP -wv $eachTechpack > $CounterVolumeExpansion/tempFile
+				$CAT $CounterVolumeExpansion/tempFile > $CounterVolumeExpansion/${cxcNum}.txt
+				$RM $CounterVolumeExpansion/tempFile
+				if [ ! -s $CounterVolumeExpansion/${cxcNum}.txt ]; then
+					$RM $CounterVolumeExpansion/${cxcNum}.txt
+				fi
+			fi
+		done < $CounterVolumeExpansion/finalListOfTp.txt
+
+		if [ $FAILED_FLAG -eq 1 ]; then
+			EchoText "All sets are not executed...Please run the script again to resume execution of failed sets"
+			break
+		else 
+			adjustFeatureList ${cxcNum}
+		fi
+		continue
+	fi
+
+	#Get all interface associated with this feature.
+	intfName=`$GREP $cxcNum ${CONF_DIR}/feature_techpacks | egrep -v 'INTF_DC_E_RADIONODE_COMMON|INTF_DC_E_RADIONODE_MIXED|INTF_DC_E_PICO_COMMON|INTF_DC_E_PICO_MIXED'| $AWK -F"::" '{print $2}'`
+	if [ -z "$intfName" ]; then
+		EchoText "There is no interface associated with this feature. Skipping it."
+		adjustFeatureList ${cxcNum}
+		continue
+	fi
+
+	EchoText "List of Interface associated with this feature: "
+	EchoText $intfName
+	echo ""
+
+	list4In=`$ECHO $intfName | $SED "s/ /','/g"`
+
+	if [ -f $CounterVolumeExpansion/listOfTp.txt ]; then
+			$RM $CounterVolumeExpansion/listOfTp.txt
+			$TOUCH $CounterVolumeExpansion/listOfTp.txt
+	fi
+
+	#Get all techpack associated with this feature.
+	${DBISQL} @${connection_string_dwhrep} "select Distinct TECHPACKNAME from dwhrep.InterfaceTechpacks WHERE INTERFACENAME in ('$list4In');OUTPUT TO $CounterVolumeExpansion/listOfTp.txt APPEND HEXADECIMAL ASIS FORMAT TEXT ;" > /dev/null 2>&1
+
+	$CAT $CounterVolumeExpansion/listOfTp.txt | $EGREP -v 'DIM_|_BASE' | $SED "s/\'//g" > $CounterVolumeExpansion/finalListOfTp.txt
+	if [ -s $CounterVolumeExpansion/finalListOfTp.txt ]; then
+		EchoText "List of techpack associated with this feature: "
+		$CAT $CounterVolumeExpansion/finalListOfTp.txt | tee -a ${LOG_FILE}
+		echo ""
+	else
+		EchoText "No techpack associated with this feature. Skipping... "
+		adjustFeatureList ${cxcNum}
+		continue
+	fi
+	
+	
+	#Take back of finalListOfTp
+	$CAT $CounterVolumeExpansion/finalListOfTp.txt > $CounterVolumeExpansion/${cxcNum}.txt
+	
+	#Run StorageTimeUpdate
+	while read eachTechpack ; do
+		execute_StorageTimeUpdate $eachTechpack
+		if [ $FAILED_FLAG -eq 0 ]; then
+			$CAT $CounterVolumeExpansion/${cxcNum}.txt | $GREP -wv $eachTechpack > $CounterVolumeExpansion/tempFile
+			$CAT $CounterVolumeExpansion/tempFile > $CounterVolumeExpansion/${cxcNum}.txt
+			$RM $CounterVolumeExpansion/tempFile
+			if [ ! -s $CounterVolumeExpansion/${cxcNum}.txt ]; then
+				$RM $CounterVolumeExpansion/${cxcNum}.txt
+			fi
+		fi
+	done < $CounterVolumeExpansion/finalListOfTp.txt
+	
+	if [ $FAILED_FLAG -eq 1 ]; then
+		EchoText "All sets are not executed...Please run the script again to resume execution of failed sets"
+		break
+	else 
+		adjustFeatureList ${cxcNum}
+	fi
+		
+done < ${CounterVolumeExpansion}/features_installed
+
+if [ $FAILED_FLAG -eq 1 ]; then
+	abort_script "Set execution failed."
+else
+	#Check for any Custom and missed TP migration
+	${DBISQL} @${connection_string_etlrep} "select COLLECTION_SET_NAME, COLLECTION_NAME from META_COLLECTIONS c, META_COLLECTION_SETS s  where s.COLLECTION_SET_ID=c.COLLECTION_SET_ID and collection_name like '%DWHM_StorageTimeUpdate_DC%' and s.enabled_flag = 'Y' order by COLLECTION_SET_NAME;output to ${CounterVolumeExpansion}/StorageTimeUpdate_sets.txt" >/dev/null
+	if [ -s ${CounterVolumeExpansion}/StorageTimeUpdate_sets.txt ]; then
+		$CAT ${CounterVolumeExpansion}/StorageTimeUpdate_sets.txt | $SED "s/\'//g" > ${CounterVolumeExpansion}/All_StorageTimeUpdate.txt
+		$RM ${CounterVolumeExpansion}/StorageTimeUpdate_sets.txt
+		while read eachCustTP; do
+			customTP=`echo $eachCustTP | awk -F"," '{print $1}'`
+			#Check if this TP is already executed
+			if [ -f ${CounterVolumeExpansion}/alreadyExecutedTPList.txt ]; then 
+				$GREP "$customTP-Executed" ${CounterVolumeExpansion}/alreadyExecutedTPList.txt > /dev/null 2>&1
+				if [ $? -eq 0 ]; then
+					continue
+				fi
+			fi
+			
+			execute_StorageTimeUpdate $customTP
+		done < ${CounterVolumeExpansion}/All_StorageTimeUpdate.txt
+	fi
+fi
+
+}
+
+changePartition() {
+#Flag : already in progress 
+$TOUCH ${CounterVolumeExpansion}/executionInProgress 
+
+#Restart dwhdb to eject catalogue cache at start
+restartDwhDB
+
+# Check if script has already executed
+if [[ -f ${CounterVolumeExpansion}/lockFile_migration ]]; then
+	EchoText "Continue from last execution. "
+	continueFromLastExecution
+else 
+	EchoText "Starting new execution... " 
+	$TOUCH ${CounterVolumeExpansion}/lockFile_migration
+
+	######--------partition plan to be imported(default or limited)--------######
+	PartitionPlan=${1}
+	EchoText "Partition Plan : $PartitionPlan" 
+
+	######--------create temp table for default/limited PartitionPlan--------######
+	${DBISQL} @${connection_string_dwhrep} "IF NOT EXISTS (SELECT 1 FROM sysobjects WHERE  name = 'PartitionPlan_temp')
+	select * INTO PartitionPlan_temp from PartitionPlan where 1=2
+	else
+	truncate table PartitionPlan_temp" >/dev/null
+	if [[ $? -ne 0 ]];then
+		$RM ${CounterVolumeExpansion}/lockFile_migration
+		abort_script "unable to create temp table"
+	fi
+
+	######--------import partition plan in temp table--------######
+	${DBISQL} @${connection_string_dwhrep} ${INSTALLER_DIR}/$PartitionPlan.sql >/dev/null
+	if [[ $? -ne 0 ]];then
+		$RM ${CounterVolumeExpansion}/lockFile_migration
+		abort_script "unable to load $PartitionPlan to PartitionPlan_temp table"
+	fi
+
+	######--------take backup of PartitionPlan table--------######
+	backupToFile PartitionPlan
+	backupToTable PartitionPlan
+
+	######--------update PartitionPlan table--------######
+	EchoText "updating PartitionPlan table...." 
+	if [[ "$PartitionPlan" == "default_plan" ]];then
+		${DBISQL} @${connection_string_dwhrep} "update PartitionPlan set DEFAULTSTORAGETIME=PartitionPlan_temp.DEFAULTSTORAGETIME from PartitionPlan_temp where PartitionPlan_temp.partitionplan=PartitionPlan.partitionplan and PartitionPlan.PARTITIONTYPE = 0 and PartitionPlan.partitionplan not like '%_plain'" >/dev/null
+		
+	else
+		${DBISQL} @${connection_string_dwhrep} "update PartitionPlan set DEFAULTSTORAGETIME=PartitionPlan_temp.DEFAULTSTORAGETIME from PartitionPlan_temp where PartitionPlan_temp.partitionplan=PartitionPlan.partitionplan and PartitionPlan.PARTITIONTYPE = 0 and PartitionPlan.partitionplan not like '%_plain' and PartitionPlan.DEFAULTSTORAGETIME > PartitionPlan_temp.DEFAULTSTORAGETIME" >/dev/null	
+	fi
+	if [[ $? -ne 0 ]];then
+		$RM ${CounterVolumeExpansion}/lockFile_migration
+		abort_script "unable to update PartitionPlan table"
+	fi
+
+	######--------backup TypeActivation table--------######
+	backupToFile TypeActivation
+	backupToTable TypeActivation
+	######--------update TypeActivation table--------######
+	EchoText "updating TypeActivation table...." 
+	if [[ "$PartitionPlan" == "default_plan" ]];then
+		${DBISQL} @${connection_string_dwhrep} "update TypeActivation set STORAGETIME=-1 from PartitionPlan_temp where PartitionPlan_temp.partitionplan=TypeActivation.partitionplan and TypeActivation.partitionplan not like '%_plain'" >/dev/null
+	else
+		${DBISQL} @${connection_string_dwhrep} "update TypeActivation set STORAGETIME=-1 from PartitionPlan_temp where PartitionPlan_temp.partitionplan=TypeActivation.partitionplan and TypeActivation.partitionplan not like '%_plain' and TypeActivation.STORAGETIME > PartitionPlan_temp.DEFAULTSTORAGETIME" >/dev/null
+	fi
+		
+	if [[ $? -ne 0 ]];then
+		$RM ${CounterVolumeExpansion}/lockFile_migration
+		abort_script "unable to update TypeActivation table"
+	fi
+	continueFromLastExecution
+fi
+}
+
+checkEnvironment() {
+if [ ! -f ${CONF_DIR}/niq.ini ]; then
+	EchoText "WARNING : ${CONF_DIR}/niq.ini file not found. Exiting..." 
+	exit 3
+fi
+
+if [ ! -f ${CONF_DIR}/install_features ]; then
+	EchoText "WARNING : ${CONF_DIR}/install_features file not found. Exiting..." 
+	exit 4
+fi
+
+if [ ! -f /eniq/admin/managed_oss/total_feature_install_list ]; then
+	EchoText "WARNING : /eniq/admin/managed_oss/total_feature_install_list file not found. Exiting..."
+	exit 5
+fi
+if [ -f ${CounterVolumeExpansion}/executionInProgress ]; then
+	EchoText "WARNING : Another migration is already in progress. \n ${CounterVolumeExpansion}/executionInProgress file found. \n Exiting..."
+	exit 9
+fi
+
+#checkRepdb
+repdb status
+if [ $? != 0 ]; then
+	EchoText "WARNING : REPDB service is not online. Check REPDB status. Exiting..." 
+	exit 10
+fi
+}
+
+# ********************************************************************
+#
+# Main Section
+#
+# ********************************************************************
+checkUser
+if [[ $# -ne 1 ]]; then
+	usage_msg
+	exit 1
+fi
+if [[ "$1" == "default_plan" || "$1" == "limited_plan" ]];then
+	partition_plan_arg=${1}
+else
+	$ECHO "Partition plan should be either default_plan or limited_plan."
+	exit 1
+fi
+checkEnvironment
+partition_plan_current=`iniget PARTITION_PLAN -v Partition_Plan -f ${CONF_DIR}/niq.ini`
+
+if [[ "$partition_plan_current" == "$partition_plan_arg" ]];then
+	EchoText "Partition plan is already $partition_plan_arg."
+	exit 0
+fi
+trap abort_script SIGINT 
+changePartition $partition_plan_arg
+cleanup
+exit 0
